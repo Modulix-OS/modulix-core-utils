@@ -37,6 +37,8 @@ pub struct SettingsPosition<'a> {
     /// `Some(path)` indique qu'il reste un chemin à insérer (option non trouvée).
     /// `None` indique que l'option a été complètement trouvée (match exact).
     option_path: Option<&'a str>,
+
+    indent_level: u8,
 }
 
 impl<'a> SettingsPosition<'a> {
@@ -110,6 +112,10 @@ impl<'a> SettingsPosition<'a> {
         self.option_path
     }
 
+    pub fn get_indent_level(&self) -> u8 {
+        self.indent_level
+    }
+
     /// Crée une nouvelle instance en localisant une option dans l'AST Nix.
     ///
     /// Cette fonction parcourt récursivement l'arbre syntaxique pour trouver
@@ -144,7 +150,7 @@ impl<'a> SettingsPosition<'a> {
     /// assert!(pos.get_remaining_path().is_some());
     /// ```
     pub fn new(nix_ast: &rnix::SyntaxNode, settings: &'a str) -> Option<Self> {
-        Self::localise_option(&nix_ast, &settings)
+        Self::localise_option(&nix_ast, &settings, 0u8)
     }
 
 
@@ -168,15 +174,19 @@ impl<'a> SettingsPosition<'a> {
     /// 2. Délègue au gestionnaire approprié
     /// 3. Pour les autres nœuds, parcourt récursivement les enfants
     /// 4. Retourne le premier match trouvé
-    fn localise_option(ast: &rnix::SyntaxNode, settings: &'a str) -> Option<SettingsPosition<'a>> {
+    fn localise_option(
+        ast: &rnix::SyntaxNode,
+        settings: &'a str,
+        indent_level: u8)
+    -> Option<SettingsPosition<'a>> {
         return match ast.kind() {
             rnix::SyntaxKind::NODE_ATTR_SET =>
-                Some(Self::localise_option_node_attr_set(&ast, &settings)),
+                Some(Self::localise_option_node_attr_set(&ast, &settings, indent_level+1u8)),
             rnix::SyntaxKind::NODE_ATTRPATH_VALUE =>
-                Self::localise_option_node_attrpath_value(&ast, &settings),
+                Self::localise_option_node_attrpath_value(&ast, &settings, indent_level),
             _ => {
                 for c in ast.children() {
-                    if let Some(ret) = Self::localise_option(&c, settings) {
+                    if let Some(ret) = Self::localise_option(&c, settings, indent_level) {
                         return Some(ret);
                     }
                 }
@@ -226,12 +236,16 @@ impl<'a> SettingsPosition<'a> {
     /// // Recherche: "network.proxy"
     /// // Résultat: Point d'insertion avant le '}'
     /// ```
-    fn localise_option_node_attr_set(ast: &rnix::SyntaxNode, setting: &'a str) -> SettingsPosition<'a> {
+    fn localise_option_node_attr_set(
+        ast: &rnix::SyntaxNode,
+        settings: &'a str,
+        indent_level: u8)
+    -> SettingsPosition<'a> {
         let mut best_opt_pos: Option<SettingsPosition> = None;
 
         // Parcourir tous les enfants pour trouver des correspondances
         for c in ast.children() {
-            let opt_pos = Self::localise_option(&c, &setting);
+            let opt_pos = Self::localise_option(&c, &settings, indent_level);
             if let Some(pos) = opt_pos {
 
                 // Si match exact trouvé, retourner immédiatement
@@ -258,7 +272,8 @@ impl<'a> SettingsPosition<'a> {
                 // Point d'insertion avant le '}' fermant
                 def_option: rnix::TextRange::at(ast.text_range().end()-TextSize::from(1), TextSize::from(0)),
                 value_option: None,
-                option_path: Some(setting),
+                option_path: Some(settings),
+                indent_level: indent_level,
             },
         }
     }
@@ -321,7 +336,11 @@ impl<'a> SettingsPosition<'a> {
     /// - `NODE_PATH_ABS` : Chemin absolu (`/path`)
     /// - `NODE_PATH_HOME` : Chemin home (`~/path`)
     /// - `NODE_PATH_SEARCH` : Chemin de recherche (`<nixpkgs>`)
-    fn localise_option_node_attrpath_value(ast: &rnix::SyntaxNode, settings: &'a str) -> Option<SettingsPosition<'a>> {
+    fn localise_option_node_attrpath_value(
+        ast: &rnix::SyntaxNode,
+        settings: &'a str,
+        indent_level: u8)
+    -> Option<SettingsPosition<'a>> {
         let mut attr_path_valid: Option<String> = None;
 
         // Étape 1: Trouver le chemin d'attribut qui correspond
@@ -377,7 +396,7 @@ impl<'a> SettingsPosition<'a> {
 
                 // Recherche récursive dans le sous-ensemble
                 return Some(Self::localise_option_node_attr_set(
-                    &c, new_settings));
+                    &c, new_settings, indent_level+1u8));
             } else if c.kind() == rnix::SyntaxKind::NODE_WITH {
                 for children_with in c.children() {
                     match children_with.kind() {
@@ -386,6 +405,7 @@ impl<'a> SettingsPosition<'a> {
                                 def_option: ast.text_range(),
                                 value_option: Some(children_with.text_range()),
                                 option_path: None,
+                                indent_level: indent_level
                             })
                         },
                         _ => return None
@@ -398,6 +418,7 @@ impl<'a> SettingsPosition<'a> {
                     def_option: ast.text_range(),
                     value_option: Some(c.text_range()),
                     option_path: None,
+                    indent_level: indent_level,
                 });
             }
         }
