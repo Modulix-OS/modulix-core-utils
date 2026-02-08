@@ -5,7 +5,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::SettingsPosition;
+    use crate::core::localise_option::SettingsPosition;
     use rnix::{Root, TextSize};
 
     // ============================================================================
