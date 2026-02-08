@@ -25,7 +25,6 @@ pub fn set_option(nix_file_path: &str, nix_option: &str, option_value: &str) -> 
         } else {
             0usize
         };
-        println!("{}", indent);
         file_content.insert_str(
             <TextSize as Into<usize>>::into(pos.get_pos_definition().start()),
             format!("{}{} = {};\n{}",
