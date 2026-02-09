@@ -257,7 +257,7 @@ impl<'a> SettingsPosition<'a> {
                 match &best_opt_pos {
                     None => best_opt_pos = Some(pos),
                     Some(best_pos) =>  {
-                        if pos.option_path.unwrap().len() > best_pos.option_path.unwrap().len() {
+                        if pos.option_path.unwrap().len() < best_pos.option_path.unwrap().len() {
                             best_opt_pos = Some(pos);
                         }
                     }
@@ -408,12 +408,12 @@ impl<'a> SettingsPosition<'a> {
                                 indent_level: indent_level
                             })
                         },
-                        _ => return None
+                        _ => ()
                     }
                 }
+                return None;
             } else {
-                // Cas 2: La valeur est une valeur simple (string, number, bool, path, etc.)
-                // C'est un match exact
+                // Cas 2: On mets comme on peut a la fin du set
                 return Some(SettingsPosition {
                     def_option: ast.text_range(),
                     value_option: Some(c.text_range()),
