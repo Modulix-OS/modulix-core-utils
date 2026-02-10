@@ -1,12 +1,5 @@
-use std::{fs, ops::Range};
-use rnix::TextRange;
+use std::fs;
 use crate::edit_ast::edit_list_ast;
-
-fn str_is_list(list: &str) -> bool {
-    list.len() >= 2
-    && list.chars().nth(0).unwrap() == '['
-    && list.chars().nth_back(0).unwrap() == ']'
-}
 
 pub fn add_in_list(
     nix_file_path: &str,
