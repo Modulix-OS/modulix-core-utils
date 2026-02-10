@@ -1,5 +1,5 @@
 use std::fs;
-use crate::core::edit_option_ast;
+use crate::edit_ast::edit_option_ast;
 
 pub fn get_option(nix_file_path: &str, nix_option: &str) -> Result<String, String> {
     let file_content = match fs::read_to_string(nix_file_path) {
