@@ -1,6 +1,7 @@
 use crate::core::{TABULATION_SIZE, localise_option::SettingsPosition, write_file};
+use crate::edit_ast::utils::count_char_before_newline;
 use rnix::{TextRange, TextSize};
-use std::ops::Range;
+use std::{ops::Range, str::Split};
 
 pub fn pos_option_in_file<'a>(file_content: &str, nix_option: &'a str) -> Result<SettingsPosition<'a>, String> {
     let ast = rnix::Root::parse(&file_content);
@@ -8,16 +9,6 @@ pub fn pos_option_in_file<'a>(file_content: &str, nix_option: &'a str) -> Result
         Some(p) => Ok(p),
         None => return Err(String::from("Impossible to get position option in file")),
     }
-}
-
-fn count_space_before_newline(text: &str, mut initial_pos: usize) -> usize {
-    initial_pos += 1;
-    let mut number_indent = 0;
-    while initial_pos > 0 && text.chars().nth(initial_pos-1).unwrap_or('\n') != '\n' {
-        initial_pos -= 1;
-        number_indent += 1;
-    }
-    number_indent
 }
 
 pub fn get_option(file_content: &str, nix_option: &str) -> Result<String, String> {
@@ -49,17 +40,34 @@ pub fn set_option(
 
         let insert_pos = <TextSize as Into<usize>>::into(pos.get_pos_definition().start());
 
-        let number_indent = count_space_before_newline(&file_content, insert_pos-1)/TABULATION_SIZE;
+        let number_previous_indent = count_char_before_newline(&file_content, insert_pos-1);
 
-        println!("{}: {}, indent: {}, number_already indent {}", path, option_value, indent, number_indent);
-        file_content.insert_str(
-            insert_pos,
-            format!("{}{} = {};\n{}",
-                " ".repeat(TABULATION_SIZE*(indent - number_indent)),
-                &path,
-                &option_value,
-                " ".repeat(TABULATION_SIZE*(indent-1usize))
-            ).as_str());
+        fn write_option<'a>(
+            mut path: Split<'a, char>,
+            indent: usize,
+            option_value: &str
+        ) -> String {
+            if let Some(key) = path.next() {
+                let remaining = path.clone().count();
+                if remaining == 0 {
+                    return format!("{}{} = {};\n{}",
+                        " ".repeat(TABULATION_SIZE*indent),
+                        key,
+                        &option_value,
+                        " ".repeat(TABULATION_SIZE*(indent-1usize)));
+                } else {
+                    return format!("{}{} = {{\n{}}};\n{}",
+                        " ".repeat(TABULATION_SIZE*indent),
+                        key,
+                        write_option(path, indent+1, option_value),
+                        " ".repeat(TABULATION_SIZE*(indent-1usize))
+                    )
+                }
+            }
+            return String::new();
+        }
+
+        file_content.replace_range((insert_pos-number_previous_indent)..insert_pos, &write_option(path.split('.'), indent, option_value));
 
     } else {
         if let Some(value) = pos.get_pos_definition_value() {

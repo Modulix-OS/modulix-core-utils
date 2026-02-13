@@ -73,9 +73,10 @@ pub fn add_in_list(
                 }
                 pos += 1
             };
+            pos-=1;
             let str_before = format!("{}{}",
-                if newline { "\n  " } else { "" },
-                String::from(" ").repeat(TABULATION_SIZE*(indent_level as usize)));
+                if newline { "\n" } else { "" },
+                String::from(" ").repeat(TABULATION_SIZE*(indent_level as usize+1)-pos));
             let str_after = String::from(" ").repeat(TABULATION_SIZE*(indent_level as usize));
             list.insert_str(
                 list.len()-1usize,
@@ -94,15 +95,16 @@ pub fn add_in_list(
             )?
         }
     } else {
+        let nb_elem_path = nix_list.split('.').count();
         edit_option_ast::set_option(
             &mut file_content,
             nix_file_path,
             nix_list,
             format!(
                 "[\n{}{}\n{}]",
-                String::from(" ").repeat(TABULATION_SIZE*(indent_level as usize +1usize)),
+                String::from(" ").repeat(TABULATION_SIZE*(nb_elem_path+1)),
                 insert_value,
-                String::from(" ").repeat(TABULATION_SIZE*(indent_level as usize))
+                String::from(" ").repeat(TABULATION_SIZE*(nb_elem_path))
             ).as_str()
         )?
     }
