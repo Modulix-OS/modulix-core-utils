@@ -1,156 +1,87 @@
-use rnix::{self, TextSize};
+use std::{ops::Range};
+use rnix::{self, TextRange, TextSize};
 
-/// Position d'une option dans un fichier de configuration Nix.
-///
-/// Cette structure représente l'emplacement d'une option dans l'arbre syntaxique
-/// d'un fichier Nix, avec des informations sur sa définition, sa valeur, et le
-/// chemin restant à parcourir si l'option n'existe pas complètement.
-///
-/// # Exemples
-///
-/// ```ignore///
-/// let source = r#"{ services.nginx.enable = true; }"#;
-/// let ast = Root::parse(source).syntax();
-///
-/// // Rechercher une option existante
-/// let position = SettingsPosition::new(&ast, "services.nginx.enable").unwrap();
-/// assert!(position.get_remaining_path().is_none()); // Match complet
-///
-/// // Rechercher une option inexistante
-/// let position = SettingsPosition::new(&ast, "services.apache.enable").unwrap();
-/// assert_eq!(position.get_remaining_path(), Some("apache.enable"));
-/// ```
+use crate::mx;
+
 #[derive(Debug, Clone)]
-pub struct SettingsPosition<'a> {
-
-    /// Position de la définition complète de l'option (clé + valeur).
-    /// Pour une option existante, couvre toute la ligne d'attribution.
-    /// Pour une option à créer, pointe vers l'emplacement d'insertion.
-    def_option: rnix::TextRange,
-
-    /// Position optionnelle de la valeur uniquement.
-    /// `Some(range)` si l'option existe avec une valeur.
-    /// `None` si l'option n'existe pas encore.
-    value_option: Option<rnix::TextRange>,
-
-    /// Chemin restant de l'option à insérer.
-    /// `Some(path)` indique qu'il reste un chemin à insérer (option non trouvée).
-    /// `None` indique que l'option a été complètement trouvée (match exact).
-    option_path: Option<&'a str>,
-
-    indent_level: u8,
+pub struct NewInsertion {
+    pos: usize,
+    rest_option_path: String,
+    indent_level: usize,
 }
 
-impl<'a> SettingsPosition<'a> {
+#[derive(Debug, Clone)]
+pub struct ExistingOption {
+    range_path: Range<usize>,
+    range_value: Range<usize>,
+    indent_level: usize,
+}
 
-    /// Retourne la position de la définition complète de l'option.
-    ///
-    /// Cette position couvre soit :
-    /// - L'intégralité de la ligne d'attribution pour une option existante (ex: `nginx.enable = true;`)
-    /// - Le point d'insertion avant le `}` fermant pour une option inexistante
-    ///
-    /// # Exemples
-    ///
-    /// ```ignore
-    /// let source = "{ enable = true; }";
-    /// let ast = Root::parse(source).syntax();
-    /// let position = SettingsPosition::new(&ast, "enable").unwrap();
-    ///
-    /// let def_range = position.get_pos_definition();
-    /// println!("Définition à: {:?}", def_range);
-    /// ```
-    pub fn get_pos_definition(&self) -> rnix::TextRange {
-        self.def_option
+#[derive(Debug, Clone)]
+pub enum SettingsPosition {
+    NewInsertion(NewInsertion),
+    ExistingOption(ExistingOption)
+}
+
+impl NewInsertion {
+    pub fn new(
+        pos: usize,
+        rest_option_path: impl Into<String>,
+        indent_level: usize,
+    ) -> Self {
+        NewInsertion {
+            pos,
+            rest_option_path: rest_option_path.into(),
+            indent_level
+        }
     }
 
-    /// Retourne la position de la valeur de l'option, si elle existe.
-    ///
-    /// # Retour
-    ///
-    /// - `Some(TextRange)` : L'option existe et possède une valeur à cette position
-    /// - `None` : L'option n'existe pas dans le fichier
-    ///
-    /// # Exemples
-    ///
-    /// ```ignore
-    /// let source = r#"{ hostname = "server"; }"#;
-    /// let ast = Root::parse(source).syntax();
-    /// let position = SettingsPosition::new(&ast, "hostname").unwrap();
-    ///
-    /// if let Some(value_range) = position.get_pos_definition_value() {
-    ///     let value = &source[value_range];
-    ///     println!("Valeur: {}", value); // "server"
-    /// }
-    /// ```
-    pub fn get_pos_definition_value(&self) -> Option<rnix::TextRange> {
-        self.value_option
+    pub fn get_pos_new_insertion(&self) -> usize {
+        self.pos
     }
 
-    /// Retourne le chemin restant de l'option à parcourir.
-    ///
-    /// # Retour
-    ///
-    /// - `None` : L'option a été trouvée complètement (match exact)
-    /// - `Some(path)` : Il reste un chemin à parcourir, `path` contient la partie manquante
-    ///
-    /// # Exemples
-    ///
-    /// ```ignore
-    /// // Option existante
-    /// let source = "{ services.nginx.enable = true; }";
-    /// let ast = Root::parse(source).syntax();
-    /// let position = SettingsPosition::new(&ast, "services.nginx.enable").unwrap();
-    /// assert_eq!(position.get_remaining_path(), None); // Match complet
-    ///
-    /// // Option partiellement existante
-    /// let source = "{ services = {}; }";
-    /// let ast = Root::parse(source).syntax();
-    /// let position = SettingsPosition::new(&ast, "services.nginx.enable").unwrap();
-    /// assert_eq!(position.get_remaining_path(), Some("nginx.enable")); // Chemin restant
-    /// ```
-    pub fn get_remaining_path(&self) -> Option<&'a str> {
-        self.option_path
+    pub fn get_remaining_path(&self) -> &str {
+        &self.rest_option_path
     }
 
-    pub fn get_indent_level(&self) -> u8 {
+    pub fn get_indent_level(&self) -> usize {
         self.indent_level
     }
+}
 
-    /// Crée une nouvelle instance en localisant une option dans l'AST Nix.
-    ///
-    /// Cette fonction parcourt récursivement l'arbre syntaxique pour trouver
-    /// l'option spécifiée par le chemin `settings`. Si l'option n'existe pas,
-    /// elle retourne un point d'insertion approprié.
-    ///
-    /// # Arguments
-    ///
-    /// * `nix_ast` - Le nœud racine de l'arbre syntaxique Nix à analyser
-    /// * `settings` - Le chemin de l'option recherchée, avec notation pointée (ex: `"services.nginx.enable"`)
-    ///
-    /// # Retour
-    ///
-    /// - `Some(SettingsPosition)` : L'option a été trouvée ou un point d'insertion a été identifié
-    /// - `None` : Aucune correspondance n'a pu être établie (cas très rare)
-    ///
-    /// # Exemples
-    ///
-    /// ```ignore
-    /// let source = r#"{
-    ///     services.nginx.enable = true;
-    ///     networking.hostName = "myserver";
-    /// }"#;
-    /// let ast = Root::parse(source).syntax();
-    ///
-    /// // Rechercher une option existante
-    /// let pos = SettingsPosition::new(&ast, "services.nginx.enable").unwrap();
-    /// assert!(pos.get_remaining_path().is_none());
-    ///
-    /// // Rechercher une option inexistante
-    /// let pos = SettingsPosition::new(&ast, "services.apache.enable").unwrap();
-    /// assert!(pos.get_remaining_path().is_some());
-    /// ```
-    pub fn new(nix_ast: &rnix::SyntaxNode, settings: &'a str) -> Option<Self> {
-        Self::localise_option(&nix_ast, &settings, 0u8)
+impl ExistingOption {
+    pub fn new(
+        range_path: Range<usize>,
+        range_value: Range<usize>,
+        indent_level: usize,
+    ) -> Self {
+        ExistingOption { range_path, range_value, indent_level }
+    }
+
+    pub fn get_range_option(&self) -> &Range<usize> {
+        &self.range_path
+    }
+
+    pub fn get_range_option_value(&self) -> &Range<usize> {
+        &self.range_value
+    }
+
+    pub fn get_indent_level(&self) -> usize {
+        self.indent_level
+    }
+}
+
+
+impl SettingsPosition {
+    pub fn get_indent_level(&self) -> usize {
+        match &self {
+            Self::ExistingOption(ExistingOption { indent_level, .. }) => *indent_level,
+            Self::NewInsertion(NewInsertion { indent_level, .. }) => *indent_level,
+        }
+    }
+
+    pub fn new(nix_ast: &rnix::SyntaxNode, settings: &str) -> mx::Result<Self> {
+        Self::localise_option(&nix_ast, &settings, 0usize).ok_or(mx::ErrorType::InvalidFile)
     }
 
 
@@ -176,12 +107,12 @@ impl<'a> SettingsPosition<'a> {
     /// 4. Retourne le premier match trouvé
     fn localise_option(
         ast: &rnix::SyntaxNode,
-        settings: &'a str,
-        indent_level: u8)
-    -> Option<SettingsPosition<'a>> {
+        settings: &str,
+        indent_level: usize)
+    -> Option<SettingsPosition> {
         return match ast.kind() {
             rnix::SyntaxKind::NODE_ATTR_SET =>
-                Some(Self::localise_option_node_attr_set(&ast, &settings, indent_level+1u8)),
+                Some(Self::localise_option_node_attr_set(&ast, &settings, indent_level+1usize)),
             rnix::SyntaxKind::NODE_ATTRPATH_VALUE =>
                 Self::localise_option_node_attrpath_value(&ast, &settings, indent_level),
             _ => {
@@ -238,10 +169,10 @@ impl<'a> SettingsPosition<'a> {
     /// ```
     fn localise_option_node_attr_set(
         ast: &rnix::SyntaxNode,
-        settings: &'a str,
-        indent_level: u8)
-    -> SettingsPosition<'a> {
-        let mut best_opt_pos: Option<SettingsPosition> = None;
+        settings: &str,
+        indent_level: usize)
+    -> SettingsPosition {
+        let mut best_opt_pos: Option<NewInsertion> = None;
 
         // Parcourir tous les enfants pour trouver des correspondances
         for c in ast.children() {
@@ -249,32 +180,33 @@ impl<'a> SettingsPosition<'a> {
             if let Some(pos) = opt_pos {
 
                 // Si match exact trouvé, retourner immédiatement
-                if let None = pos.option_path {
-                    return pos;
-                }
-
-                // Sinon, conserver le meilleur match (option dans la définition la plus proche)
-                match &best_opt_pos {
-                    None => best_opt_pos = Some(pos),
-                    Some(best_pos) =>  {
-                        if pos.option_path.unwrap().len() < best_pos.option_path.unwrap().len() {
-                            best_opt_pos = Some(pos);
+                match pos {
+                    Self::ExistingOption(p) => return Self::ExistingOption(p),
+                    Self::NewInsertion(new_pos) => {
+                        match &best_opt_pos {
+                            None => best_opt_pos = Some(new_pos),
+                            Some(best_pos) =>  {
+                                if new_pos.get_remaining_path().len() < best_pos.get_remaining_path().len() {
+                                    best_opt_pos = Some(new_pos);
+                                }
+                            }
                         }
                     }
                 }
+
+                // Sinon, conserver le meilleur match (option dans la définition la plus proche)
+
             }
         }
 
         // Retourner le meilleur match ou un point d'insertion
         match best_opt_pos {
-            Some(best_pos) => best_pos,
-            None => SettingsPosition {
-                // Point d'insertion avant le '}' fermant
-                def_option: rnix::TextRange::at(ast.text_range().end()-TextSize::from(1), TextSize::from(0)),
-                value_option: None,
-                option_path: Some(settings),
-                indent_level: indent_level,
-            },
+            Some(best_pos) => SettingsPosition::NewInsertion(best_pos),
+            None => SettingsPosition::NewInsertion(NewInsertion::new(
+                <TextSize as Into<usize>>::into(ast.text_range().end()) - 1,
+                settings,
+                indent_level,
+            )),
         }
     }
 
@@ -338,9 +270,9 @@ impl<'a> SettingsPosition<'a> {
     /// - `NODE_PATH_SEARCH` : Chemin de recherche (`<nixpkgs>`)
     fn localise_option_node_attrpath_value(
         ast: &rnix::SyntaxNode,
-        settings: &'a str,
-        indent_level: u8)
-    -> Option<SettingsPosition<'a>> {
+        settings: &str,
+        indent_level: usize)
+    -> Option<SettingsPosition> {
         let mut attr_path_valid: Option<String> = None;
 
         // Étape 1: Trouver le chemin d'attribut qui correspond
@@ -396,17 +328,16 @@ impl<'a> SettingsPosition<'a> {
 
                 // Recherche récursive dans le sous-ensemble
                 return Some(Self::localise_option_node_attr_set(
-                    &c, new_settings, indent_level+1u8));
+                    &c, new_settings, indent_level+1usize));
             } else if c.kind() == rnix::SyntaxKind::NODE_WITH {
                 for children_with in c.children() {
                     match children_with.kind() {
                         rnix::SyntaxKind::NODE_LIST => {
-                            return Some(SettingsPosition {
-                                def_option: ast.text_range(),
-                                value_option: Some(children_with.text_range()),
-                                option_path: None,
-                                indent_level: indent_level
-                            })
+                            return Some(SettingsPosition::ExistingOption(ExistingOption::new(
+                                <TextRange as Into<Range<usize>>>::into(ast.text_range()),
+                                <TextRange as Into<Range<usize>>>::into(children_with.text_range()),
+                                indent_level,
+                            )))
                         },
                         _ => ()
                     }
@@ -414,12 +345,11 @@ impl<'a> SettingsPosition<'a> {
                 return None;
             } else {
                 // Cas 2: On mets comme on peut a la fin du set
-                return Some(SettingsPosition {
-                    def_option: ast.text_range(),
-                    value_option: Some(c.text_range()),
-                    option_path: None,
-                    indent_level: indent_level,
-                });
+                return Some(SettingsPosition::ExistingOption(ExistingOption::new(
+                    <TextRange as Into<Range<usize>>>::into(ast.text_range()),
+                    <TextRange as Into<Range<usize>>>::into(c.text_range()),
+                    indent_level,
+                )));
             }
         }
 

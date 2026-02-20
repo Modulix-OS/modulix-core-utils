@@ -1,2 +1,9 @@
 /target
 test.nix
+
+
+
+list.rs
+edit_list.rs
+edit_option.rs
+compare.rs
