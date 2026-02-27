@@ -1,34 +1,40 @@
 use std::{fmt, io, result};
 
 #[derive(fmt::Debug)]
-pub enum ErrorType {
+pub enum ErrorKind {
     InvalidFile,
     FileNotFound,
     OptionNotFound,
     FailToLock,
     PermissionDenied,
     TransactionNotBegin,
+    TransactionAlreadyBegin,
     GitNotCommitted,
+    OptionIsNotList,
+    BuildError(String),
     IOError(io::Error),
     GitError(git2::Error),
 }
 
-pub type Result<T> = result::Result<T, ErrorType>;
+pub type Result<T> = result::Result<T, ErrorKind>;
 
-impl ToString for ErrorType {
+impl ToString for ErrorKind {
     fn to_string(&self) -> String {
         match self {
             Self::InvalidFile => String::from("File is not a valid Nix file"),
             Self::OptionNotFound => String::from("Option not found"),
             Self::FileNotFound => String::from("File not found"),
             Self::TransactionNotBegin => String::from("Transaction don't start"),
+            Self::TransactionAlreadyBegin => String::from("Transaction already start"),
             Self::FailToLock => String::from("Impossible to take lock"),
             Self::PermissionDenied => String::from("Permission denied"),
             Self::GitNotCommitted => {
                 String::from("In repository file are untracked or not committed")
             }
+            Self::OptionIsNotList => String::from("This option is not a list"),
             Self::IOError(e) => e.to_string(),
             Self::GitError(e) => e.to_string(),
+            Self::BuildError(s) => s.to_string(),
         }
     }
 }
