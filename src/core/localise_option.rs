@@ -313,7 +313,16 @@ impl SettingsPosition {
                 // Retirer le préfixe déjà traité et continuer la recherche
                 let setting_whitout_path =
                     settings.strip_prefix(&attr_path_valid.unwrap()).unwrap();
-                let new_settings = setting_whitout_path.strip_prefix('.')?;
+                let new_settings = setting_whitout_path
+                    .strip_prefix('.')
+                    .or_else(|| Some(""))?;
+                if new_settings == "" {
+                    return Some(SettingsPosition::ExistingOption(ExistingOption::new(
+                        <TextRange as Into<Range<usize>>>::into(ast.text_range()),
+                        <TextRange as Into<Range<usize>>>::into(c.text_range()),
+                        indent_level,
+                    )));
+                }
 
                 // Recherche récursive dans le sous-ensemble
                 return Some(Self::localise_option_node_attr_set(
