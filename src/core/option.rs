@@ -145,4 +145,12 @@ impl<'a> Option<'a> {
             SettingsPosition::NewInsertion(_) => Ok(false),
         }
     }
+
+    pub fn set_option_all_instance_to_default(&self, nix_file: &mut NixFile) -> mx::Result<bool> {
+        let mut found = false;
+        while self.set_option_to_default(nix_file)? {
+            found = true;
+        }
+        Ok(found)
+    }
 }
