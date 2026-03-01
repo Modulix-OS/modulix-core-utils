@@ -157,4 +157,18 @@ impl<'a> List<'a> {
 
         Ok(set_desired_value == set_current_list)
     }
+
+    pub fn countains(&self, nix_file: &NixFile, desired_value: &str) -> mx::Result<bool> {
+        Ok(match self.opt_list.get(nix_file) {
+            Ok(list) => list
+                .strip_prefix('[')
+                .ok_or(mx::ErrorKind::OptionIsNotList)?
+                .strip_suffix(']')
+                .ok_or(mx::ErrorKind::OptionIsNotList)?
+                .split_ascii_whitespace()
+                .any(|v| v == desired_value),
+            Err(mx::ErrorKind::OptionNotFound) => false,
+            Err(e) => return Err(e),
+        })
+    }
 }
