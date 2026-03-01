@@ -11,6 +11,7 @@ pub enum ErrorKind {
     TransactionAlreadyBegin,
     GitNotCommitted,
     OptionIsNotList,
+    InvalidUuid,
     BuildError(String),
     IOError(io::Error),
     GitError(git2::Error),
@@ -32,6 +33,7 @@ impl ToString for ErrorKind {
                 String::from("In repository file are untracked or not committed")
             }
             Self::OptionIsNotList => String::from("This option is not a list"),
+            Self::InvalidUuid => String::from("Invalid uuid for device"),
             Self::IOError(e) => e.to_string(),
             Self::GitError(e) => e.to_string(),
             Self::BuildError(s) => s.to_string(),
