@@ -4,6 +4,7 @@ use const_format::concatcp;
 pub mod core; // TODO: Swap to private
 mod error;
 pub mod filesystem;
+pub mod package;
 
 #[cfg(not(debug_assertions))]
 const CONFIG_DIRECTORY: &str = "/etc/nixos/";
