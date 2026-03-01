@@ -1,12 +1,10 @@
 use std::{collections::HashMap, fs, path, process};
 
 use super::file_lock::NixFile;
-use crate::mx;
+use crate::{CONFIG_DIRECTORY, CONFIG_NAME, core::list::List as mxList, mx};
 
 const LOCK_BUILD_FILE: &str = "/tmp/mx-build.lock";
 const LOCK_QUEUE_BUILD_FILE: &str = "/tmp/mx-queue-build.lock";
-const CONFIG_DIR: &str = "./test";
-const CONFIG_NAME: &str = "default";
 
 #[derive(Clone)]
 pub enum BuildCommand {
@@ -178,7 +176,7 @@ impl<'a> Transaction<'a> {
             .unwrap()
             .head()
             .and_then(|h| h.peel_to_commit())
-            .ok(); // Option<Commit> au lieu d'erreur
+            .ok();
 
         let parents: Vec<&git2::Commit> = parent.iter().collect();
 
@@ -197,33 +195,29 @@ impl<'a> Transaction<'a> {
     ) -> mx::Result<bool> {
         let commit = repo.find_commit(oid).unwrap();
         let commit_tree = commit.tree().unwrap();
-        let relative_path = path::Path::new(file_path)
-            .strip_prefix(repo.workdir().ok_or(mx::ErrorKind::FileNotFound)?)
-            .map_err(|_| mx::ErrorKind::InvalidFile)?;
+
+        let status = repo
+            .status_file(path::Path::new(file_path))
+            .map_err(mx::ErrorKind::GitError)?;
+        if status.contains(git2::Status::WT_NEW) || status.contains(git2::Status::INDEX_NEW) {
+            return Ok(true);
+        }
 
         let mut diff_opts = git2::DiffOptions::new();
-        diff_opts.pathspec(relative_path);
-
+        diff_opts.pathspec(path::Path::new(file_path));
         let diff = repo
             .diff_tree_to_workdir_with_index(Some(&commit_tree), Some(&mut diff_opts))
             .unwrap();
-
         Ok(diff.stats().unwrap().files_changed() > 0)
     }
 
     fn git_add(&self, path: &str) -> Result<(), mx::ErrorKind> {
         let repo = self.git_repo.as_ref().unwrap();
         let mut index = repo.index().map_err(mx::ErrorKind::GitError)?;
-
-        let relative_path = path::Path::new(path)
-            .strip_prefix(repo.workdir().ok_or(mx::ErrorKind::FileNotFound)?)
-            .map_err(|_| mx::ErrorKind::InvalidFile)?;
-
         index
-            .add_path(relative_path)
+            .add_path(path::Path::new(path))
             .map_err(mx::ErrorKind::GitError)?;
         index.write().map_err(mx::ErrorKind::GitError)?;
-
         Ok(())
     }
 
@@ -240,6 +234,9 @@ impl<'a> Transaction<'a> {
     }
 
     pub fn get_file(&mut self, path: &str) -> mx::Result<&mut NixFile> {
+        if self.git_repo.is_none() {
+            return Err(mx::ErrorKind::TransactionNotBegin);
+        }
         return self
             .list_file
             .get_mut(path)
@@ -247,38 +244,58 @@ impl<'a> Transaction<'a> {
     }
 
     pub fn begin(&mut self) -> mx::Result<()> {
-        self.git_repo = Some(git2::Repository::open(CONFIG_DIR).map_err(mx::ErrorKind::GitError)?);
+        self.add_file("configuration.nix")?;
+        let mut new_file: Vec<String> = vec![];
+        {
+            self.git_repo =
+                Some(git2::Repository::open(CONFIG_DIRECTORY).map_err(mx::ErrorKind::GitError)?);
 
-        let mut opts = git2::StatusOptions::new();
-        opts.include_untracked(true).include_ignored(false);
+            let mut opts = git2::StatusOptions::new();
+            opts.include_untracked(true).include_ignored(false);
 
-        let statuses = self
-            .git_repo
-            .as_ref()
-            .unwrap()
-            .statuses(Some(&mut opts))
-            .map_err(mx::ErrorKind::GitError)?;
+            let statuses = self
+                .git_repo
+                .as_ref()
+                .unwrap()
+                .statuses(Some(&mut opts))
+                .map_err(mx::ErrorKind::GitError)?;
 
-        if !statuses.is_empty() {
-            return Err(mx::ErrorKind::GitNotCommitted);
+            if !statuses.is_empty() {
+                return Err(mx::ErrorKind::GitNotCommitted);
+            }
+
+            for (path_file, file) in self.list_file.iter_mut() {
+                match file.begin() {
+                    Ok(_) => (),
+                    Err(mx::ErrorKind::FileNotFound) => {
+                        file.create_file()?;
+                        file.begin()?;
+                        new_file.push(path_file.clone());
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+
+            let head = self
+                .git_repo
+                .as_ref()
+                .unwrap()
+                .head()
+                .map_err(mx::ErrorKind::GitError)?;
+            let commit = head.peel_to_commit().map_err(mx::ErrorKind::GitError)?;
+            self.old_commit = commit.id();
         }
-
-        for (_, file) in self.list_file.iter_mut() {
-            file.begin()?;
+        {
+            let config_file = self.get_file("configuration.nix")?;
+            let import_file = mxList::new("imports", true);
+            for path in new_file {
+                import_file.add(config_file, &format!("./{}", &path))?;
+            }
         }
-
-        let head = self
-            .git_repo
-            .as_ref()
-            .unwrap()
-            .head()
-            .map_err(mx::ErrorKind::GitError)?;
-        let commit = head.peel_to_commit().map_err(mx::ErrorKind::GitError)?;
-        self.old_commit = commit.id();
         Ok(())
     }
 
-    pub fn commit(&mut self) -> mx::Result<()> {
+    fn commit_impl(&mut self) -> mx::Result<()> {
         if self.git_repo.is_none() {
             return Err(mx::ErrorKind::TransactionNotBegin);
         }
@@ -301,7 +318,7 @@ impl<'a> Transaction<'a> {
                 queue.as_mut().unwrap().unlock();
                 let mut stderr = String::new();
                 let success = Self::rebuild_config(
-                    CONFIG_DIR,
+                    CONFIG_DIRECTORY,
                     CONFIG_NAME,
                     self.build_type.clone(),
                     Some(&mut stderr),
@@ -318,6 +335,13 @@ impl<'a> Transaction<'a> {
         }
         self.git_repo = None;
         Ok(())
+    }
+
+    pub fn commit(&mut self) -> mx::Result<()> {
+        self.commit_impl().map_err(|e| {
+            let _ = self.rollback();
+            e
+        })
     }
 
     pub fn rollback(&mut self) -> mx::Result<()> {
@@ -347,9 +371,6 @@ impl<'a> Transaction<'a> {
             repo.checkout_head(Some(&mut checkout))
                 .map_err(mx::ErrorKind::GitError)?;
         }
-        // for (_, nix_file) in self.list_file.iter_mut() {
-        //     nix_file.rollback()?;
-        // }
         self.git_repo = None;
         Ok(())
     }
