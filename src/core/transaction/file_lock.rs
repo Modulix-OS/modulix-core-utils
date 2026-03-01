@@ -1,4 +1,4 @@
-use crate::mx;
+use crate::{CONFIG_DIRECTORY, mx};
 use std::{
     fs::{self, File},
     io::{self, Read, Seek, Write},
@@ -14,9 +14,16 @@ impl NixFile {
     pub fn new(path: &str) -> Self {
         NixFile {
             file: None,
-            path: path.to_string(),
+            path: CONFIG_DIRECTORY.to_owned() + path,
             file_content: String::new(),
         }
+    }
+
+    pub(super) fn create_file(&mut self) -> mx::Result<()> {
+        let mut file = fs::File::create(&self.path).map_err(mx::ErrorKind::IOError)?;
+        file.write_all("{config, lib, pkgs, ...}:\n{\n}\n".as_bytes())
+            .map_err(mx::ErrorKind::IOError)?;
+        Ok(())
     }
 
     pub fn get_file_path(&self) -> &str {
