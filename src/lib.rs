@@ -1,9 +1,10 @@
 #[cfg(debug_assertions)]
 use const_format::concatcp;
 
-pub mod core;
+mod core;
 mod error;
 pub mod filesystem;
+pub mod locale;
 pub mod package;
 pub mod user;
 
