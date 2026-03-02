@@ -1,4 +1,4 @@
-use std::{fmt, io, result};
+use std::{fmt, io, result, string};
 
 #[derive(fmt::Debug)]
 pub enum ErrorKind {
@@ -13,6 +13,8 @@ pub enum ErrorKind {
     OptionIsNotList,
     InvalidUuid,
     BuildError(String),
+    NixCommandError(String),
+    FromUtf8Error(string::FromUtf8Error),
     IOError(io::Error),
     GitError(git2::Error),
 }
@@ -37,6 +39,8 @@ impl ToString for ErrorKind {
             Self::IOError(e) => e.to_string(),
             Self::GitError(e) => e.to_string(),
             Self::BuildError(s) => s.to_string(),
+            Self::NixCommandError(s) => s.to_string(),
+            Self::FromUtf8Error(e) => e.to_string(),
         }
     }
 }
