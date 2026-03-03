@@ -206,7 +206,7 @@ pub fn remove_swap(device: &str) -> mx::Result<()> {
     Ok(())
 }
 
-fn get_filesystem_from_fstab() -> mx::Result<String> {
+pub(super) fn get_filesystem_from_fstab() -> mx::Result<String> {
     let full = process::Command::new("nixos-generate-config")
         .args(["--show-hardware-config"])
         .output()

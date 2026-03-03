@@ -9,5 +9,4 @@ fn main() {
         false,
     )
     .unwrap();
-    filesystem::remove_entry("/mnt/Games").unwrap();
 }

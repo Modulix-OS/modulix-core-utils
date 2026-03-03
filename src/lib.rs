@@ -4,6 +4,7 @@ use const_format::concatcp;
 mod core;
 mod error;
 pub mod filesystem;
+pub mod init;
 pub mod locale;
 pub mod package;
 pub mod user;

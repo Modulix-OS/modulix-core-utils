@@ -142,6 +142,12 @@ impl<'a> Transaction<'a> {
         }))
     }
 
+    fn flake_lock_exists() -> bool {
+        path::Path::new(CONFIG_DIRECTORY)
+            .join("flake.lock")
+            .exists()
+    }
+
     fn git_commit(
         &self,
         update_ref: Option<&str>,
@@ -193,6 +199,9 @@ impl<'a> Transaction<'a> {
         oid: git2::Oid,
         file_path: &str,
     ) -> mx::Result<bool> {
+        if oid.is_zero() {
+            return Ok(true);
+        }
         let commit = repo.find_commit(oid).unwrap();
         let commit_tree = commit.tree().unwrap();
 
@@ -276,14 +285,23 @@ impl<'a> Transaction<'a> {
                 }
             }
 
-            let head = self
+            self.old_commit = if self
                 .git_repo
                 .as_ref()
                 .unwrap()
-                .head()
-                .map_err(mx::ErrorKind::GitError)?;
-            let commit = head.peel_to_commit().map_err(mx::ErrorKind::GitError)?;
-            self.old_commit = commit.id();
+                .is_empty()
+                .map_err(mx::ErrorKind::GitError)?
+            {
+                git2::Oid::zero()
+            } else {
+                let head = self
+                    .git_repo
+                    .as_ref()
+                    .unwrap()
+                    .head()
+                    .map_err(mx::ErrorKind::GitError)?;
+                head.peel_to_commit().map_err(mx::ErrorKind::GitError)?.id()
+            };
         }
         {
             let config_file = self.get_file("configuration.nix")?;
@@ -311,6 +329,13 @@ impl<'a> Transaction<'a> {
             }
         }
         if need_modif {
+            if !Self::flake_lock_exists() {
+                process::Command::new("nix")
+                    .args(["flake", "update"])
+                    .current_dir(CONFIG_DIRECTORY)
+                    .output()
+                    .map_err(mx::ErrorKind::IOError)?;
+            }
             self.git_commit(Some("HEAD"), &self.git_user, &self.git_user, &self.info)?;
             let mut queue = LockFile::try_lock(LOCK_QUEUE_BUILD_FILE)?;
             if queue.is_some() {
@@ -350,6 +375,13 @@ impl<'a> Transaction<'a> {
         }
 
         {
+            if self.old_commit.is_zero() {
+                for (_, nix_file) in self.list_file.iter_mut() {
+                    let _ = nix_file.close();
+                }
+                self.git_repo = None;
+                return Ok(());
+            }
             let repo = self.git_repo.as_ref().unwrap();
             let head = repo.head().map_err(mx::ErrorKind::GitError)?;
 

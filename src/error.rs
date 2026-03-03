@@ -17,6 +17,7 @@ pub enum ErrorKind {
     FromUtf8Error(string::FromUtf8Error),
     IOError(io::Error),
     GitError(git2::Error),
+    UnixError(nix::Error),
 }
 
 pub type Result<T> = result::Result<T, ErrorKind>;
@@ -41,6 +42,7 @@ impl ToString for ErrorKind {
             Self::BuildError(s) => s.to_string(),
             Self::NixCommandError(s) => s.to_string(),
             Self::FromUtf8Error(e) => e.to_string(),
+            Self::UnixError(e) => e.to_string(),
         }
     }
 }

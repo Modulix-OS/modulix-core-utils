@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 const_format = "0.2.35"
 git2 = "0.20.4"
+nix = { version = "0.31.2", features = ["fs", "ioctl"] }
 phf = { version = "0.13.1", features = ["macros"] }
 rnix = "0.14.0"
 serde = { version = "1.0.228", features = ["derive"] }

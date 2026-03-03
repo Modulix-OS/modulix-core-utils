@@ -4,6 +4,11 @@ use std::{
     io::{self, Read, Seek, Write},
 };
 
+use nix::libc;
+use std::fs::OpenOptions;
+use std::os::unix::fs::MetadataExt;
+use std::os::unix::io::AsRawFd;
+
 pub struct NixFile {
     file: Option<fs::File>,
     path: String,
@@ -19,10 +24,76 @@ impl NixFile {
         }
     }
 
+    const EXT2_IMMUTABLE_FL: libc::c_long = 0x00000010;
+    const FS_IOC_GETFLAGS: libc::c_ulong = 0x80086601;
+    const FS_IOC_SETFLAGS: libc::c_ulong = 0x40086602;
+
+    fn is_owned_by_root(path: &str) -> mx::Result<bool> {
+        let metadata = std::fs::metadata(path).map_err(mx::ErrorKind::IOError)?;
+        Ok(metadata.uid() == 0)
+    }
+
+    fn get_flags(path: &str) -> mx::Result<libc::c_long> {
+        let file = OpenOptions::new()
+            .read(true)
+            .open(path)
+            .map_err(mx::ErrorKind::IOError)?;
+        let fd = file.as_raw_fd();
+        let mut flags: libc::c_long = 0;
+
+        unsafe {
+            if libc::ioctl(fd, Self::FS_IOC_GETFLAGS, &mut flags) < 0 {
+                return Err(mx::ErrorKind::UnixError(nix::Error::last()));
+            }
+        }
+        Ok(flags)
+    }
+
+    fn make_immutable(path: &str) -> mx::Result<()> {
+        if Self::is_owned_by_root(path)? {
+            let file = OpenOptions::new()
+                .read(true)
+                .open(path)
+                .map_err(mx::ErrorKind::IOError)?;
+            let fd = file.as_raw_fd();
+            let mut flags = Self::get_flags(path)?;
+
+            flags |= Self::EXT2_IMMUTABLE_FL; // active le bit immutable
+
+            unsafe {
+                if libc::ioctl(fd, Self::FS_IOC_SETFLAGS, &flags) < 0 {
+                    return Err(mx::ErrorKind::UnixError(nix::Error::last()));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn make_mutable(path: &str) -> mx::Result<()> {
+        if Self::is_owned_by_root(path)? {
+            let file = OpenOptions::new()
+                .read(true)
+                .open(path)
+                .map_err(mx::ErrorKind::IOError)?;
+            let fd = file.as_raw_fd();
+            let mut flags = Self::get_flags(path)?;
+
+            flags &= !Self::EXT2_IMMUTABLE_FL; // désactive le bit immutable
+
+            unsafe {
+                if libc::ioctl(fd, Self::FS_IOC_SETFLAGS, &flags) < 0 {
+                    return Err(mx::ErrorKind::UnixError(nix::Error::last()));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn create_file(&mut self) -> mx::Result<()> {
         let mut file = fs::File::create(&self.path).map_err(mx::ErrorKind::IOError)?;
         file.write_all("{config, lib, pkgs, ...}:\n{\n}\n".as_bytes())
             .map_err(mx::ErrorKind::IOError)?;
+        Self::make_immutable(&self.path)?;
         Ok(())
     }
 
@@ -46,6 +117,18 @@ impl NixFile {
 
     pub fn begin(&mut self) -> mx::Result<()> {
         if self.file.is_none() {
+            match Self::make_mutable(&self.path) {
+                Ok(()) => (),
+                Err(e) => match e {
+                    mx::ErrorKind::IOError(ioe) => match ioe.kind() {
+                        io::ErrorKind::NotFound => return Err(mx::ErrorKind::FileNotFound),
+
+                        _ => return Err(mx::ErrorKind::IOError(ioe)),
+                    },
+                    err => return Err(err),
+                },
+            };
+
             self.file = Some(
                 File::options()
                     .create(false)
@@ -85,6 +168,7 @@ impl NixFile {
             .unwrap()
             .write_all(&self.file_content.as_bytes())
             .or(Err(mx::ErrorKind::PermissionDenied))?;
+        Self::make_immutable(&self.path)?;
         self.file
             .as_ref()
             .unwrap()
