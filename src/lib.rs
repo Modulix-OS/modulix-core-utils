@@ -4,6 +4,7 @@ use const_format::concatcp;
 mod core;
 mod error;
 pub mod filesystem;
+pub mod firewall;
 pub mod init;
 pub mod locale;
 pub mod package;
@@ -19,4 +20,5 @@ const CONFIG_NAME: &str = "default";
 pub mod mx {
     pub use crate::error::ErrorKind;
     pub use crate::error::Result;
+    pub use crate::firewall::NetworkProtocol;
 }
