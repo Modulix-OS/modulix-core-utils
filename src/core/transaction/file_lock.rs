@@ -115,7 +115,7 @@ impl NixFile {
         Ok(&self.file_content)
     }
 
-    pub fn begin(&mut self) -> mx::Result<()> {
+    pub(super) fn begin(&mut self) -> mx::Result<()> {
         if self.file.is_none() {
             match Self::make_mutable(&self.path) {
                 Ok(()) => (),
