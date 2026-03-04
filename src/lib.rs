@@ -7,6 +7,7 @@ pub mod filesystem;
 pub mod firewall;
 pub mod init;
 pub mod locale;
+pub mod modulix_modules;
 pub mod package;
 pub mod user;
 
