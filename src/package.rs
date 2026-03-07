@@ -12,14 +12,14 @@ use crate::{
     mx,
 };
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct NixPlugin {
     pub name: String,
     pub full_name: String, // namespace.name
     pub description: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[allow(dead_code)]
 pub struct NixPackage {
     pub name: String,
