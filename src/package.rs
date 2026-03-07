@@ -21,8 +21,8 @@ pub struct NixPlugin {
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct NixPackage {
-    name: String,
-    description: String,
+    pub name: String,
+    pub description: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
