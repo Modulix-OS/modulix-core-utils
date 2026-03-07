@@ -1,7 +1,7 @@
 use phf::phf_map;
 use std::process;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     core::{
@@ -23,6 +23,54 @@ pub struct NixPlugin {
 pub struct NixPackage {
     name: String,
     description: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum OneOrMany<T> {
+    One(T),
+    Many(Vec<T>),
+}
+
+impl<T> OneOrMany<T> {
+    pub fn into_vec(self) -> Vec<T> {
+        match self {
+            OneOrMany::One(v) => vec![v],
+            OneOrMany::Many(v) => v,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct License {
+    pub full_name: Option<String>,
+    pub spdx_id: Option<String>,
+    pub url: Option<String>,
+    pub free: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Maintainer {
+    pub name: Option<String>,
+    pub email: Option<String>,
+    pub github: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageMetadata {
+    pub name: Option<String>,
+    pub version: Option<String>,
+    pub description: Option<String>,
+    pub long_description: Option<String>,
+    pub homepage: Option<OneOrMany<String>>, // String ou Vec<String>
+    pub license: Option<OneOrMany<License>>, // idem, objet ou liste
+    pub maintainers: Option<OneOrMany<Maintainer>>,
+    pub platforms: Option<OneOrMany<String>>, // peut aussi varier
+    pub broken: Option<bool>,
+    pub unfree: Option<bool>,
+    pub position: Option<String>,
 }
 
 static PLUGIN_NAMESPACES: phf::Map<&'static str, &'static [&'static str]> = phf_map! {
@@ -251,7 +299,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
     dp[m][n]
 }
 
-pub fn search_packages(query: &str, arch: &str) -> mx::Result<Vec<NixPackage>> {
+pub fn search_packages(query: &str) -> mx::Result<Vec<NixPackage>> {
     let output = process::Command::new("nix")
         .args(["search", "nixpkgs", "--json", query])
         .env("NIXPKGS_ALLOW_UNFREE", "1")
@@ -266,7 +314,7 @@ pub fn search_packages(query: &str, arch: &str) -> mx::Result<Vec<NixPackage>> {
     let raw: serde_json::Map<String, serde_json::Value> =
         serde_json::from_str(&stdout).map_err(|e| mx::ErrorKind::NixCommandError(e.to_string()))?;
 
-    let prefix = format!("legacyPackages.{}.", arch);
+    let prefix = format!("legacyPackages.{}.", env!("TARGET_NIX"));
 
     // Collecter tous les namespaces de plugins
     let plugin_namespaces: std::collections::HashSet<&str> = PLUGIN_NAMESPACES
@@ -300,7 +348,7 @@ pub fn search_packages(query: &str, arch: &str) -> mx::Result<Vec<NixPackage>> {
     Ok(packages.into_iter().map(|(_, pkg)| pkg).collect())
 }
 
-pub fn list_plugins(package: &str, arch: &str) -> mx::Result<Vec<NixPlugin>> {
+pub fn list_plugins(package: &str) -> mx::Result<Vec<NixPlugin>> {
     let namespaces = PLUGIN_NAMESPACES.get(package).ok_or_else(|| {
         mx::ErrorKind::NixCommandError(format!(
             "No plugin namespace found for package '{}'",
@@ -311,7 +359,11 @@ pub fn list_plugins(package: &str, arch: &str) -> mx::Result<Vec<NixPlugin>> {
     let mut all_plugins = Vec::new();
 
     for namespace in *namespaces {
-        let expr = format!("nixpkgs#legacyPackages.{}.{}", arch, namespace);
+        let expr = format!(
+            "nixpkgs#legacyPackages.{}.{}",
+            env!("TARGET_NIX"),
+            namespace
+        );
         let output = process::Command::new("nix")
             .args([
                 "eval",
@@ -360,4 +412,48 @@ pub fn list_plugins(package: &str, arch: &str) -> mx::Result<Vec<NixPlugin>> {
     }
 
     Ok(all_plugins)
+}
+
+pub fn get_package_metadata(package_name: &str) -> mx::Result<PackageMetadata> {
+    let expr = format!(
+        r#"
+        let
+          pkgs = (builtins.getFlake "nixpkgs").legacyPackages.{arch};
+          pkg = pkgs.{package_name};
+          meta = pkg.meta or {{}};
+        in {{
+          name = pkg.name or null;
+          version = pkg.version or null;
+          description = meta.description or null;
+          longDescription = meta.longDescription or null;
+          homepage = meta.homepage or null;
+          license = meta.license or null;
+          maintainers = map (m: {{
+            name = m.name or null;
+            email = m.email or null;
+            github = m.github or null;
+          }}) (meta.maintainers or []);
+          platforms = meta.platforms or null;
+          broken = meta.broken or null;
+          unfree = meta.unfree or null;
+          position = meta.position or null;
+        }}
+        "#,
+        arch = env!("TARGET_NIX")
+    );
+
+    let output = process::Command::new("nix")
+        .args(["eval", "--json", "--impure", "--expr", &expr])
+        .output()
+        .map_err(|e| mx::ErrorKind::NixCommandError(e.to_string()))?;
+
+    if !output.status.success() {
+        return Err(mx::ErrorKind::NixCommandError(
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ));
+    }
+
+    let json_str = String::from_utf8_lossy(&output.stdout);
+    println!("{}", json_str.clone());
+    serde_json::from_str(&json_str).map_err(mx::ErrorKind::ParseError)
 }

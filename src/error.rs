@@ -18,6 +18,7 @@ pub enum ErrorKind {
     IOError(io::Error),
     GitError(git2::Error),
     UnixError(nix::Error),
+    ParseError(serde_json::Error),
 }
 
 pub type Result<T> = result::Result<T, ErrorKind>;
@@ -43,6 +44,7 @@ impl ToString for ErrorKind {
             Self::NixCommandError(s) => s.to_string(),
             Self::FromUtf8Error(e) => e.to_string(),
             Self::UnixError(e) => e.to_string(),
+            Self::ParseError(e) => e.to_string(),
         }
     }
 }
