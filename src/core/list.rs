@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::str::SplitAsciiWhitespace;
 
 use super::option::Option as mxOption;
 use super::transaction::file_lock::NixFile;
@@ -83,21 +84,13 @@ impl<'a> List<'a> {
         match self.opt_list.get_position(nix_file)? {
             SettingsPosition::ExistingOption(_) => {
                 let mut list = self.opt_list.get(nix_file)?.to_string();
-                if !Self::str_is_list(&list) {
-                    return Err(mx::ErrorKind::OptionIsNotList);
-                }
+
                 let mut start: usize = 0;
                 let mut end: usize = 0;
                 let mut found = false;
                 let mut _offset = 1;
 
-                for elem in list
-                    .strip_prefix('[')
-                    .unwrap()
-                    .strip_suffix(']')
-                    .unwrap()
-                    .split_ascii_whitespace()
-                {
+                for elem in self.get_element_in_list(nix_file)? {
                     let s = list[_offset..].find(elem).unwrap() + _offset;
                     let e = s + elem.len();
                     if elem == value {
@@ -139,6 +132,22 @@ impl<'a> List<'a> {
             SettingsPosition::NewInsertion(_) => (),
         }
         Ok(())
+    }
+
+    pub fn get_element_in_list(
+        &self,
+        nix_file: &'a NixFile,
+    ) -> mx::Result<SplitAsciiWhitespace<'a>> {
+        let list = self.opt_list.get(nix_file)?;
+        if !Self::str_is_list(&list) {
+            return Err(mx::ErrorKind::OptionIsNotList);
+        }
+        Ok(list
+            .strip_prefix('[')
+            .unwrap()
+            .strip_suffix(']')
+            .unwrap()
+            .split_ascii_whitespace())
     }
 
     pub fn eq(&self, nix_file: &NixFile, desired_value: &[&str]) -> mx::Result<bool> {

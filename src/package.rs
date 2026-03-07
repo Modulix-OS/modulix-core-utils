@@ -4,9 +4,10 @@ use std::process;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    CONFIG_DIRECTORY,
     core::{
         list::List as mxList,
-        transaction::{Transaction, transaction::BuildCommand},
+        transaction::{Transaction, file_lock::NixFile, transaction::BuildCommand},
     },
     mx,
 };
@@ -72,6 +73,8 @@ pub struct PackageMetadata {
     pub unfree: Option<bool>,
     pub position: Option<String>,
 }
+
+const FILE_PACKAGE_PATH: &str = "package.nix";
 
 static PLUGIN_NAMESPACES: phf::Map<&'static str, &'static [&'static str]> = phf_map! {
     // Éditeurs
@@ -154,11 +157,11 @@ static PLUGIN_NAMESPACES: phf::Map<&'static str, &'static [&'static str]> = phf_
 pub fn install(package_name: &str) -> mx::Result<()> {
     let mut transac_add_pkgs =
         Transaction::new(&format!("Install {}", package_name), BuildCommand::Switch)?;
-    transac_add_pkgs.add_file("package.nix")?;
+    transac_add_pkgs.add_file(FILE_PACKAGE_PATH)?;
 
     transac_add_pkgs.begin()?;
 
-    let file = match transac_add_pkgs.get_file("package.nix") {
+    let file = match transac_add_pkgs.get_file(FILE_PACKAGE_PATH) {
         Ok(f) => f,
         Err(e) => {
             transac_add_pkgs.rollback()?;
@@ -183,11 +186,11 @@ pub fn install(package_name: &str) -> mx::Result<()> {
 pub fn uninstall(package_name: &str) -> mx::Result<()> {
     let mut transac_add_pkgs =
         Transaction::new(&format!("Uninstall {}", package_name), BuildCommand::Switch)?;
-    transac_add_pkgs.add_file("package.nix")?;
+    transac_add_pkgs.add_file(FILE_PACKAGE_PATH)?;
 
     transac_add_pkgs.begin()?;
 
-    let file = match transac_add_pkgs.get_file("package.nix") {
+    let file = match transac_add_pkgs.get_file(FILE_PACKAGE_PATH) {
         Ok(f) => f,
         Err(e) => {
             transac_add_pkgs.rollback()?;
@@ -456,4 +459,107 @@ pub fn get_package_metadata(package_name: &str) -> mx::Result<PackageMetadata> {
     let json_str = String::from_utf8_lossy(&output.stdout);
     println!("{}", json_str.clone());
     serde_json::from_str(&json_str).map_err(mx::ErrorKind::ParseError)
+}
+
+pub fn list_installed_package() -> mx::Result<Vec<NixPackage>> {
+    let mut list_pkgs_tr = Transaction::new("List installed package", BuildCommand::Build)?;
+    list_pkgs_tr.add_file(FILE_PACKAGE_PATH)?;
+    list_pkgs_tr.begin()?;
+    let package_file = match list_pkgs_tr.get_file(FILE_PACKAGE_PATH) {
+        Ok(f) => f,
+        Err(e) => {
+            list_pkgs_tr.rollback()?;
+            return Err(e);
+        }
+    };
+    let pkgs = mxList::new("environment.systemPackages", true);
+    let elements = match pkgs.get_element_in_list(package_file) {
+        Ok(e) => e,
+        Err(mx::ErrorKind::OptionNotFound) => {
+            list_pkgs_tr.commit()?;
+            return Ok(Vec::new());
+        }
+        Err(e) => {
+            list_pkgs_tr.rollback()?;
+            return Err(e);
+        }
+    };
+    let names: Vec<&str> = elements.collect();
+
+    if names.is_empty() {
+        list_pkgs_tr.commit()?;
+        return Ok(vec![]);
+    }
+
+    // Retire le préfixe "pkgs." si présent pour obtenir le vrai nom du paquet
+    let clean_names: Vec<&str> = names
+        .iter()
+        .map(|n| n.strip_prefix("pkgs.").unwrap_or(n))
+        .collect();
+
+    // Expression Nix directe, sans fonction wrapper
+    let nix_list = clean_names
+        .iter()
+        .map(|n| format!("\"{}\"", n))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let nix_expr = format!(
+        "let pkgs = (builtins.getFlake \"{}\").inputs.nixpkgs.legacyPackages.${{builtins.currentSystem}}; in \
+         builtins.listToAttrs \
+           (builtins.filter (x: x != null) \
+             (map (name: \
+               let pkg = pkgs.${{name}} or null; in \
+               if pkg == null then null \
+               else {{ name = name; value = pkg.meta.description or \"\"; }}) \
+             [ {} ]))",
+        CONFIG_DIRECTORY, nix_list
+    );
+
+    let output = match std::process::Command::new("nix")
+        .args(["eval", "--impure", "--json", "--expr", &nix_expr])
+        .output()
+        .map_err(mx::ErrorKind::IOError)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            list_pkgs_tr.rollback()?;
+            return Err(e);
+        }
+    };
+
+    if !output.status.success() {
+        list_pkgs_tr.rollback()?;
+        return Err(mx::ErrorKind::NixCommandError(
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ));
+    }
+
+    let json_str = String::from_utf8_lossy(&output.stdout);
+    let descriptions: std::collections::HashMap<String, String> =
+        match serde_json::from_str(&json_str)
+            .map_err(|e| mx::ErrorKind::NixCommandError(e.to_string()))
+        {
+            Ok(f) => f,
+            Err(e) => {
+                list_pkgs_tr.rollback()?;
+                return Err(e);
+            }
+        };
+
+    let packages = clean_names
+        .clone()
+        .into_iter()
+        .zip(clean_names.into_iter())
+        .map(|(original_name, clean_name)| {
+            let description = descriptions.get(clean_name).cloned().unwrap_or_default();
+            NixPackage {
+                name: original_name.to_string(),
+                description,
+            }
+        })
+        .collect();
+    list_pkgs_tr.commit()?;
+
+    Ok(packages)
 }
