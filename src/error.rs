@@ -12,6 +12,7 @@ pub enum ErrorKind {
     GitNotCommitted,
     OptionIsNotList,
     InvalidUuid,
+    PackageDoesNotHaveAPlugin,
     BuildError(String),
     NixCommandError(String),
     FromUtf8Error(string::FromUtf8Error),
@@ -38,6 +39,7 @@ impl ToString for ErrorKind {
             }
             Self::OptionIsNotList => String::from("This option is not a list"),
             Self::InvalidUuid => String::from("Invalid uuid for device"),
+            Self::PackageDoesNotHaveAPlugin => String::from("This package does not have a plugin"),
             Self::IOError(e) => e.to_string(),
             Self::GitError(e) => e.to_string(),
             Self::BuildError(s) => s.to_string(),

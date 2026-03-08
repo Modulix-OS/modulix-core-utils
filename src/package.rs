@@ -7,7 +7,8 @@ use crate::{
     CONFIG_DIRECTORY,
     core::{
         list::List as mxList,
-        transaction::{Transaction, file_lock::NixFile, transaction::BuildCommand},
+        option::Option as mxOption,
+        transaction::{Transaction, transaction::BuildCommand},
     },
     mx,
 };
@@ -15,7 +16,6 @@ use crate::{
 #[derive(Debug, Deserialize, Serialize)]
 pub struct NixPlugin {
     pub name: String,
-    pub full_name: String, // namespace.name
     pub description: String,
 }
 
@@ -76,82 +76,38 @@ pub struct PackageMetadata {
 
 const FILE_PACKAGE_PATH: &str = "package.nix";
 
-static PLUGIN_NAMESPACES: phf::Map<&'static str, &'static [&'static str]> = phf_map! {
+struct PluginNamespace {
+    pub path_plugin: &'static str,
+    pub path_enable_programs: &'static str,
+    pub path_plugin_list: &'static str,
+}
+
+impl PluginNamespace {
+    pub const fn new(
+        path_plugin: &'static str,
+        path_enable_programs: &'static str,
+        path_plugin_list: &'static str,
+    ) -> Self {
+        Self {
+            path_plugin,
+            path_enable_programs,
+            path_plugin_list,
+        }
+    }
+}
+
+static PLUGIN_NAMESPACES: phf::Map<&'static str, PluginNamespace> = phf_map! {
     // Éditeurs
-    "vim"                   => &["vimPlugins"],
-    "neovim"                => &["vimPlugins"],
-    "emacs"                 => &["emacsPackages"],
-    "kakoune"               => &["kakounePlugins"],
-    "vscode"                => &["vscode-extensions"],
-    "vscodium"              => &["vscode-extensions"],
+    "vscode"                => PluginNamespace::new(
+        "vscode-extensions",
+        "programs.vscode.enable",
+        "programs.vscode.extensions"),
 
     // Audio / Vidéo
-    "obs-studio"            => &["obs-studio-plugins"],
-    "deadbeef"              => &["deadbeefPlugins"],
-    "kodi"                  => &["kodiPackages"],
-    "mpv"                   => &["mpvScripts"],
-    "gst_all_1.gstreamer"   => &["gst_all_1"],
-
-    // Graphisme
-    "gimp"                  => &["gimpPlugins"],
-    "gimp2"                 => &["gimp2Plugins"],
-    "inkscape"              => &["inkscape-extensions"],
-
-    // Shell
-    "zsh"                   => &["zshPlugins"],
-    "fish"                  => &["fishPlugins"],
-
-    // Langages - Python
-    "python313"             => &["python313Packages"],
-    "python312"             => &["python312Packages"],
-    "python311"             => &["python311Packages"],
-    "python310"             => &["python310Packages"],
-
-    // Langages - PHP
-    "php82"                 => &["php82Packages", "php82Extensions"],
-    "php83"                 => &["php83Packages", "php83Extensions"],
-    "php84"                 => &["php84Packages", "php84Extensions"],
-    "php85"                 => &["php85Packages", "php85Extensions"],
-
-    // Langages - Lua
-    "lua51"                 => &["lua51Packages"],
-    "lua52"                 => &["lua52Packages"],
-    "lua53"                 => &["lua53Packages"],
-    "lua54"                 => &["lua54Packages"],
-
-    // Langages - Perl
-    "perl538"               => &["perl538Packages"],
-
-    // Langages - Autres
-    "ruby"                  => &["rubyPackages"],
-    "ocaml"                 => &["ocamlPackages"],
-    "sbcl"                  => &["sbclPackages"],
-    "haskell"               => &["haskellPackages"],
-    "R"                     => &["rPackages"],
-
-    // LaTeX
-    "texlive"               => &["texlivePackages"],
-    "texliveFull"           => &["texlivePackages"],
-    "texliveSmall"          => &["texlivePackages"],
-    "texliveBasic"          => &["texlivePackages"],
-    "texliveMedium"         => &["texlivePackages"],
-    "texliveMinimal"        => &["texlivePackages"],
-
-    // Outils de dev
-    "terraform"             => &["terraform-providers"],
-    "buildbot"              => &["buildbot-plugins"],
-
-    // Bureau
-    "pantheon"              => &["pantheon"],
-
-    // GPU / HPC
-    "rocm"                  => &["rocmPackages"],
-
-    // Musique
-    "open-music-kontroller" => &["open-music-kontroller"],
-
-    // Réseau
-    "emilua"                => &["emiluaPlugins"],
+    "obs-studio"            => PluginNamespace::new(
+        "obs-studio-plugins",
+        "programs.obs-studio.enable",
+        "programs.obs-studio.plugins"),
 };
 
 pub fn install(package_name: &str) -> mx::Result<()> {
@@ -168,14 +124,26 @@ pub fn install(package_name: &str) -> mx::Result<()> {
             return Err(e);
         }
     };
-    let pkgs = mxList::new("environment.systemPackages", true);
-    match pkgs.add(file, &format!("pkgs.{}", package_name)) {
-        Ok(()) => (),
-        Err(e) => {
-            transac_add_pkgs.rollback()?;
-            return Err(e);
+
+    if let Some(pkgs_info) = PLUGIN_NAMESPACES.get(package_name) {
+        let pkgs = mxOption::new(pkgs_info.path_enable_programs);
+        match pkgs.set(file, "true") {
+            Ok(()) => (),
+            Err(e) => {
+                transac_add_pkgs.rollback()?;
+                return Err(e);
+            }
         }
-    };
+    } else {
+        let pkgs = mxList::new("environment.systemPackages", true);
+        match pkgs.add(file, &format!("pkgs.{}", package_name)) {
+            Ok(()) => (),
+            Err(e) => {
+                transac_add_pkgs.rollback()?;
+                return Err(e);
+            }
+        };
+    }
     match transac_add_pkgs.commit() {
         Ok(_) => (),
         Err(e) => println!("{}", e.to_string()),
@@ -197,15 +165,129 @@ pub fn uninstall(package_name: &str) -> mx::Result<()> {
             return Err(e);
         }
     };
-    let pkgs = mxList::new("environment.systemPackages", true);
-    match pkgs.remove(file, &format!("pkgs.{}", package_name)) {
-        Ok(()) => (),
+
+    if let Some(pkgs_info) = PLUGIN_NAMESPACES.get(package_name) {
+        match pkgs_info.path_enable_programs.strip_suffix(".enable") {
+            Some(path) => {
+                let pkgs = mxOption::new(path);
+                match pkgs.set_option_all_instance_to_default(file) {
+                    Ok(_) => (),
+                    Err(e) => {
+                        transac_add_pkgs.rollback()?;
+                        return Err(e);
+                    }
+                }
+            }
+            None => {
+                let pkgs = mxOption::new(pkgs_info.path_enable_programs);
+                match pkgs.set(file, "false") {
+                    Ok(()) => (),
+                    Err(e) => {
+                        transac_add_pkgs.rollback()?;
+                        return Err(e);
+                    }
+                }
+            }
+        }
+    } else {
+        let pkgs = mxList::new("environment.systemPackages", true);
+        match pkgs.remove(file, &format!("pkgs.{}", package_name)) {
+            Ok(()) => (),
+            Err(e) => {
+                transac_add_pkgs.rollback()?;
+                return Err(e);
+            }
+        };
+    }
+    match transac_add_pkgs.commit() {
+        Ok(_) => (),
+        Err(e) => println!("{}", e.to_string()),
+    };
+    Ok(())
+}
+
+pub fn install_plugin(package_name: &str, plugin_name: &str) -> mx::Result<()> {
+    let mut transac_add_plugin = Transaction::new(
+        &format!("Install {} plugin for {}", plugin_name, package_name),
+        BuildCommand::Switch,
+    )?;
+    transac_add_plugin.add_file(FILE_PACKAGE_PATH)?;
+
+    transac_add_plugin.begin()?;
+
+    let file = match transac_add_plugin.get_file(FILE_PACKAGE_PATH) {
+        Ok(f) => f,
         Err(e) => {
-            transac_add_pkgs.rollback()?;
+            transac_add_plugin.rollback()?;
             return Err(e);
         }
     };
-    match transac_add_pkgs.commit() {
+
+    if let Some(pkgs_info) = PLUGIN_NAMESPACES.get(package_name) {
+        let pkgs = mxOption::new(pkgs_info.path_enable_programs);
+        match pkgs.set(file, "true") {
+            Ok(()) => (),
+            Err(e) => {
+                transac_add_plugin.rollback()?;
+                return Err(e);
+            }
+        }
+        let plugin = mxList::new(pkgs_info.path_plugin_list, true);
+        match plugin.add(
+            file,
+            &format!("pkgs.{}.{}", pkgs_info.path_plugin, plugin_name),
+        ) {
+            Ok(()) => (),
+            Err(e) => {
+                transac_add_plugin.rollback()?;
+                return Err(e);
+            }
+        }
+    } else {
+        transac_add_plugin.rollback()?;
+        return Err(mx::ErrorKind::PackageDoesNotHaveAPlugin);
+    }
+    match transac_add_plugin.commit() {
+        Ok(_) => (),
+        Err(e) => println!("{}", e.to_string()),
+    };
+    Ok(())
+}
+
+pub fn remove_plugin(package_name: &str, plugin_name: &str) -> mx::Result<()> {
+    let mut transac_add_plugin = Transaction::new(
+        &format!("Remove {} plugin for {}", plugin_name, package_name),
+        BuildCommand::Switch,
+    )?;
+    transac_add_plugin.add_file(FILE_PACKAGE_PATH)?;
+
+    transac_add_plugin.begin()?;
+
+    let file = match transac_add_plugin.get_file(FILE_PACKAGE_PATH) {
+        Ok(f) => f,
+        Err(e) => {
+            transac_add_plugin.rollback()?;
+            return Err(e);
+        }
+    };
+
+    if let Some(pkgs_info) = PLUGIN_NAMESPACES.get(package_name) {
+        let plugin = mxList::new(pkgs_info.path_plugin_list, true);
+        match plugin.remove(
+            file,
+            &format!("pkgs.{}.{}", pkgs_info.path_plugin, plugin_name),
+        ) {
+            Ok(()) => (),
+            Err(e) => {
+                transac_add_plugin.rollback()?;
+                return Err(e);
+            }
+        }
+    } else {
+        transac_add_plugin.rollback()?;
+        return Err(mx::ErrorKind::PackageDoesNotHaveAPlugin);
+    }
+    match transac_add_plugin.commit() {
         Ok(_) => (),
         Err(e) => println!("{}", e.to_string()),
     };
@@ -320,10 +402,8 @@ pub fn search_packages(query: &str) -> mx::Result<Vec<NixPackage>> {
     let prefix = format!("legacyPackages.{}.", env!("TARGET_NIX"));
 
     // Collecter tous les namespaces de plugins
-    let plugin_namespaces: std::collections::HashSet<&str> = PLUGIN_NAMESPACES
-        .values()
-        .flat_map(|v| v.iter().copied())
-        .collect();
+    let plugin_namespaces: std::collections::HashSet<&str> =
+        PLUGIN_NAMESPACES.values().map(|v| v.path_plugin).collect();
 
     let mut packages: Vec<(u32, NixPackage)> = raw
         .iter()
@@ -352,66 +432,66 @@ pub fn search_packages(query: &str) -> mx::Result<Vec<NixPackage>> {
 }
 
 pub fn list_plugins(package: &str) -> mx::Result<Vec<NixPlugin>> {
-    let namespaces = PLUGIN_NAMESPACES.get(package).ok_or_else(|| {
-        mx::ErrorKind::NixCommandError(format!(
-            "No plugin namespace found for package '{}'",
-            package
-        ))
-    })?;
+    let namespace = PLUGIN_NAMESPACES
+        .get(package)
+        .ok_or_else(|| {
+            mx::ErrorKind::NixCommandError(format!(
+                "No plugin namespace found for package '{}'",
+                package
+            ))
+        })?
+        .path_plugin;
 
     let mut all_plugins = Vec::new();
 
-    for namespace in *namespaces {
-        let expr = format!(
-            "nixpkgs#legacyPackages.{}.{}",
-            env!("TARGET_NIX"),
-            namespace
-        );
-        let output = process::Command::new("nix")
-            .args([
-                "eval",
-                "--json",
-                &expr,
-                "--apply",
-                "attrs: builtins.mapAttrs
-                    (
-                        name: pkg:
-                        let tried = builtins.tryEval
-                            (pkg.meta.description or \"\");
-                        in {
-                            description = if tried.success then
-                                          tried.value
-                                          else \"\";
-                        }
-                    ) attrs",
-            ])
-            .env("NIXPKGS_ALLOW_UNFREE", "1")
-            .output()
-            .map_err(mx::ErrorKind::IOError)?;
+    let expr = format!(
+        "nixpkgs#legacyPackages.{}.{}",
+        env!("TARGET_NIX"),
+        namespace
+    );
+    let output = process::Command::new("nix")
+        .args([
+            "eval",
+            "--json",
+            &expr,
+            "--apply",
+            "attrs: builtins.mapAttrs
+                (
+                    name: pkg:
+                    let tried = builtins.tryEval
+                        (pkg.meta.description or \"\");
+                    in {
+                        description = if tried.success then
+                                        tried.value
+                                        else \"\";
+                    }
+                ) attrs",
+        ])
+        .env("NIXPKGS_ALLOW_UNFREE", "1")
+        .output()
+        .map_err(mx::ErrorKind::IOError)?;
 
-        if !output.status.success() {
-            return Err(mx::ErrorKind::NixCommandError(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
-        }
+    if !output.status.success() {
+        return Err(mx::ErrorKind::NixCommandError(
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ));
+    }
 
-        let stdout = String::from_utf8(output.stdout).map_err(mx::ErrorKind::FromUtf8Error)?;
-        let raw: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&stdout)
-            .map_err(|e| mx::ErrorKind::NixCommandError(e.to_string()))?;
+    let stdout = String::from_utf8(output.stdout).map_err(mx::ErrorKind::FromUtf8Error)?;
+    let raw: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&stdout).map_err(|e| mx::ErrorKind::NixCommandError(e.to_string()))?;
 
-        for (name, value) in raw {
-            let description = value
-                .get("description")
-                .and_then(|d| d.as_str())
-                .unwrap_or("")
-                .to_string();
+    for (name, value) in raw {
+        let description = value
+            .get("description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("")
+            .to_string();
 
-            all_plugins.push(NixPlugin {
-                name: name.clone(),
-                full_name: format!("{}.{}", namespace, name),
-                description,
-            });
-        }
+        all_plugins.push(NixPlugin {
+            name: name.clone(),
+            description,
+        });
     }
 
     Ok(all_plugins)
@@ -473,32 +553,40 @@ pub fn list_installed_package() -> mx::Result<Vec<NixPackage>> {
         }
     };
     let pkgs = mxList::new("environment.systemPackages", true);
-    let elements = match pkgs.get_element_in_list(package_file) {
-        Ok(e) => e,
-        Err(mx::ErrorKind::OptionNotFound) => {
-            list_pkgs_tr.commit()?;
-            return Ok(Vec::new());
-        }
+    let mut names: Vec<&str> = match pkgs.get_element_in_list(package_file) {
+        Ok(e) => e.map(|n| n.strip_prefix("pkgs.").unwrap_or(n)).collect(),
+        Err(mx::ErrorKind::OptionNotFound) => vec![],
         Err(e) => {
             list_pkgs_tr.rollback()?;
             return Err(e);
         }
     };
-    let names: Vec<&str> = elements.collect();
-
-    if names.is_empty() {
-        list_pkgs_tr.commit()?;
-        return Ok(vec![]);
-    }
 
     // Retire le préfixe "pkgs." si présent pour obtenir le vrai nom du paquet
-    let clean_names: Vec<&str> = names
-        .iter()
-        .map(|n| n.strip_prefix("pkgs.").unwrap_or(n))
-        .collect();
+    println!("Coucou");
+    for (pkgs, pkgs_info) in PLUGIN_NAMESPACES.entries() {
+        let option_pkgs = mxOption::new(pkgs_info.path_enable_programs);
+        println!(
+            "Package {}, trouvé ? {}",
+            pkgs,
+            option_pkgs.get(package_file).map_or("false", |v| v)
+        );
+        if match option_pkgs.get(package_file) {
+            Ok(res) => res,
+            Err(mx::ErrorKind::OptionNotFound) => "false",
+            Err(e) => {
+                list_pkgs_tr.rollback()?;
+                return Err(e);
+            }
+        } == "true"
+        {
+            dbg!(&names);
+            names.push(pkgs);
+        }
+    }
 
     // Expression Nix directe, sans fonction wrapper
-    let nix_list = clean_names
+    let nix_list = names
         .iter()
         .map(|n| format!("\"{}\"", n))
         .collect::<Vec<_>>()
@@ -547,10 +635,10 @@ pub fn list_installed_package() -> mx::Result<Vec<NixPackage>> {
             }
         };
 
-    let packages = clean_names
+    let packages = names
         .clone()
         .into_iter()
-        .zip(clean_names.into_iter())
+        .zip(names.into_iter())
         .map(|(original_name, clean_name)| {
             let description = descriptions.get(clean_name).cloned().unwrap_or_default();
             NixPackage {
