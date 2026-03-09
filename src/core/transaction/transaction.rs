@@ -259,18 +259,27 @@ impl<'a> Transaction<'a> {
             self.git_repo =
                 Some(git2::Repository::open(CONFIG_DIRECTORY).map_err(mx::ErrorKind::GitError)?);
 
-            let mut opts = git2::StatusOptions::new();
-            opts.include_untracked(true).include_ignored(false);
-
-            let statuses = self
+            let is_empty = self
                 .git_repo
                 .as_ref()
                 .unwrap()
-                .statuses(Some(&mut opts))
+                .is_empty()
                 .map_err(mx::ErrorKind::GitError)?;
 
-            if !statuses.is_empty() {
-                return Err(mx::ErrorKind::GitNotCommitted);
+            if !is_empty {
+                let mut opts = git2::StatusOptions::new();
+                opts.include_untracked(true).include_ignored(false);
+
+                let statuses = self
+                    .git_repo
+                    .as_ref()
+                    .unwrap()
+                    .statuses(Some(&mut opts))
+                    .map_err(mx::ErrorKind::GitError)?;
+
+                if !statuses.is_empty() {
+                    return Err(mx::ErrorKind::GitNotCommitted);
+                }
             }
 
             for (path_file, file) in self.list_file.iter_mut() {
@@ -285,22 +294,15 @@ impl<'a> Transaction<'a> {
                 }
             }
 
-            self.old_commit = if self
-                .git_repo
-                .as_ref()
-                .unwrap()
-                .is_empty()
-                .map_err(mx::ErrorKind::GitError)?
-            {
-                git2::Oid::zero()
-            } else {
-                let head = self
-                    .git_repo
-                    .as_ref()
-                    .unwrap()
-                    .head()
-                    .map_err(mx::ErrorKind::GitError)?;
-                head.peel_to_commit().map_err(mx::ErrorKind::GitError)?.id()
+            self.old_commit = match self.git_repo.as_ref().unwrap().head() {
+                Ok(head) => head.peel_to_commit().map_err(mx::ErrorKind::GitError)?.id(),
+                Err(e)
+                    if e.code() == git2::ErrorCode::UnbornBranch
+                        || e.code() == git2::ErrorCode::NotFound =>
+                {
+                    git2::Oid::zero()
+                }
+                Err(e) => return Err(mx::ErrorKind::GitError(e)),
             };
         }
         {
