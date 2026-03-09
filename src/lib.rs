@@ -12,7 +12,7 @@ pub mod package;
 pub mod user;
 
 #[cfg(not(debug_assertions))]
-const CONFIG_DIRECTORY: &str = "/etc/nixos/";
+const CONFIG_DIRECTORY: &str = "/etc/modulix-os/";
 #[cfg(debug_assertions)]
 const CONFIG_DIRECTORY: &str = concatcp!(env!("CARGO_MANIFEST_DIR"), "/test/");
 

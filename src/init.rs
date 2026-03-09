@@ -57,7 +57,9 @@ pub fn init_repo() -> mx::Result<()> {
         return Ok(());
     }
 
-    git2::Repository::init(repo_path).map_err(mx::ErrorKind::GitError)?;
+    let mut opts = git2::RepositoryInitOptions::new();
+    opts.initial_head("main");
+    git2::Repository::init_opts(repo_path, &opts).map_err(mx::ErrorKind::GitError)?;
 
     let hardware_output = process::Command::new("nixos-generate-config")
         .args(["--show-hardware-config", "--no-filesystems"])
