@@ -1,7 +1,7 @@
 use std::{collections::HashMap, fs, path, process};
 
 use super::file_lock::NixFile;
-use crate::{CONFIG_DIRECTORY, CONFIG_NAME, core::list::List as mxList, mx};
+use crate::{CONFIG_NAME, core::list::List as mxList, mx};
 
 const LOCK_BUILD_FILE: &str = "/tmp/mx-build.lock";
 const LOCK_QUEUE_BUILD_FILE: &str = "/tmp/mx-queue-build.lock";
@@ -162,8 +162,8 @@ impl<'a> Transaction<'a> {
         }))
     }
 
-    fn flake_lock_exists() -> bool {
-        path::Path::new(CONFIG_DIRECTORY)
+    fn flake_lock_exists(&self) -> bool {
+        path::Path::new(&self.git_repo_path)
             .join("flake.lock")
             .exists()
     }
@@ -278,7 +278,7 @@ impl<'a> Transaction<'a> {
         let mut new_file: Vec<String> = vec![];
         {
             self.git_repo =
-                Some(git2::Repository::open(CONFIG_DIRECTORY).map_err(mx::ErrorKind::GitError)?);
+                Some(git2::Repository::open(&self.git_repo_path).map_err(mx::ErrorKind::GitError)?);
 
             let is_empty = self
                 .git_repo
@@ -352,7 +352,7 @@ impl<'a> Transaction<'a> {
             }
         }
         if need_modif {
-            if !Self::flake_lock_exists() {
+            if !self.flake_lock_exists() {
                 process::Command::new("nix")
                     .args(["flake", "update"])
                     .current_dir(&self.git_repo_path)
