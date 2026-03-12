@@ -549,7 +549,7 @@ pub fn list_installed_package() -> mx::Result<Vec<NixPackage>> {
     let mut list_pkgs_tr = Transaction::new(
         CONFIG_DIRECTORY,
         "List installed package",
-        BuildCommand::Build,
+        BuildCommand::Boot,
     )?;
     list_pkgs_tr.add_file(FILE_PACKAGE_PATH)?;
     list_pkgs_tr.begin()?;

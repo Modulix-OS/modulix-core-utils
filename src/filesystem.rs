@@ -24,7 +24,7 @@ pub fn add_entry(
     let mut filesystem_transaction = Transaction::new(
         CONFIG_DIRECTORY,
         &format!("Add {} entry with device: {} in fstab", mount_point, device),
-        BuildCommand::Build,
+        BuildCommand::Boot,
     )?;
     filesystem_transaction.add_file(FILE_SYSTEM_PATH)?;
     filesystem_transaction.begin()?;
@@ -123,7 +123,7 @@ pub fn remove_entry(mount_point: &str) -> mx::Result<bool> {
     let mut filesystem_transaction = Transaction::new(
         CONFIG_DIRECTORY,
         &format!("remove {} entry in fstab", mount_point),
-        BuildCommand::Build,
+        BuildCommand::Boot,
     )?;
 
     filesystem_transaction.add_file(FILE_SYSTEM_PATH)?;
@@ -153,7 +153,7 @@ pub fn add_swap(device: &str) -> mx::Result<()> {
     let mut transaction_swap = Transaction::new(
         CONFIG_DIRECTORY,
         &format!("Add swap device: {}", device),
-        BuildCommand::Build,
+        BuildCommand::Boot,
     )?;
 
     transaction_swap.add_file(FILE_SYSTEM_PATH)?;
@@ -185,7 +185,7 @@ pub fn remove_swap(device: &str) -> mx::Result<()> {
     let mut transaction_swap = Transaction::new(
         CONFIG_DIRECTORY,
         &format!("Remove swap device: {}", device),
-        BuildCommand::Build,
+        BuildCommand::Boot,
     )?;
 
     transaction_swap.add_file(FILE_SYSTEM_PATH)?;
@@ -238,7 +238,7 @@ pub(super) fn get_filesystem_from_fstab() -> mx::Result<String> {
 
 pub fn def_filesystem_from_unix_fstab() -> mx::Result<()> {
     let mut transaction_reset =
-        Transaction::new(CONFIG_DIRECTORY, "Reset filesystem", BuildCommand::Build)?;
+        Transaction::new(CONFIG_DIRECTORY, "Reset filesystem", BuildCommand::Boot)?;
 
     transaction_reset.add_file(FILE_SYSTEM_PATH)?;
     transaction_reset.begin()?;

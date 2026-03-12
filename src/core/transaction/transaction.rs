@@ -9,7 +9,8 @@ const LOCK_QUEUE_BUILD_FILE: &str = "/tmp/mx-queue-build.lock";
 #[derive(Clone)]
 pub enum BuildCommand {
     Switch,
-    Build,
+    Boot,
+    Install,
 }
 
 struct LockFile {
@@ -60,14 +61,16 @@ impl BuildCommand {
     pub fn as_str(&self) -> &'static str {
         match self {
             BuildCommand::Switch => "switch",
-            BuildCommand::Build => "build",
+            BuildCommand::Boot => "boot",
+            BuildCommand::Install => "",
         }
     }
     #[cfg(debug_assertions)]
     pub fn as_str(&self) -> &'static str {
         match self {
             BuildCommand::Switch => "build-vm",
-            BuildCommand::Build => "build-vm",
+            BuildCommand::Boot => "build-vm",
+            BuildCommand::Install => "",
         }
     }
 }
@@ -105,14 +108,25 @@ impl<'a> Transaction<'a> {
         build_command: BuildCommand,
         stderr: Option<&mut String>,
     ) -> mx::Result<bool> {
-        let mut child = process::Command::new("nixos-rebuild")
-            .arg(build_command.as_str())
-            .arg("--flake")
-            .arg(format!("{}#{}", path_config, config_name))
-            .stdout(process::Stdio::inherit())
-            .stderr(process::Stdio::piped())
-            .spawn()
-            .map_err(mx::ErrorKind::IOError)?;
+        let mut child = match build_command {
+            BuildCommand::Install => process::Command::new("nixos-install")
+                .arg("--root")
+                .arg("/mnt")
+                .arg("--flake")
+                .arg(format!("{}#{}", path_config, config_name))
+                .stdout(process::Stdio::inherit())
+                .stderr(process::Stdio::piped())
+                .spawn()
+                .map_err(mx::ErrorKind::IOError)?,
+            BuildCommand::Switch | BuildCommand::Boot => process::Command::new("nixos-rebuild")
+                .arg(build_command.as_str())
+                .arg("--flake")
+                .arg(format!("{}#{}", path_config, config_name))
+                .stdout(process::Stdio::inherit())
+                .stderr(process::Stdio::piped())
+                .spawn()
+                .map_err(mx::ErrorKind::IOError)?,
+        };
 
         let stderr_output = {
             let mut s = String::new();
@@ -341,7 +355,7 @@ impl<'a> Transaction<'a> {
             if !Self::flake_lock_exists() {
                 process::Command::new("nix")
                     .args(["flake", "update"])
-                    .current_dir(CONFIG_DIRECTORY)
+                    .current_dir(&self.git_repo_path)
                     .output()
                     .map_err(mx::ErrorKind::IOError)?;
             }
@@ -352,7 +366,7 @@ impl<'a> Transaction<'a> {
                 queue.as_mut().unwrap().unlock();
                 let mut stderr = String::new();
                 let success = Self::rebuild_config(
-                    CONFIG_DIRECTORY,
+                    &self.git_repo_path,
                     CONFIG_NAME,
                     self.build_type.clone(),
                     Some(&mut stderr),

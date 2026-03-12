@@ -1,5 +1,3 @@
-use const_format::concatcp;
-
 use crate::core::transaction::Transaction;
 use crate::core::transaction::transaction::BuildCommand;
 use crate::{CONFIG_DIRECTORY, filesystem, mx};
@@ -78,7 +76,7 @@ pub fn init_repo(root_path: &str) -> mx::Result<()> {
     );
 
     let mut initial_transaction =
-        Transaction::new(&path_config, "initial commit", BuildCommand::Build)?;
+        Transaction::new(&path_config, "initial commit", BuildCommand::Install)?;
 
     let files: &[(&str, &str)] = &[
         ("flake.nix", FLAKE_FILE),
