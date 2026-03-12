@@ -144,11 +144,7 @@ pub fn install(package_name: &str) -> mx::Result<()> {
             }
         };
     }
-    match transac_add_pkgs.commit() {
-        Ok(_) => (),
-        Err(e) => println!("{}", e.to_string()),
-    };
-    Ok(())
+    transac_add_pkgs.commit()
 }
 
 pub fn uninstall(package_name: &str) -> mx::Result<()> {
@@ -563,14 +559,8 @@ pub fn list_installed_package() -> mx::Result<Vec<NixPackage>> {
     };
 
     // Retire le préfixe "pkgs." si présent pour obtenir le vrai nom du paquet
-    println!("Coucou");
     for (pkgs, pkgs_info) in PLUGIN_NAMESPACES.entries() {
         let option_pkgs = mxOption::new(pkgs_info.path_enable_programs);
-        println!(
-            "Package {}, trouvé ? {}",
-            pkgs,
-            option_pkgs.get(package_file).map_or("false", |v| v)
-        );
         if match option_pkgs.get(package_file) {
             Ok(res) => res,
             Err(mx::ErrorKind::OptionNotFound) => "false",
@@ -580,7 +570,6 @@ pub fn list_installed_package() -> mx::Result<Vec<NixPackage>> {
             }
         } == "true"
         {
-            dbg!(&names);
             names.push(pkgs);
         }
     }

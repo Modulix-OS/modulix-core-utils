@@ -37,7 +37,7 @@ const CONFIG_FILE: &str = r#"{ config, lib, pkgs, ... }:
     ./fstab.nix
   ];
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
-  boot.loader.systemd-boot.enable = true;
+  boot.loader.limine.enable = true;
   boot.loader.efi.canTouchEfiVariables = true;
   services.xserver.enable = true;
   services.displayManager.gdm.enable = true;

@@ -13,6 +13,7 @@ pub struct NixFile {
     file: Option<fs::File>,
     path: String,
     file_content: String,
+    was_created: bool,
 }
 
 impl NixFile {
@@ -21,6 +22,7 @@ impl NixFile {
             file: None,
             path: CONFIG_DIRECTORY.to_owned() + path,
             file_content: String::new(),
+            was_created: false,
         }
     }
 
@@ -49,7 +51,7 @@ impl NixFile {
         Ok(flags)
     }
 
-    fn make_immutable(path: &str) -> mx::Result<()> {
+    pub(super) fn make_immutable(path: &str) -> mx::Result<()> {
         if Self::is_owned_by_root(path)? {
             let file = OpenOptions::new()
                 .read(true)
@@ -69,7 +71,7 @@ impl NixFile {
         Ok(())
     }
 
-    fn make_mutable(path: &str) -> mx::Result<()> {
+    pub(super) fn make_mutable(path: &str) -> mx::Result<()> {
         if Self::is_owned_by_root(path)? {
             let file = OpenOptions::new()
                 .read(true)
@@ -93,8 +95,13 @@ impl NixFile {
         let mut file = fs::File::create(&self.path).map_err(mx::ErrorKind::IOError)?;
         file.write_all("{config, lib, pkgs, ...}:\n{\n}\n".as_bytes())
             .map_err(mx::ErrorKind::IOError)?;
+        self.was_created = true;
         Self::make_immutable(&self.path)?;
         Ok(())
+    }
+
+    pub fn was_created(&self) -> bool {
+        self.was_created
     }
 
     pub fn get_file_path(&self) -> &str {

@@ -352,7 +352,6 @@ impl<'a> Transaction<'a> {
                 )?;
                 lock_build.unlock();
                 if !success {
-                    self.rollback()?;
                     return Err(mx::ErrorKind::BuildError(stderr));
                 }
             }
@@ -384,6 +383,7 @@ impl<'a> Transaction<'a> {
                 self.git_repo = None;
                 return Ok(());
             }
+
             let repo = self.git_repo.as_ref().unwrap();
             let head = repo.head().map_err(mx::ErrorKind::GitError)?;
 
@@ -400,10 +400,23 @@ impl<'a> Transaction<'a> {
 
             repo.set_head(refname).map_err(mx::ErrorKind::GitError)?;
 
+            for (_, nix_file) in self.list_file.iter_mut() {
+                NixFile::make_mutable(nix_file.get_file_path()).ok();
+            }
+
             let mut checkout = git2::build::CheckoutBuilder::new();
             checkout.force();
             repo.checkout_head(Some(&mut checkout))
                 .map_err(mx::ErrorKind::GitError)?;
+
+            for (_, nix_file) in self.list_file.iter_mut() {
+                if nix_file.was_created() {
+                    NixFile::make_mutable(nix_file.get_file_path()).ok();
+                    std::fs::remove_file(nix_file.get_file_path()).ok();
+                } else if path::Path::new(nix_file.get_file_path()).exists() {
+                    NixFile::make_immutable(nix_file.get_file_path()).ok();
+                }
+            }
         }
         self.git_repo = None;
         Ok(())
