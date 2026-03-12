@@ -112,6 +112,7 @@ impl<'a> Transaction<'a> {
             BuildCommand::Install => process::Command::new("nixos-install")
                 .arg("--root")
                 .arg("/mnt")
+                .arg("--no-root-password")
                 .arg("--flake")
                 .arg(format!("{}#{}", path_config, config_name))
                 .stdout(process::Stdio::inherit())
