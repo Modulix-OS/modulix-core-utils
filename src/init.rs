@@ -46,8 +46,8 @@ const CONFIG_FILE: &str = r#"{ config, lib, pkgs, ... }:
 }
 "#;
 
-pub fn init_repo() -> mx::Result<()> {
-    let repo_path = Path::new(CONFIG_DIRECTORY);
+pub fn init_repo(root_path: &str) -> mx::Result<()> {
+    let repo_path = Path::new(concatcp!(root_path, '/', CONFIG_DIRECTORY));
 
     if !repo_path.exists() {
         fs::create_dir_all(repo_path).map_err(mx::ErrorKind::IOError)?;
