@@ -1,4 +1,5 @@
 use crate::{
+    CONFIG_DIRECTORY,
     core::{
         list::List as mxList,
         option::Option as mxOption,
@@ -19,8 +20,11 @@ pub fn add(
 ) -> mx::Result<()> {
     let root_option = format!("users.users.{}", username);
 
-    let mut transaction =
-        Transaction::new(&format!("Add user {}", username), BuildCommand::Switch)?;
+    let mut transaction = Transaction::new(
+        CONFIG_DIRECTORY,
+        &format!("Add user {}", username),
+        BuildCommand::Switch,
+    )?;
 
     transaction.add_file(USER_FILE_PATH)?;
     transaction.begin()?;
@@ -106,8 +110,11 @@ pub fn add(
 pub fn remove(username: &str) -> mx::Result<bool> {
     let root_option = format!("users.users.{}", username);
 
-    let mut transaction =
-        Transaction::new(&format!("Remove user {}", username), BuildCommand::Switch)?;
+    let mut transaction = Transaction::new(
+        CONFIG_DIRECTORY,
+        &format!("Remove user {}", username),
+        BuildCommand::Switch,
+    )?;
 
     transaction.add_file(USER_FILE_PATH)?;
     transaction.begin()?;

@@ -111,8 +111,11 @@ static PLUGIN_NAMESPACES: phf::Map<&'static str, PluginNamespace> = phf_map! {
 };
 
 pub fn install(package_name: &str) -> mx::Result<()> {
-    let mut transac_add_pkgs =
-        Transaction::new(&format!("Install {}", package_name), BuildCommand::Switch)?;
+    let mut transac_add_pkgs = Transaction::new(
+        CONFIG_DIRECTORY,
+        &format!("Install {}", package_name),
+        BuildCommand::Switch,
+    )?;
     transac_add_pkgs.add_file(FILE_PACKAGE_PATH)?;
 
     transac_add_pkgs.begin()?;
@@ -148,8 +151,11 @@ pub fn install(package_name: &str) -> mx::Result<()> {
 }
 
 pub fn uninstall(package_name: &str) -> mx::Result<()> {
-    let mut transac_add_pkgs =
-        Transaction::new(&format!("Uninstall {}", package_name), BuildCommand::Switch)?;
+    let mut transac_add_pkgs = Transaction::new(
+        CONFIG_DIRECTORY,
+        &format!("Uninstall {}", package_name),
+        BuildCommand::Switch,
+    )?;
     transac_add_pkgs.add_file(FILE_PACKAGE_PATH)?;
 
     transac_add_pkgs.begin()?;
@@ -204,6 +210,7 @@ pub fn uninstall(package_name: &str) -> mx::Result<()> {
 
 pub fn install_plugin(package_name: &str, plugin_name: &str) -> mx::Result<()> {
     let mut transac_add_plugin = Transaction::new(
+        CONFIG_DIRECTORY,
         &format!("Install {} plugin for {}", plugin_name, package_name),
         BuildCommand::Switch,
     )?;
@@ -252,6 +259,7 @@ pub fn install_plugin(package_name: &str, plugin_name: &str) -> mx::Result<()> {
 
 pub fn remove_plugin(package_name: &str, plugin_name: &str) -> mx::Result<()> {
     let mut transac_add_plugin = Transaction::new(
+        CONFIG_DIRECTORY,
         &format!("Remove {} plugin for {}", plugin_name, package_name),
         BuildCommand::Switch,
     )?;
@@ -538,7 +546,11 @@ pub fn get_package_metadata(package_name: &str) -> mx::Result<PackageMetadata> {
 }
 
 pub fn list_installed_package() -> mx::Result<Vec<NixPackage>> {
-    let mut list_pkgs_tr = Transaction::new("List installed package", BuildCommand::Build)?;
+    let mut list_pkgs_tr = Transaction::new(
+        CONFIG_DIRECTORY,
+        "List installed package",
+        BuildCommand::Build,
+    )?;
     list_pkgs_tr.add_file(FILE_PACKAGE_PATH)?;
     list_pkgs_tr.begin()?;
     let package_file = match list_pkgs_tr.get_file(FILE_PACKAGE_PATH) {

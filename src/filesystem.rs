@@ -1,6 +1,7 @@
 use std::process;
 
 use crate::{
+    CONFIG_DIRECTORY,
     core::{
         list::List as mxList,
         option::Option as mxOption,
@@ -21,6 +22,7 @@ pub fn add_entry(
     let root_option = format!("fileSystems.\"{}\"", mount_point);
 
     let mut filesystem_transaction = Transaction::new(
+        CONFIG_DIRECTORY,
         &format!("Add {} entry with device: {} in fstab", mount_point, device),
         BuildCommand::Build,
     )?;
@@ -119,6 +121,7 @@ pub fn remove_entry(mount_point: &str) -> mx::Result<bool> {
     let root_option = format!("fileSystems.\"{}\"", mount_point);
 
     let mut filesystem_transaction = Transaction::new(
+        CONFIG_DIRECTORY,
         &format!("remove {} entry in fstab", mount_point),
         BuildCommand::Build,
     )?;
@@ -147,8 +150,11 @@ pub fn remove_entry(mount_point: &str) -> mx::Result<bool> {
 }
 
 pub fn add_swap(device: &str) -> mx::Result<()> {
-    let mut transaction_swap =
-        Transaction::new(&format!("Add swap device: {}", device), BuildCommand::Build)?;
+    let mut transaction_swap = Transaction::new(
+        CONFIG_DIRECTORY,
+        &format!("Add swap device: {}", device),
+        BuildCommand::Build,
+    )?;
 
     transaction_swap.add_file(FILE_SYSTEM_PATH)?;
     transaction_swap.begin()?;
@@ -177,6 +183,7 @@ pub fn add_swap(device: &str) -> mx::Result<()> {
 
 pub fn remove_swap(device: &str) -> mx::Result<()> {
     let mut transaction_swap = Transaction::new(
+        CONFIG_DIRECTORY,
         &format!("Remove swap device: {}", device),
         BuildCommand::Build,
     )?;
@@ -230,7 +237,8 @@ pub(super) fn get_filesystem_from_fstab() -> mx::Result<String> {
 }
 
 pub fn def_filesystem_from_unix_fstab() -> mx::Result<()> {
-    let mut transaction_reset = Transaction::new("Reset filesystem", BuildCommand::Build)?;
+    let mut transaction_reset =
+        Transaction::new(CONFIG_DIRECTORY, "Reset filesystem", BuildCommand::Build)?;
 
     transaction_reset.add_file(FILE_SYSTEM_PATH)?;
     transaction_reset.begin()?;

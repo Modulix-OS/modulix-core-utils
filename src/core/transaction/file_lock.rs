@@ -17,10 +17,10 @@ pub struct NixFile {
 }
 
 impl NixFile {
-    pub fn new(path: &str) -> Self {
+    pub fn new(repo_path: &str, relative_path: &str) -> Self {
         NixFile {
             file: None,
-            path: CONFIG_DIRECTORY.to_owned() + path,
+            path: String::from(repo_path) + relative_path,
             file_content: String::new(),
             was_created: false,
         }

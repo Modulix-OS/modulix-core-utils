@@ -75,6 +75,7 @@ impl BuildCommand {
 pub struct Transaction<'a> {
     info: String,
     list_file: HashMap<String, NixFile>,
+    git_repo_path: String,
     git_repo: Option<git2::Repository>,
     git_user: git2::Signature<'a>,
     build_type: BuildCommand,
@@ -82,11 +83,16 @@ pub struct Transaction<'a> {
 }
 
 impl<'a> Transaction<'a> {
-    pub fn new(transaction_description: &str, build_type: BuildCommand) -> mx::Result<Self> {
+    pub fn new(
+        config_dir: &str,
+        transaction_description: &str,
+        build_type: BuildCommand,
+    ) -> mx::Result<Self> {
         Ok(Transaction {
             info: transaction_description.to_string(),
             list_file: HashMap::new(),
             git_repo: None,
+            git_repo_path: config_dir.to_string(),
             git_user: git2::Signature::now("Modulix-OS", "modulix.os@ik-mail.com").unwrap(),
             build_type: build_type,
             old_commit: git2::Oid::zero(),
@@ -234,7 +240,8 @@ impl<'a> Transaction<'a> {
         if self.git_repo.is_some() {
             return Err(mx::ErrorKind::TransactionAlreadyBegin);
         }
-        self.list_file.insert(path.to_string(), NixFile::new(path));
+        self.list_file
+            .insert(path.to_string(), NixFile::new(&self.git_repo_path, path));
         Ok(())
     }
 

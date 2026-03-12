@@ -1,5 +1,6 @@
 use std::ops::Range;
 
+use crate::CONFIG_DIRECTORY;
 use crate::core::list::List as mxList;
 use crate::core::transaction::file_lock::NixFile;
 use crate::{
@@ -27,7 +28,7 @@ fn with_firewall_transaction<F>(description: &str, f: F) -> mx::Result<()>
 where
     F: FnOnce(&mut NixFile) -> mx::Result<()>,
 {
-    let mut transaction = Transaction::new(description, BuildCommand::Switch)?;
+    let mut transaction = Transaction::new(CONFIG_DIRECTORY, description, BuildCommand::Switch)?;
     transaction.add_file(FILE_FIREWALL_PATH)?;
     transaction.begin()?;
 

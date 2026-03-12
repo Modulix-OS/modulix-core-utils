@@ -1,8 +1,11 @@
-use crate::core::{
-    option::Option as mxOption,
-    transaction::transaction::{BuildCommand, Transaction},
-};
 use crate::mx;
+use crate::{
+    CONFIG_DIRECTORY,
+    core::{
+        option::Option as mxOption,
+        transaction::transaction::{BuildCommand, Transaction},
+    },
+};
 
 const LOCALE_FILE_PATH: &str = "locale.nix";
 
@@ -22,7 +25,7 @@ pub fn set_locale_extra_settings(
     lc_collate: &str,
     console_keymap: &str,
 ) -> mx::Result<()> {
-    let mut transaction = Transaction::new("Set locale", BuildCommand::Switch)?;
+    let mut transaction = Transaction::new(CONFIG_DIRECTORY, "Set locale", BuildCommand::Switch)?;
 
     transaction.add_file(LOCALE_FILE_PATH)?;
     transaction.begin()?;

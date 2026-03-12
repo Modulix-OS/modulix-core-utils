@@ -1,4 +1,5 @@
 use crate::{
+    CONFIG_DIRECTORY,
     core::{
         option::Option as mxOption,
         transaction::{Transaction, file_lock::NixFile, transaction::BuildCommand},
@@ -12,7 +13,7 @@ fn with_module_transaction<F>(description: &str, f: F) -> mx::Result<()>
 where
     F: FnOnce(&mut NixFile) -> mx::Result<()>,
 {
-    let mut transaction = Transaction::new(description, BuildCommand::Switch)?;
+    let mut transaction = Transaction::new(CONFIG_DIRECTORY, description, BuildCommand::Switch)?;
     transaction.add_file(FILE_MODULE_PATH)?;
     transaction.begin()?;
 

@@ -1,3 +1,5 @@
+use const_format::concatcp;
+
 use crate::core::transaction::Transaction;
 use crate::core::transaction::transaction::BuildCommand;
 use crate::{CONFIG_DIRECTORY, filesystem, mx};
@@ -47,7 +49,8 @@ const CONFIG_FILE: &str = r#"{ config, lib, pkgs, ... }:
 "#;
 
 pub fn init_repo(root_path: &str) -> mx::Result<()> {
-    let repo_path = Path::new(concatcp!(root_path, '/', CONFIG_DIRECTORY));
+    let path_config = root_path.to_owned() + "/" + CONFIG_DIRECTORY;
+    let repo_path = Path::new(path_config.as_str());
 
     if !repo_path.exists() {
         fs::create_dir_all(repo_path).map_err(mx::ErrorKind::IOError)?;
@@ -74,7 +77,8 @@ pub fn init_repo(root_path: &str) -> mx::Result<()> {
         filesystem::get_filesystem_from_fstab()?
     );
 
-    let mut initial_transaction = Transaction::new("initial commit", BuildCommand::Build)?;
+    let mut initial_transaction =
+        Transaction::new(&path_config, "initial commit", BuildCommand::Build)?;
 
     let files: &[(&str, &str)] = &[
         ("flake.nix", FLAKE_FILE),
