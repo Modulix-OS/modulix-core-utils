@@ -150,6 +150,7 @@ impl<'a> List<'a> {
             .split_ascii_whitespace())
     }
 
+    #[allow(dead_code)]
     pub fn eq(&self, nix_file: &NixFile, desired_value: &[&str]) -> mx::Result<bool> {
         //let opt = get_option(file_content, list_name)?;
         let set_current_list: HashSet<&str> = self
@@ -167,6 +168,7 @@ impl<'a> List<'a> {
         Ok(set_desired_value == set_current_list)
     }
 
+    #[allow(dead_code)]
     pub fn countains(&self, nix_file: &NixFile, desired_value: &str) -> mx::Result<bool> {
         Ok(match self.opt_list.get(nix_file) {
             Ok(list) => list

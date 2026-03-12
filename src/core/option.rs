@@ -34,6 +34,7 @@ impl<'a> Option<'a> {
         Self::get_pos_option_in_file(nix_file, self.nix_option)
     }
 
+    #[allow(dead_code)]
     pub fn get_option(nix_file: &NixFile, nix_option: &str) -> mx::Result<ExistingOption> {
         match Self::get_pos_option_in_file(nix_file, nix_option) {
             Ok(res) => match res {

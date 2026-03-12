@@ -260,6 +260,7 @@ impl<'a> Transaction<'a> {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn as_begin(&self) -> bool {
         return self.git_repo.is_some();
     }

@@ -1,16 +1,17 @@
 use crate::{
-    CONFIG_DIRECTORY,
+    core::transaction,
     core::{
         list::List as mxList,
         option::Option as mxOption,
-        transaction::{Transaction, transaction::BuildCommand},
+        transaction::{file_lock::NixFile, transaction::BuildCommand},
     },
     mx,
 };
 
 const USER_FILE_PATH: &str = "users.nix";
 
-pub fn add(
+pub fn add_no_transaction(
+    file: &mut NixFile,
     username: &str,
     initial_password: &str,
     description: &str,
@@ -20,121 +21,64 @@ pub fn add(
 ) -> mx::Result<()> {
     let root_option = format!("users.users.{}", username);
 
-    let mut transaction = Transaction::new(
-        CONFIG_DIRECTORY,
-        &format!("Add user {}", username),
-        BuildCommand::Switch,
-    )?;
+    mxOption::new(&format!("{}.isNormalUser", root_option))
+        .set(file, if is_normal_user { "true" } else { "false" })?;
+    mxOption::new(&format!("{}.initialPassword", root_option))
+        .set(file, &format!("\"{}\"", initial_password))?;
+    mxOption::new(&format!("{}.createHome", root_option)).set(file, "true")?;
+    mxOption::new(&format!("{}.group", root_option)).set(file, "\"users\"")?;
+    mxOption::new(&format!("{}.description", root_option))
+        .set(file, &format!("\'\'{}\'\'", description))?;
+    mxOption::new(&format!("{}.shell", root_option)).set(file, &format!("\"{}\"", shell))?;
 
-    transaction.add_file(USER_FILE_PATH)?;
-    transaction.begin()?;
-
-    let file = match transaction.get_file(USER_FILE_PATH) {
-        Ok(f) => f,
-        Err(e) => {
-            transaction.rollback()?;
-            return Err(e);
-        }
-    };
-
-    match mxOption::new(&format!("{}.isNormalUser", root_option))
-        .set(file, if is_normal_user { "true" } else { "false" })
-    {
-        Ok(()) => (),
-        Err(e) => {
-            transaction.rollback()?;
-            return Err(e);
-        }
-    };
-
-    match mxOption::new(&format!("{}.initialPassword", root_option))
-        .set(file, &format!("\"{}\"", initial_password))
-    {
-        Ok(()) => (),
-        Err(e) => {
-            transaction.rollback()?;
-            return Err(e);
-        }
-    };
-
-    match mxOption::new(&format!("{}.createHome", root_option)).set(file, "true") {
-        Ok(()) => (),
-        Err(e) => {
-            transaction.rollback()?;
-            return Err(e);
-        }
-    };
-
-    match mxOption::new(&format!("{}.group", root_option)).set(file, "\"users\"") {
-        Ok(()) => (),
-        Err(e) => {
-            transaction.rollback()?;
-            return Err(e);
-        }
-    };
-
-    match mxOption::new(&format!("{}.description", root_option))
-        .set(file, &format!("\'\'{}\'\'", description))
-    {
-        Ok(()) => (),
-        Err(e) => {
-            transaction.rollback()?;
-            return Err(e);
-        }
-    };
-
-    match mxOption::new(&format!("{}.shell", root_option)).set(file, &format!("\"{}\"", shell)) {
-        Ok(()) => (),
-        Err(e) => {
-            transaction.rollback()?;
-            return Err(e);
-        }
-    };
-
-    let extra_group = format!("{}.extraGroups", root_option);
-    let extra_groups_list = mxList::new(&extra_group, true);
+    let extra_group_name = &format!("{}.extraGroups", root_option);
+    let extra_groups_list = mxList::new(extra_group_name, true);
     for group in extra_groups {
-        match extra_groups_list.add(file, &format!("\"{}\"", group)) {
-            Ok(()) => (),
-            Err(e) => {
-                transaction.rollback()?;
-                return Err(e);
-            }
-        };
+        extra_groups_list.add(file, &format!("\"{}\"", group))?;
     }
 
-    transaction.commit()?;
     Ok(())
 }
 
-pub fn remove(username: &str) -> mx::Result<bool> {
+pub fn remove_no_transaction(file: &mut NixFile, username: &str) -> mx::Result<bool> {
     let root_option = format!("users.users.{}", username);
+    mxOption::new(&root_option).set_option_all_instance_to_default(file)
+}
 
-    let mut transaction = Transaction::new(
-        CONFIG_DIRECTORY,
-        &format!("Remove user {}", username),
+pub fn add(
+    config_dir: &str,
+    username: &str,
+    initial_password: &str,
+    description: &str,
+    shell: &str,
+    extra_groups: &[&str],
+    is_normal_user: bool,
+) -> mx::Result<()> {
+    transaction::make_transaction(
+        &format!("Add user {}", username),
+        config_dir,
+        USER_FILE_PATH,
         BuildCommand::Switch,
-    )?;
+        |file| {
+            add_no_transaction(
+                file,
+                username,
+                initial_password,
+                description,
+                shell,
+                extra_groups,
+                is_normal_user,
+            )
+        },
+    )
+}
 
-    transaction.add_file(USER_FILE_PATH)?;
-    transaction.begin()?;
-
-    let file = match transaction.get_file(USER_FILE_PATH) {
-        Ok(f) => f,
-        Err(e) => {
-            transaction.rollback()?;
-            return Err(e);
-        }
-    };
-
-    let found = match mxOption::new(&root_option).set_option_all_instance_to_default(file) {
-        Ok(f) => f,
-        Err(e) => {
-            transaction.rollback()?;
-            return Err(e);
-        }
-    };
-
-    transaction.commit()?;
-    Ok(found)
+pub fn remove(config_dir: &str, username: &str) -> mx::Result<bool> {
+    transaction::make_transaction(
+        &format!("Remove user {}", username),
+        config_dir,
+        USER_FILE_PATH,
+        BuildCommand::Switch,
+        |file| remove_no_transaction(file, username),
+    )
 }

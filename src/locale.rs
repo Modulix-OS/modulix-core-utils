@@ -1,15 +1,15 @@
-use crate::mx;
-use crate::{
-    CONFIG_DIRECTORY,
-    core::{
-        option::Option as mxOption,
-        transaction::transaction::{BuildCommand, Transaction},
-    },
+use crate::core::{
+    option::Option as mxOption,
+    transaction::{self, file_lock::NixFile, transaction::BuildCommand},
 };
+use crate::mx;
 
 const LOCALE_FILE_PATH: &str = "locale.nix";
 
-pub fn set_locale_extra_settings(
+// --- no_transaction ---
+
+pub fn set_locale_extra_settings_no_transaction(
+    file: &mut NixFile,
     timezone: &str,
     default_locale: &str,
     lc_ctype: &str,
@@ -25,19 +25,6 @@ pub fn set_locale_extra_settings(
     lc_collate: &str,
     console_keymap: &str,
 ) -> mx::Result<()> {
-    let mut transaction = Transaction::new(CONFIG_DIRECTORY, "Set locale", BuildCommand::Switch)?;
-
-    transaction.add_file(LOCALE_FILE_PATH)?;
-    transaction.begin()?;
-
-    let file = match transaction.get_file(LOCALE_FILE_PATH) {
-        Ok(f) => f,
-        Err(e) => {
-            transaction.rollback()?;
-            return Err(e);
-        }
-    };
-
     let options = [
         ("time.timeZone", format!("\"{}\"", timezone)),
         ("i18n.defaultLocale", format!("\"{}\"", default_locale)),
@@ -89,21 +76,20 @@ pub fn set_locale_extra_settings(
     ];
 
     for (key, value) in &options {
-        match mxOption::new(key).set(file, value) {
-            Ok(()) => (),
-            Err(e) => {
-                transaction.rollback()?;
-                return Err(e);
-            }
-        };
+        mxOption::new(key).set(file, value)?;
     }
 
-    transaction.commit()?;
     Ok(())
 }
 
-pub fn set_locale(timezone: &str, default_locale: &str, console_keymap: &str) -> mx::Result<()> {
-    set_locale_extra_settings(
+pub fn set_locale_no_transaction(
+    file: &mut NixFile,
+    timezone: &str,
+    default_locale: &str,
+    console_keymap: &str,
+) -> mx::Result<()> {
+    set_locale_extra_settings_no_transaction(
+        file,
         timezone,
         default_locale,
         default_locale,
@@ -118,5 +104,66 @@ pub fn set_locale(timezone: &str, default_locale: &str, console_keymap: &str) ->
         default_locale,
         default_locale,
         console_keymap,
+    )
+}
+
+// --- transaction ---
+
+pub fn set_locale_extra_settings(
+    config_dir: &str,
+    timezone: &str,
+    default_locale: &str,
+    lc_ctype: &str,
+    lc_address: &str,
+    lc_measurement: &str,
+    lc_message: &str,
+    lc_monetary: &str,
+    lc_name: &str,
+    lc_numeric: &str,
+    lc_paper: &str,
+    lc_telephone: &str,
+    lc_time: &str,
+    lc_collate: &str,
+    console_keymap: &str,
+) -> mx::Result<()> {
+    transaction::make_transaction(
+        "Set locale",
+        config_dir,
+        LOCALE_FILE_PATH,
+        BuildCommand::Switch,
+        |file| {
+            set_locale_extra_settings_no_transaction(
+                file,
+                timezone,
+                default_locale,
+                lc_ctype,
+                lc_address,
+                lc_measurement,
+                lc_message,
+                lc_monetary,
+                lc_name,
+                lc_numeric,
+                lc_paper,
+                lc_telephone,
+                lc_time,
+                lc_collate,
+                console_keymap,
+            )
+        },
+    )
+}
+
+pub fn set_locale(
+    config_dir: &str,
+    timezone: &str,
+    default_locale: &str,
+    console_keymap: &str,
+) -> mx::Result<()> {
+    transaction::make_transaction(
+        "Set locale",
+        config_dir,
+        LOCALE_FILE_PATH,
+        BuildCommand::Switch,
+        |file| set_locale_no_transaction(file, timezone, default_locale, console_keymap),
     )
 }

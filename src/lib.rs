@@ -12,9 +12,9 @@ pub mod package;
 pub mod user;
 
 #[cfg(not(debug_assertions))]
-const CONFIG_DIRECTORY: &str = "/etc/modulix-os/";
+pub const CONFIG_DIRECTORY: &str = "/etc/modulix-os/";
 #[cfg(debug_assertions)]
-const CONFIG_DIRECTORY: &str = concatcp!(env!("CARGO_MANIFEST_DIR"), "/test/");
+pub const CONFIG_DIRECTORY: &str = concatcp!(env!("CARGO_MANIFEST_DIR"), "/test/");
 
 const CONFIG_NAME: &str = "default";
 
