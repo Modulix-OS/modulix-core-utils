@@ -77,7 +77,7 @@ pub fn init_repo(root_path: &str) -> mx::Result<()> {
 
     let fs = format!(
         "{{config, lib, pkgs, ...}}:\n{{\n{}\n}}\n",
-        filesystem::get_filesystem_from_fstab()?
+        filesystem::get_filesystem_from_fstab("/mnt")?
     );
 
     let mut initial_transaction =

@@ -213,9 +213,9 @@ pub fn remove_swap(device: &str) -> mx::Result<()> {
     Ok(())
 }
 
-pub(super) fn get_filesystem_from_fstab() -> mx::Result<String> {
+pub(super) fn get_filesystem_from_fstab(root_dir: &str) -> mx::Result<String> {
     let full = process::Command::new("nixos-generate-config")
-        .args(["--show-hardware-config"])
+        .args(["--root", root_dir, "--show-hardware-config"])
         .output()
         .map_err(mx::ErrorKind::IOError)?;
 
@@ -259,7 +259,7 @@ pub fn def_filesystem_from_unix_fstab() -> mx::Result<()> {
         }
     };
 
-    let new_file: String = match get_filesystem_from_fstab() {
+    let new_file: String = match get_filesystem_from_fstab("/") {
         Ok(s) => s,
         Err(e) => {
             transaction_reset.rollback()?;
