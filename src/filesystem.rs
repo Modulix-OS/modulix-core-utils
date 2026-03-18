@@ -87,7 +87,8 @@ pub fn remove_entry(config_dir: &str, mount_point: &str) -> mx::Result<bool> {
 pub fn add_swap_no_transaction(fstab: &mut NixFile, device: &str) -> mx::Result<()> {
     let list_swap = mxList::new("swapDevices", true);
     let new_entry = format!("{{device={};}}", device);
-    list_swap.add(fstab, &new_entry)
+    list_swap.add(fstab, &new_entry)?;
+    Ok(())
 }
 
 pub fn add_swap(config_dir: &str, device: &str) -> mx::Result<()> {
@@ -103,7 +104,8 @@ pub fn add_swap(config_dir: &str, device: &str) -> mx::Result<()> {
 pub fn remove_swap_no_transaction(fstab: &mut NixFile, device: &str) -> mx::Result<()> {
     let list_swap = mxList::new("swapDevices", true);
     let new_entry = format!("{{device={};}}", device);
-    list_swap.remove(fstab, &new_entry)
+    list_swap.remove(fstab, &new_entry)?;
+    Ok(())
 }
 
 pub fn remove_swap(config_dir: &str, device: &str) -> mx::Result<()> {
@@ -117,15 +119,19 @@ pub fn remove_swap(config_dir: &str, device: &str) -> mx::Result<()> {
 }
 
 pub(super) fn get_filesystem_from_fstab(root_dir: &str) -> mx::Result<String> {
-    let full = process::Command::new("nixos-generate-config")
-        .args(["--root", root_dir, "--show-hardware-config"])
-        .output()
-        .map_err(mx::ErrorKind::IOError)?;
+    let mut cmd_full = process::Command::new("nixos-generate-config");
+    cmd_full.args(["--show-hardware-config"]);
+    if root_dir != "/" {
+        cmd_full.args(["--root", root_dir]);
+    }
+    let full = cmd_full.output().map_err(mx::ErrorKind::IOError)?;
 
-    let no_fs = process::Command::new("nixos-generate-config")
-        .args(["--show-hardware-config", "--no-filesystems"])
-        .output()
-        .map_err(mx::ErrorKind::IOError)?;
+    let mut cmd_no_fs = process::Command::new("nixos-generate-config");
+    cmd_no_fs.args(["--show-hardware-config", "--no-filesystems"]);
+    if root_dir != "/" {
+        cmd_no_fs.args(["--root", root_dir]);
+    }
+    let no_fs = cmd_no_fs.output().map_err(mx::ErrorKind::IOError)?;
 
     let full_str = String::from_utf8(full.stdout).map_err(|_| mx::ErrorKind::InvalidFile)?;
     let no_fs_str = String::from_utf8(no_fs.stdout).map_err(|_| mx::ErrorKind::InvalidFile)?;

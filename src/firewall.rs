@@ -27,7 +27,8 @@ pub fn add_global_allow_port_no_transaction(
     protocol: NetworkProtocol,
 ) -> mx::Result<()> {
     let option_name = format!("networking.firewall.allowed{}Ports", protocol.as_str());
-    mxList::new(&option_name, true).add(file, &allowed_port.to_string())
+    mxList::new(&option_name, true).add(file, &allowed_port.to_string())?;
+    Ok(())
 }
 
 pub fn remove_global_allowed_port_no_transaction(
@@ -36,7 +37,8 @@ pub fn remove_global_allowed_port_no_transaction(
     protocol: NetworkProtocol,
 ) -> mx::Result<()> {
     let option_name = format!("networking.firewall.allowed{}Ports", protocol.as_str());
-    mxList::new(&option_name, true).remove(file, &allowed_port.to_string())
+    mxList::new(&option_name, true).remove(file, &allowed_port.to_string())?;
+    Ok(())
 }
 
 pub fn add_global_allowed_port_range_no_transaction(
@@ -48,7 +50,8 @@ pub fn add_global_allowed_port_range_no_transaction(
     mxList::new(&option_name, true).add(
         file,
         &format!("{{from={};to={};}}", allowed_ports.start, allowed_ports.end),
-    )
+    )?;
+    Ok(())
 }
 
 pub fn remove_global_allowed_port_range_no_transaction(
@@ -60,7 +63,8 @@ pub fn remove_global_allowed_port_range_no_transaction(
     mxList::new(&option_name, true).remove(
         file,
         &format!("{{from={};to={};}}", allowed_ports.start, allowed_ports.end),
-    )
+    )?;
+    Ok(())
 }
 
 pub fn add_interface_allow_port_no_transaction(
@@ -74,7 +78,8 @@ pub fn add_interface_allow_port_no_transaction(
         interface,
         protocol.as_str()
     );
-    mxList::new(&option_name, true).add(file, &allowed_port.to_string())
+    mxList::new(&option_name, true).add(file, &allowed_port.to_string())?;
+    Ok(())
 }
 
 pub fn remove_interface_allowed_port_no_transaction(
@@ -88,7 +93,8 @@ pub fn remove_interface_allowed_port_no_transaction(
         interface,
         protocol.as_str()
     );
-    mxList::new(&option_name, true).remove(file, &allowed_port.to_string())
+    mxList::new(&option_name, true).remove(file, &allowed_port.to_string())?;
+    Ok(())
 }
 
 pub fn add_interface_allow_port_range_no_transaction(
@@ -105,7 +111,8 @@ pub fn add_interface_allow_port_range_no_transaction(
     mxList::new(&option_name, true).add(
         file,
         &format!("{{from={};to={};}}", allowed_ports.start, allowed_ports.end),
-    )
+    )?;
+    Ok(())
 }
 
 pub fn remove_interface_allowed_port_range_no_transaction(
@@ -122,7 +129,8 @@ pub fn remove_interface_allowed_port_range_no_transaction(
     mxList::new(&option_name, true).remove(
         file,
         &format!("{{from={};to={};}}", allowed_ports.start, allowed_ports.end),
-    )
+    )?;
+    Ok(())
 }
 
 pub fn add_global_allow_port(

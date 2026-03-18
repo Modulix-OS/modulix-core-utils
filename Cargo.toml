@@ -8,6 +8,11 @@ const_format = "0.2.35"
 git2 = "0.20.4"
 nix = { version = "0.31.2", features = ["fs", "ioctl"] }
 phf = { version = "0.13.1", features = ["macros"] }
+regex = "1.12.3"
 rnix = "0.14.0"
+rowan = "0.16.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
+
+[features]
+match-exact-gpu-gen = []

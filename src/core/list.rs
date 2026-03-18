@@ -25,7 +25,7 @@ impl<'a> List<'a> {
         }
     }
 
-    pub fn add(&self, nix_file: &mut NixFile, insert_value: &str) -> mx::Result<()> {
+    pub fn add(&self, nix_file: &mut NixFile, insert_value: &str) -> mx::Result<&Self> {
         match self.opt_list.get_position(nix_file)? {
             SettingsPosition::ExistingOption(option) => {
                 let indent_level = option.get_indent_level();
@@ -77,10 +77,10 @@ impl<'a> List<'a> {
                 self.add(nix_file, insert_value)?;
             }
         }
-        Ok(())
+        Ok(self)
     }
 
-    pub fn remove(&self, nix_file: &mut NixFile, value: &str) -> mx::Result<()> {
+    pub fn remove(&self, nix_file: &mut NixFile, value: &str) -> mx::Result<&Self> {
         match self.opt_list.get_position(nix_file)? {
             SettingsPosition::ExistingOption(_) => {
                 let mut list = self.opt_list.get(nix_file)?.to_string();
@@ -131,7 +131,7 @@ impl<'a> List<'a> {
             }
             SettingsPosition::NewInsertion(_) => (),
         }
-        Ok(())
+        Ok(self)
     }
 
     pub fn get_element_in_list(

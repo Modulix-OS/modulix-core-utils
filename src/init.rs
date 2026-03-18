@@ -9,8 +9,9 @@ const FLAKE_FILE: &str = concat!(
   description = "Modulix OS";
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/release-25.11";
+    nixos-hardware.url = "github:NixOS/nixos-hardware";
   };
-  outputs = { self, nixpkgs }: {
+  outputs = { self, nixpkgs, nixos-hardware }: {
     nixosConfigurations =
     {
       "default" = let
@@ -20,6 +21,7 @@ const FLAKE_FILE: &str = concat!(
       in nixpkgs.lib.nixosSystem
       {
         system = system;
+        specialArgs = { inherit self nixos-hardware; };
         modules = [
           ./configuration.nix
         ];
@@ -62,24 +64,27 @@ pub fn init_repo(root_path: &str) -> mx::Result<()> {
     opts.initial_head("main");
     git2::Repository::init_opts(repo_path, &opts).map_err(mx::ErrorKind::GitError)?;
 
-    let hardware_output = process::Command::new("nixos-generate-config")
-        .args([
-            "--root",
-            root_path,
-            "--show-hardware-config",
-            "--no-filesystems",
-        ])
-        .output()
-        .map_err(mx::ErrorKind::IOError)?;
+    let hardware_output = {
+        let mut cmd = process::Command::new("nixos-generate-config");
+        cmd.args(["--show-hardware-config", "--no-filesystems"]);
+        if root_path != "/" {
+            cmd.args(["--root", root_path]);
+        }
+        cmd.output().map_err(mx::ErrorKind::IOError)?
+    };
 
     let hardware_no_fs =
         String::from_utf8(hardware_output.stdout).map_err(|_| mx::ErrorKind::InvalidFile)?;
 
     let fs = format!(
         "{{config, lib, pkgs, ...}}:\n{{\n{}\n}}\n",
-        filesystem::get_filesystem_from_fstab("/mnt")?
+        filesystem::get_filesystem_from_fstab(root_path)?
     );
 
+    #[cfg(debug_assertions)]
+    let mut initial_transaction =
+        Transaction::new(&path_config, "initial commit", BuildCommand::Boot)?;
+    #[cfg(not(debug_assertions))]
     let mut initial_transaction =
         Transaction::new(&path_config, "initial commit", BuildCommand::Install)?;
 

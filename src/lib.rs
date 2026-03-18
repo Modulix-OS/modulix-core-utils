@@ -10,6 +10,8 @@ pub mod locale;
 pub mod modulix_modules;
 pub mod package;
 pub mod user;
+pub mod hardware_config;
+pub mod detect_hardware;
 
 #[cfg(not(debug_assertions))]
 pub const CONFIG_DIRECTORY: &str = "/etc/modulix-os/";

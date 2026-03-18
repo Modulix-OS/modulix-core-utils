@@ -51,7 +51,7 @@ impl<'a> Option<'a> {
         }
     }
 
-    pub fn set(&self, nix_file: &mut NixFile, option_value: &str) -> mx::Result<()> {
+    pub fn set(&self, nix_file: &mut NixFile, option_value: &str) -> mx::Result<&Self> {
         match Self::get_pos_option_in_file(&nix_file, self.nix_option)? {
             SettingsPosition::NewInsertion(pos_insert) => {
                 let indent = if pos_insert.get_indent_level() > 0usize {
@@ -113,7 +113,7 @@ impl<'a> Option<'a> {
                     .replace_range(range_value, &option_value);
             }
         }
-        return Ok(());
+        return Ok(&self);
     }
 
     pub fn get(&self, nix_file: &'a NixFile) -> mx::Result<&'a str> {

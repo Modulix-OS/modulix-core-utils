@@ -24,29 +24,29 @@
             default = naerskLib.buildPackage {
                 src = ./.;
                 buildInputs = with pkgs; [ openssl ];
-                # runtimeInputs = with pkgs; [ pciutils usbutils cpuid ];
+                runtimeInputs = with pkgs; [ pciutils usbutils cpuid ];
                 nativeBuildInputs = with pkgs; [ pkg-config ]; # makeWrapper ];
 
-                # postInstall = ''
-                #     wrapProgram $out/bin/winteros-detect-hardware \
-                #         --prefix PATH : ${pkgs.pciutils}/bin \
-                #         --prefix PATH : ${pkgs.usbutils}/bin \
-                #         --prefix PATH : ${pkgs.cpuid}/bin
-                #   '';
+                postInstall = ''
+                    wrapProgram $out/bin/winteros-detect-hardware \
+                        --prefix PATH : ${pkgs.pciutils}/bin \
+                        --prefix PATH : ${pkgs.usbutils}/bin \
+                        --prefix PATH : ${pkgs.cpuid}/bin
+                  '';
             };
             debug = naerskLib.buildPackage {
                 src = ./.;
                 release = false;
                 buildInputs = with pkgs; [ openssl ];
-                # runtimeInputs = with pkgs; [ pciutils usbutils cpuid ];
+                runtimeInputs = with pkgs; [ pciutils usbutils cpuid ];
                 nativeBuildInputs = with pkgs; [ pkg-config ];# makeWrapper ];
 
-                # postInstall = ''
-                # wrapProgram $out/bin/winteros-detect-hardware \
-                #     --prefix PATH : ${pkgs.pciutils}/bin \
-                #     --prefix PATH : ${pkgs.usbutils}/bin \
-                #     --prefix PATH : ${pkgs.cpuid}/bin
-                # '';
+                postInstall = ''
+                wrapProgram $out/bin/winteros-detect-hardware \
+                    --prefix PATH : ${pkgs.pciutils}/bin \
+                    --prefix PATH : ${pkgs.usbutils}/bin \
+                    --prefix PATH : ${pkgs.cpuid}/bin
+                '';
             };
          });
         devShell = forAllSystems (system:
@@ -60,10 +60,10 @@
             rustc
             rustfmt
             openssl
-            # glib
-            # pciutils
-            # usbutils
-            # cpuid
+            glib
+            pciutils
+            usbutils
+            cpuid
             pkg-config
           ];
           RUST_SRC_PATH = "${pkgs.rust.packages.stable.rustPlatform.rustLibSrc}";
