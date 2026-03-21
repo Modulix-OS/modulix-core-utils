@@ -464,19 +464,33 @@ impl<'a> Transaction<'a> {
                 .is_empty()
                 .map_err(mx::ErrorKind::GitError)?;
 
+            // Si le dépôt contient des modifications non commitées, on les stashe
+            // pour travailler sur un arbre propre et les restaurer après.
             if !is_empty {
-                let mut opts = git2::StatusOptions::new();
-                opts.include_untracked(true).include_ignored(false);
+                let is_dirty = {
+                    let mut opts = git2::StatusOptions::new();
+                    opts.include_untracked(true).include_ignored(false);
+                    let statuses = self
+                        .git_repo
+                        .as_ref()
+                        .unwrap()
+                        .statuses(Some(&mut opts))
+                        .map_err(mx::ErrorKind::GitError)?;
+                    !statuses.is_empty()
+                }; // `statuses` est droppé ici, libérant l'emprunt immutable
 
-                let statuses = self
-                    .git_repo
-                    .as_ref()
-                    .unwrap()
-                    .statuses(Some(&mut opts))
-                    .map_err(mx::ErrorKind::GitError)?;
-
-                if !statuses.is_empty() {
-                    return Err(mx::ErrorKind::GitNotCommitted);
+                if is_dirty {
+                    let stash_oid = self
+                        .git_repo
+                        .as_mut()
+                        .unwrap()
+                        .stash_save(
+                            &self.git_user,
+                            "mx: auto-stash before transaction",
+                            Some(git2::StashFlags::INCLUDE_UNTRACKED),
+                        )
+                        .map_err(mx::ErrorKind::GitError)?;
+                    self.stash_oid = Some(stash_oid);
                 }
             }
 
@@ -556,10 +570,9 @@ impl<'a> Transaction<'a> {
 
         let mut need_modif = false;
         for (path, _) in self.list_file.iter() {
-            if Self::has_diff_with_commit(&self.git_repo.as_mut().unwrap(), self.old_commit, path)?
-            {
+            if Self::has_diff_with_commit(self.git_repo.as_ref().unwrap(), self.old_commit, path)? {
                 need_modif = true;
-                self.git_add(&path)?;
+                self.git_add(path)?;
             }
         }
 
@@ -597,6 +610,8 @@ impl<'a> Transaction<'a> {
         for (_, nix_file) in self.list_file.iter_mut() {
             nix_file.close()?;
         }
+        // Restaure les modifications stashées avant la transaction
+        self.stash_restore()?;
         self.git_repo = None;
         Ok(())
     }
@@ -679,6 +694,8 @@ impl<'a> Transaction<'a> {
                 }
             }
         }
+        // Restaure les modifications stashées avant la transaction
+        self.stash_restore()?;
         self.git_repo = None;
         Ok(())
     }
