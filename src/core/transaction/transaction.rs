@@ -540,11 +540,16 @@ impl<'a> Transaction<'a> {
     /// `stash_oid` est quand même réinitialisé pour éviter une double tentative.
     fn stash_restore(&mut self) -> mx::Result<()> {
         if self.stash_oid.take().is_some() {
-            self.git_repo
-                .as_mut()
-                .unwrap()
-                .stash_pop(0, None)
-                .map_err(mx::ErrorKind::GitError)?;
+            match self.git_repo.as_mut().unwrap().stash_pop(0, None) {
+                Ok(_) => (),
+                Err(_) => {
+                    self.git_repo
+                        .as_mut()
+                        .unwrap()
+                        .stash_drop(0)
+                        .map_err(mx::ErrorKind::GitError)?;
+                }
+            }
         }
         Ok(())
     }
