@@ -1,5 +1,6 @@
 use phf::phf_map;
 use std::process;
+pub mod desktop_icon;
 
 use serde::{Deserialize, Serialize};
 
