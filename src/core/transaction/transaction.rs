@@ -693,6 +693,13 @@ impl<'a> Transaction<'a> {
                     NixFile::make_immutable(nix_file.get_file_path()).ok();
                 }
             }
+
+            // Libère les verrous et réinitialise l'état de chaque NixFile.
+            // Sans ce close(), le verrou de fichier resterait actif après rollback,
+            // bloquant indéfiniment tout begin() ultérieur sur le même fichier.
+            for (_, nix_file) in self.list_file.iter_mut() {
+                let _ = nix_file.close();
+            }
         }
         // Restaure les modifications stashées avant la transaction
         self.stash_restore()?;

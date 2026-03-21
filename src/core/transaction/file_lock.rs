@@ -298,6 +298,12 @@ impl NixFile {
             .unwrap()
             .unlock()
             .map_err(mx::ErrorKind::IOError)?;
+
+        // Réinitialise l'état : la transaction est terminée après un commit.
+        // Sans ceci, file.is_some() resterait vrai et get_file_content()
+        // continuerait de retourner Ok au lieu de TransactionNotBegin.
+        self.file_content = String::new();
+        self.file = None;
         Ok(())
     }
 
@@ -311,8 +317,10 @@ impl NixFile {
     /// # Erreurs
     /// Toujours `Ok(())` (l'erreur de déverrouillage est intentionnellement ignorée).
     pub(super) fn close(&mut self) -> mx::Result<()> {
-        #[allow(unused_must_use)]
-        self.file.as_ref().unwrap().unlock();
+        if let Some(f) = self.file.as_ref() {
+            #[allow(unused_must_use)]
+            f.unlock();
+        }
         self.file_content = String::new();
         self.file = None;
         Ok(())
