@@ -707,3 +707,7 @@ impl<'a> Transaction<'a> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "transaction_tests.rs"]
+mod tests;

@@ -326,3 +326,7 @@ impl NixFile {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "file_lock_tests.rs"]
+mod tests;
