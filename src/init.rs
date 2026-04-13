@@ -11,7 +11,7 @@ const FLAKE_FILE: &str = concat!(
     nixpkgs.url = "github:nixos/nixpkgs/release-25.11";
     nixos-hardware.url = "github:NixOS/nixos-hardware";
   };
-  outputs = { self, nixpkgs, nixos-hardware }: {
+  outputs = { self, nixpkgs, nixos-hardware, ... }@inputs: {
     nixosConfigurations =
     {
       "default" = let
@@ -21,7 +21,7 @@ const FLAKE_FILE: &str = concat!(
       in nixpkgs.lib.nixosSystem
       {
         system = system;
-        specialArgs = { inherit self nixos-hardware; };
+        specialArgs = { inherit self nixos-hardware inputs; };
         modules = [
           ./configuration.nix
         ];
