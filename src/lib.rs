@@ -1,6 +1,7 @@
 #[cfg(debug_assertions)]
 use const_format::concatcp;
 
+mod config_store;
 mod core;
 pub mod detect_hardware;
 mod error;
