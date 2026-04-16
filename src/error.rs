@@ -18,6 +18,7 @@ pub enum ErrorKind {
     ErrorParseCPUCodename,
     ThreadError,
     DesktopFileNotFound,
+    InvalidNixString,
     GetVGAInfoError(&'static str),
     BuildError(String),
     RequestSenderError(String),
@@ -31,36 +32,55 @@ pub enum ErrorKind {
 
 pub type Result<T> = result::Result<T, ErrorKind>;
 
-impl ToString for ErrorKind {
-    fn to_string(&self) -> String {
-        match self {
-            Self::InvalidFile => String::from("File is not a valid Nix file"),
-            Self::OptionNotFound => String::from("Option not found"),
-            Self::FileNotFound => String::from("File not found"),
-            Self::TransactionNotBegin => String::from("Transaction don't start"),
-            Self::TransactionAlreadyBegin => String::from("Transaction already start"),
-            Self::FailToLock => String::from("Impossible to take lock"),
-            Self::PermissionDenied => String::from("Permission denied"),
-            Self::GitNotCommitted => {
-                String::from("In repository file are untracked or not committed")
+impl fmt::Display for ErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s: String;
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::InvalidFile => "File is not a valid Nix file",
+                Self::OptionNotFound => "Option not found",
+                Self::FileNotFound => "File not found",
+                Self::TransactionNotBegin => "Transaction don't start",
+                Self::TransactionAlreadyBegin => "Transaction already start",
+                Self::FailToLock => "Impossible to take lock",
+                Self::PermissionDenied => "Permission denied",
+                Self::GitNotCommitted => "In repository file are untracked or not committed",
+                Self::OptionIsNotList => "This option is not a list",
+                Self::InvalidUuid => "Invalid uuid for device",
+                Self::PackageDoesNotHaveAPlugin => "This package does not have a plugin",
+                Self::CPUInfoNofFound => "CPU info not found",
+                Self::UnknowCPUConstructor => "Unknow CPU constructor",
+                Self::ErrorParseCPUCodename => "Impossible to parse CPU codename",
+                Self::ThreadError => "Thread error",
+                Self::DesktopFileNotFound => "Desktop icon not found",
+                Self::InvalidNixString => "Impossible to parse nix string in configuration",
+                Self::RequestSenderError(s) => s.as_str(),
+                Self::GetVGAInfoError(e) => e,
+                Self::IOError(e) => {
+                    s = e.to_string();
+                    s.as_str()
+                }
+                Self::GitError(e) => {
+                    s = e.to_string();
+                    s.as_str()
+                }
+                Self::BuildError(s) => s,
+                Self::NixCommandError(s) => s.as_str(),
+                Self::FromUtf8Error(e) => {
+                    s = e.to_string();
+                    s.as_str()
+                }
+                Self::UnixError(e) => {
+                    s = e.to_string();
+                    s.as_str()
+                }
+                Self::ParseError(e) => {
+                    s = e.to_string();
+                    s.as_str()
+                }
             }
-            Self::OptionIsNotList => String::from("This option is not a list"),
-            Self::InvalidUuid => String::from("Invalid uuid for device"),
-            Self::PackageDoesNotHaveAPlugin => String::from("This package does not have a plugin"),
-            Self::CPUInfoNofFound => String::from("CPU info not found"),
-            Self::UnknowCPUConstructor => String::from("Unknow CPU constructor"),
-            Self::ErrorParseCPUCodename => String::from("Impossible to parse CPU codename"),
-            Self::ThreadError => String::from("Thread error"),
-            Self::DesktopFileNotFound => String::from("Desktop icon not found"),
-            Self::RequestSenderError(s) => s.to_string(),
-            Self::GetVGAInfoError(e) => e.to_string(),
-            Self::IOError(e) => e.to_string(),
-            Self::GitError(e) => e.to_string(),
-            Self::BuildError(s) => s.to_string(),
-            Self::NixCommandError(s) => s.to_string(),
-            Self::FromUtf8Error(e) => e.to_string(),
-            Self::UnixError(e) => e.to_string(),
-            Self::ParseError(e) => e.to_string(),
-        }
+        )
     }
 }
