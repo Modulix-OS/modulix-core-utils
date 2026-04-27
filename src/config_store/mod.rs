@@ -51,4 +51,8 @@ impl ConfigStore {
         let path = self.base_dir.join(relative_path);
         fs::remove_file(path).map_err(mx::ErrorKind::IOError)
     }
+
+    pub fn get_path(&self) -> &PathBuf {
+        &self.base_dir
+    }
 }
