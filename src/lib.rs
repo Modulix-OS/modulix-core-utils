@@ -3,6 +3,7 @@ use const_format::concatcp;
 
 mod config_store;
 mod core;
+pub mod desktop_environment;
 pub mod detect_hardware;
 mod error;
 pub mod filesystem;
