@@ -23,6 +23,7 @@ pub enum ErrorKind {
     BuildError(String),
     RequestSenderError(String),
     NixCommandError(String),
+    InvalidArgument(String),
     FromUtf8Error(string::FromUtf8Error),
     IOError(io::Error),
     GitError(git2::Error),
@@ -56,6 +57,7 @@ impl fmt::Display for ErrorKind {
                 Self::ThreadError => "Thread error",
                 Self::DesktopFileNotFound => "Desktop icon not found",
                 Self::InvalidNixString => "Impossible to parse nix string in configuration",
+                Self::InvalidArgument(s) => s.as_str(),
                 Self::RequestSenderError(s) => s.as_str(),
                 Self::GetVGAInfoError(e) => e,
                 Self::IOError(e) => {
