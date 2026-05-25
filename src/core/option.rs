@@ -1,5 +1,5 @@
+use super::TABULATION_SIZE;
 use super::transaction::file_lock::NixFile;
-use crate::core::TABULATION_SIZE;
 use crate::core::localise_option::{ExistingOption, SettingsPosition};
 use crate::mx;
 use std::str;
