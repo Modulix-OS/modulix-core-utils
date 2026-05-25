@@ -19,6 +19,7 @@ pub enum ErrorKind {
     ThreadError,
     DesktopFileNotFound,
     InvalidNixString,
+    PackageNotFound,
     GetVGAInfoError(&'static str),
     BuildError(String),
     RequestSenderError(String),
@@ -29,6 +30,7 @@ pub enum ErrorKind {
     GitError(git2::Error),
     UnixError(nix::Error),
     ParseError(serde_json::Error),
+    HttpError(reqwest::Error),
 }
 
 pub type Result<T> = result::Result<T, ErrorKind>;
@@ -57,6 +59,7 @@ impl fmt::Display for ErrorKind {
                 Self::ThreadError => "Thread error",
                 Self::DesktopFileNotFound => "Desktop icon not found",
                 Self::InvalidNixString => "Impossible to parse nix string in configuration",
+                Self::PackageNotFound => "Package not found",
                 Self::InvalidArgument(s) => s.as_str(),
                 Self::RequestSenderError(s) => s.as_str(),
                 Self::GetVGAInfoError(e) => e,
@@ -80,6 +83,10 @@ impl fmt::Display for ErrorKind {
                 }
                 Self::ParseError(e) => {
                     s = e.to_string();
+                    s.as_str()
+                }
+                Self::HttpError(e) => {
+                    s = format!("HTTP Request Error: {}", e);
                     s.as_str()
                 }
             }
