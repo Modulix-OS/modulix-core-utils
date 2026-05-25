@@ -3,6 +3,69 @@ name = "modulix-core-utils"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Core
+core-arch-info = []
+core-nix-file = ["dep:rnix", "dep:rowan", "unix"]
+core-user-info = ["dep:serde", "serde-json"]
+core-nix-plugin-namespace = ["dep:phf"]
+
+# Modules
+package-info-minimal = [
+    "core-nix-plugin-namespace",
+    "dep:serde",
+    "serde-json",
+    "dep:tokio"
+]
+package-info-full = [
+    "package-info-minimal",
+    "reqwest"
+]
+config-store = []
+desktop-environment = [
+    "config-store",
+    "core-user-info",
+    "dep:walkdir",
+    "dep:glob"
+]
+detect-hardware = [
+    "dep:regex",
+    "dep:serde",
+    "serde-json"
+]
+filesystem = ["core-nix-file"]
+firewall = ["core-nix-file"]
+flake-input = ["core-nix-file"]
+hardware-config = [
+    "detect-hardware",
+    "core-nix-file"
+]
+init = [
+    "core-nix-file",
+    "filesystem"
+]
+locale = ["core-nix-file"]
+modulix-module = ["core-nix-file"]
+install-package = [
+    "core-nix-file",
+    "package-info-minimal",
+    "dep:phf",
+    "dep:xz2",
+    "serde-json",
+    "dep:tokio",
+    "core-nix-plugin-namespace"
+]
+user = ["core-nix-file"]
+
+# wrapped dependencies
+serde-json = ["dep:serde_json"]
+reqwest = ["dep:reqwest"]
+unix = ["dep:nix"]
+
+
+# Generator
+flathub-info-gen = ["reqwest", "serde-json", "dep:futures", "dep:tokio", "dep:serde"]
+
 [dependencies]
 const_format = "0.2.36"
 git2 = "0.21.0"
@@ -25,5 +88,27 @@ tokio = { version = "1.52.3", features = ["macros", "process", "rt-multi-thread"
 [dev-dependencies]
 tempfile = "3"
 
-[features]
-match-exact-gpu-gen = []
+[[bin]]
+name = "flathub-incommit_implfo-gen"
+path = "bin/flathub-info-gen.rs"
+required-features = ["flathub-info-gen"]
+
+[[exemple]]
+name = "filesystem"
+required-features = ["filesystem"]
+
+[[exemple]]
+name = "search-package"
+required-features = ["dep:tokio", "package-info-full"]
+
+[[exemple]]
+name = "package"
+required-features = ["install-package"]
+
+[[exemple]]
+name = "firewall"
+required-features = ["firewall"]
+
+[[exemple]]
+name = "flake_input"
+required-features = ["flake-input"]

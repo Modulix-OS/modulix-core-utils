@@ -28,8 +28,14 @@ pub enum ErrorKind {
     FromUtf8Error(string::FromUtf8Error),
     IOError(io::Error),
     GitError(git2::Error),
+
+    #[cfg(feature = "unix")]
     UnixError(nix::Error),
+
+    #[cfg(feature = "serde-json")]
     ParseError(serde_json::Error),
+
+    #[cfg(feature = "reqwest")]
     HttpError(reqwest::Error),
 }
 
@@ -77,14 +83,20 @@ impl fmt::Display for ErrorKind {
                     s = e.to_string();
                     s.as_str()
                 }
+
+                #[cfg(feature = "unix")]
                 Self::UnixError(e) => {
                     s = e.to_string();
                     s.as_str()
                 }
+
+                #[cfg(feature = "serde-json")]
                 Self::ParseError(e) => {
                     s = e.to_string();
                     s.as_str()
                 }
+
+                #[cfg(feature = "reqwest")]
                 Self::HttpError(e) => {
                     s = format!("HTTP Request Error: {}", e);
                     s.as_str()

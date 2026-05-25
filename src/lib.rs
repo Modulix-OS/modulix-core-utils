@@ -1,20 +1,49 @@
-#[cfg(debug_assertions)]
 use const_format::concatcp;
 
+#[cfg(feature = "package-info-minimal")]
+pub mod package_info;
+
+#[cfg(feature = "config-store")]
 mod config_store;
+
 mod core;
+
+#[cfg(feature = "desktop-environment")]
 pub mod desktop_environment;
+
+#[cfg(feature = "detect-hardware")]
 pub mod detect_hardware;
-mod error;
+
+#[cfg(feature = "filesystem")]
 pub mod filesystem;
+
+#[cfg(feature = "firewall")]
 pub mod firewall;
+
+#[cfg(feature = "flake-input")]
 pub mod flake_input;
+
+#[cfg(feature = "hardware-config")]
 pub mod hardware_config;
+
+#[cfg(feature = "init")]
 pub mod init;
+
+#[cfg(feature = "locale")]
 pub mod locale;
+
+//pub mod module;
+
+#[cfg(feature = "modulix-module")]
 pub mod modulix_modules;
-pub mod package;
+
+#[cfg(feature = "install-package")]
+pub mod install_package;
+
+#[cfg(feature = "user")]
 pub mod user;
+
+mod error;
 
 #[cfg(not(debug_assertions))]
 pub const CONFIG_DIRECTORY: &str = "/etc/modulix-os/";
@@ -52,5 +81,7 @@ const CONFIG_NAME: &str = "default";
 pub mod mx {
     pub use crate::error::ErrorKind;
     pub use crate::error::Result;
+
+    #[cfg(feature = "firewall")]
     pub use crate::firewall::NetworkProtocol;
 }
