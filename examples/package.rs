@@ -1,12 +1,17 @@
-use modulix_core_utils::package;
+use modulix_core_utils::{CONFIG_DIRECTORY, install_package};
 
 fn main() {
     println!(
-        "{}",
-        package::desktop_icon::get_desktop_file("firefox-bin").unwrap()
+        "{:#?}",
+        install_package::list_installed_package(CONFIG_DIRECTORY).unwrap()
     );
-    //package::install(CONFIG_DIRECTORY, "cargo").unwrap();
-    // package::uninstall(CONFIG_DIRECTORY, "gcc").unwrap();
-    // package::uninstall(CONFIG_DIRECTORY, "obs-studio").unwrap();
-    // package::remove_plugin(CONFIG_DIRECTORY, "obs-studio", "obs-tuna").unwrap();
+
+    install_package::install(CONFIG_DIRECTORY, "cargo").unwrap();
+    install_package::install(CONFIG_DIRECTORY, "gcc").unwrap();
+    install_package::install(CONFIG_DIRECTORY, "obs-studio").unwrap();
+    install_package::install_plugin(CONFIG_DIRECTORY, "obs-studio", "obs-tuna").unwrap();
+    println!(
+        "{:#?}",
+        install_package::list_installed_package(CONFIG_DIRECTORY).unwrap()
+    );
 }
