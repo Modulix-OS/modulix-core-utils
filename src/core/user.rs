@@ -1,4 +1,4 @@
-use std::{io::Stdout, process};
+use std::process;
 
 use serde::Deserialize;
 
