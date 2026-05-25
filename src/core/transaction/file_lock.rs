@@ -308,6 +308,12 @@ impl NixFile {
         self.file = None;
         Ok(())
     }
+
+    pub(crate) fn delete(path: &str) -> mx::Result<()> {
+        Self::make_mutable(path)?;
+        fs::remove_file(path).map_err(mx::ErrorKind::IOError)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

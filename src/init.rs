@@ -50,13 +50,27 @@ const CONFIG_FILE: &str = r#"{ config, lib, pkgs, ... }:
 }
 "#;
 
+fn remove_dir_recursive(path: &Path) -> mx::Result<()> {
+    for entry in fs::read_dir(path).map_err(mx::ErrorKind::IOError)? {
+        let entry = entry.map_err(mx::ErrorKind::IOError)?;
+        let entry_path = entry.path();
+        if entry_path.is_dir() {
+            remove_dir_recursive(&entry_path)?;
+        } else {
+            NixFile::delete(entry_path.to_str().ok_or(mx::ErrorKind::InvalidFile)?)?;
+        }
+    }
+    fs::remove_dir(path).map_err(mx::ErrorKind::IOError)?;
+    Ok(())
+}
+
 pub fn init_repo(root_path: &str) -> mx::Result<()> {
     let path_config = root_path.to_owned() + "/" + CONFIG_DIRECTORY;
     let repo_path = Path::new(path_config.as_str());
-
-    if !repo_path.exists() {
-        fs::create_dir_all(repo_path).map_err(mx::ErrorKind::IOError)?;
+    if repo_path.exists() {
+        remove_dir_recursive(repo_path)?;
     }
+    fs::create_dir_all(repo_path).map_err(mx::ErrorKind::IOError)?;
 
     if git2::Repository::open(repo_path).is_ok() {
         return Ok(());
