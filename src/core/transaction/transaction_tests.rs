@@ -74,38 +74,74 @@ fn commit_all(repo: &git2::Repository, message: &str) {
 // Unit tests – no I/O
 // ─────────────────────────────────────────────────────────────────────────────
 mod unit {
+    use crate::core::transaction::transaction::{TransactionPermission, UpdateInput};
+
     use super::*;
 
     /// `new` always succeeds (no I/O performed).
     #[test]
     fn new_always_succeeds() {
-        assert!(Transaction::new("/some/path/", "description", BuildCommand::Install).is_ok());
+        assert!(
+            Transaction::new(
+                "/some/path/",
+                "description",
+                BuildCommand::Install,
+                TransactionPermission::ReadOnly
+            )
+            .is_ok()
+        );
     }
 
     /// After `new`, the transaction is not active.
     #[test]
     fn new_transaction_not_begun() {
-        let t = Transaction::new("/some/path/", "desc", BuildCommand::Install).unwrap();
+        let t = Transaction::new(
+            "/some/path/",
+            "desc",
+            BuildCommand::Install,
+            TransactionPermission::ReadOnly,
+        )
+        .unwrap();
         assert!(!t.as_begin());
     }
 
     /// `new` accepts empty strings without panicking.
     #[test]
     fn new_accepts_empty_strings() {
-        assert!(Transaction::new("", "", BuildCommand::Install).is_ok());
+        assert!(
+            Transaction::new(
+                "",
+                "",
+                BuildCommand::Install,
+                TransactionPermission::ReadOnly
+            )
+            .is_ok()
+        );
     }
 
     /// `add_file` succeeds before `begin`.
     #[test]
     fn add_file_before_begin_ok() {
-        let mut t = Transaction::new("/path/", "desc", BuildCommand::Install).unwrap();
+        let mut t = Transaction::new(
+            "/path/",
+            "desc",
+            BuildCommand::Install,
+            TransactionPermission::Writtable,
+        )
+        .unwrap();
         assert!(t.add_file("some.nix").is_ok());
     }
 
     /// Multiple `add_file` calls before `begin` are all accepted.
     #[test]
     fn add_file_multiple_before_begin_ok() {
-        let mut t = Transaction::new("/path/", "desc", BuildCommand::Install).unwrap();
+        let mut t = Transaction::new(
+            "/path/",
+            "desc",
+            BuildCommand::Install,
+            TransactionPermission::Writtable,
+        )
+        .unwrap();
         assert!(t.add_file("a.nix").is_ok());
         assert!(t.add_file("b.nix").is_ok());
         assert!(t.add_file("c.nix").is_ok());
@@ -114,7 +150,13 @@ mod unit {
     /// `get_file` without `begin` returns `TransactionNotBegin`.
     #[test]
     fn get_file_without_begin_errors() {
-        let mut t = Transaction::new("/path/", "desc", BuildCommand::Install).unwrap();
+        let mut t = Transaction::new(
+            "/path/",
+            "desc",
+            BuildCommand::Install,
+            TransactionPermission::Writtable,
+        )
+        .unwrap();
         assert!(matches!(
             t.get_file("configuration.nix"),
             Err(mx::ErrorKind::TransactionNotBegin)
@@ -124,7 +166,13 @@ mod unit {
     /// `rollback` without `begin` returns `TransactionNotBegin`.
     #[test]
     fn rollback_without_begin_errors() {
-        let mut t = Transaction::new("/path/", "desc", BuildCommand::Install).unwrap();
+        let mut t = Transaction::new(
+            "/path/",
+            "desc",
+            BuildCommand::Install,
+            TransactionPermission::ReadOnly,
+        )
+        .unwrap();
         assert!(matches!(
             t.rollback(),
             Err(mx::ErrorKind::TransactionNotBegin)
@@ -134,8 +182,14 @@ mod unit {
     /// `commit` without `begin` returns an error.
     #[test]
     fn commit_without_begin_errors() {
-        let mut t = Transaction::new("/path/", "desc", BuildCommand::Install).unwrap();
-        assert!(t.commit().is_err());
+        let mut t = Transaction::new(
+            "/path/",
+            "desc",
+            BuildCommand::Install,
+            TransactionPermission::ReadOnly,
+        )
+        .unwrap();
+        assert!(t.commit(UpdateInput::Keep).is_err());
     }
 
     /// In debug mode all `BuildCommand` variants return `"build-vm"`.
@@ -169,6 +223,8 @@ mod unit {
 // Integration tests – real Git repository
 // ─────────────────────────────────────────────────────────────────────────────
 mod integration {
+    use crate::core::transaction::transaction::{TransactionPermission, UpdateInput};
+
     use super::*;
 
     // ── begin ─────────────────────────────────────────────────────────────────
@@ -177,7 +233,13 @@ mod integration {
     #[test]
     fn begin_on_clean_repo_ok() {
         let (dir, _repo) = setup_repo();
-        let mut t = Transaction::new(&repo_path(&dir), "desc", BuildCommand::Install).unwrap();
+        let mut t = Transaction::new(
+            &repo_path(&dir),
+            "desc",
+            BuildCommand::Install,
+            TransactionPermission::Writtable,
+        )
+        .unwrap();
         assert!(t.begin().is_ok());
         assert!(t.as_begin());
         t.rollback().unwrap();
@@ -189,7 +251,13 @@ mod integration {
         let dir = TempDir::new().unwrap();
         // create configuration.nix so NixFile::begin does not fail first
         fs::write(dir.path().join("configuration.nix"), "").unwrap();
-        let mut t = Transaction::new(&repo_path(&dir), "desc", BuildCommand::Install).unwrap();
+        let mut t = Transaction::new(
+            &repo_path(&dir),
+            "desc",
+            BuildCommand::Install,
+            TransactionPermission::ReadOnly,
+        )
+        .unwrap();
         assert!(matches!(t.begin(), Err(mx::ErrorKind::GitError(_))));
     }
 
@@ -197,7 +265,13 @@ mod integration {
     #[test]
     fn begin_makes_configuration_nix_available() {
         let (dir, _repo) = setup_repo();
-        let mut t = Transaction::new(&repo_path(&dir), "desc", BuildCommand::Install).unwrap();
+        let mut t = Transaction::new(
+            &repo_path(&dir),
+            "desc",
+            BuildCommand::Install,
+            TransactionPermission::ReadOnly,
+        )
+        .unwrap();
         t.begin().unwrap();
         assert!(t.get_file("configuration.nix").is_ok());
         t.rollback().unwrap();
@@ -207,7 +281,13 @@ mod integration {
     #[test]
     fn add_file_after_begin_errors() {
         let (dir, _repo) = setup_repo();
-        let mut t = Transaction::new(&repo_path(&dir), "desc", BuildCommand::Install).unwrap();
+        let mut t = Transaction::new(
+            &repo_path(&dir),
+            "desc",
+            BuildCommand::Install,
+            TransactionPermission::ReadOnly,
+        )
+        .unwrap();
         t.begin().unwrap();
         assert!(matches!(
             t.add_file("new.nix"),
@@ -222,7 +302,13 @@ mod integration {
     #[test]
     fn get_file_unknown_path_errors() {
         let (dir, _repo) = setup_repo();
-        let mut t = Transaction::new(&repo_path(&dir), "desc", BuildCommand::Install).unwrap();
+        let mut t = Transaction::new(
+            &repo_path(&dir),
+            "desc",
+            BuildCommand::Install,
+            TransactionPermission::ReadOnly,
+        )
+        .unwrap();
         t.begin().unwrap();
         assert!(matches!(
             t.get_file("nonexistent.nix"),
@@ -237,7 +323,13 @@ mod integration {
     #[test]
     fn rollback_after_begin_ok() {
         let (dir, _repo) = setup_repo();
-        let mut t = Transaction::new(&repo_path(&dir), "desc", BuildCommand::Install).unwrap();
+        let mut t = Transaction::new(
+            &repo_path(&dir),
+            "desc",
+            BuildCommand::Install,
+            TransactionPermission::ReadOnly,
+        )
+        .unwrap();
         t.begin().unwrap();
         assert!(t.rollback().is_ok());
         assert!(!t.as_begin());
@@ -247,7 +339,13 @@ mod integration {
     #[test]
     fn rollback_ends_transaction() {
         let (dir, _repo) = setup_repo();
-        let mut t = Transaction::new(&repo_path(&dir), "desc", BuildCommand::Install).unwrap();
+        let mut t = Transaction::new(
+            &repo_path(&dir),
+            "desc",
+            BuildCommand::Install,
+            TransactionPermission::ReadOnly,
+        )
+        .unwrap();
         t.begin().unwrap();
         t.rollback().unwrap();
         assert!(matches!(
@@ -263,9 +361,15 @@ mod integration {
         let config_path = dir.path().join("configuration.nix");
         let original = fs::read_to_string(&config_path).unwrap();
 
-        let mut t = Transaction::new(&repo_path(&dir), "desc", BuildCommand::Install).unwrap();
+        let mut t = Transaction::new(
+            &repo_path(&dir),
+            "desc",
+            BuildCommand::Install,
+            TransactionPermission::Writtable,
+        )
+        .unwrap();
         t.begin().unwrap();
-        *t.get_file("configuration.nix")
+        *t.get_file_mut("configuration.nix")
             .unwrap()
             .get_mut_file_content()
             .unwrap() = String::from("# modified content\n");
@@ -282,9 +386,15 @@ mod integration {
         let (dir, repo) = setup_repo();
         let commit_before = repo.head().unwrap().peel_to_commit().unwrap().id();
 
-        let mut t = Transaction::new(&repo_path(&dir), "desc", BuildCommand::Install).unwrap();
+        let mut t = Transaction::new(
+            &repo_path(&dir),
+            "desc",
+            BuildCommand::Install,
+            TransactionPermission::ReadOnly,
+        )
+        .unwrap();
         t.begin().unwrap();
-        t.commit().unwrap();
+        t.commit(UpdateInput::Keep).unwrap();
 
         assert_eq!(
             repo.head().unwrap().peel_to_commit().unwrap().id(),
@@ -296,9 +406,15 @@ mod integration {
     #[test]
     fn commit_ends_transaction() {
         let (dir, _repo) = setup_repo();
-        let mut t = Transaction::new(&repo_path(&dir), "desc", BuildCommand::Install).unwrap();
+        let mut t = Transaction::new(
+            &repo_path(&dir),
+            "desc",
+            BuildCommand::Install,
+            TransactionPermission::ReadOnly,
+        )
+        .unwrap();
         t.begin().unwrap();
-        t.commit().unwrap();
+        t.commit(UpdateInput::Keep).unwrap();
         assert!(!t.as_begin());
     }
 
@@ -314,7 +430,13 @@ mod integration {
 
         assert!(!new_file.exists());
 
-        let mut t = Transaction::new(&path, "desc", BuildCommand::Install).unwrap();
+        let mut t = Transaction::new(
+            &path,
+            "desc",
+            BuildCommand::Install,
+            TransactionPermission::ReadOnly,
+        )
+        .unwrap();
         t.add_file("new_module.nix").unwrap();
         t.begin().unwrap();
 
@@ -337,7 +459,13 @@ mod integration {
         let (dir, _repo) = setup_repo();
         let path = repo_path(&dir);
 
-        let mut t = Transaction::new(&path, "desc", BuildCommand::Install).unwrap();
+        let mut t = Transaction::new(
+            &path,
+            "desc",
+            BuildCommand::Install,
+            TransactionPermission::ReadOnly,
+        )
+        .unwrap();
         t.add_file("new_module.nix").unwrap();
         t.begin().unwrap();
 
@@ -358,6 +486,8 @@ mod integration {
 // Non-regression tests
 // ─────────────────────────────────────────────────────────────────────────────
 mod no_regression {
+    use crate::core::transaction::transaction::{TransactionPermission, UpdateInput};
+
     use super::*;
 
     /// Two successive transactions on the same repo both open without error.
@@ -368,11 +498,23 @@ mod no_regression {
         let (dir, _repo) = setup_repo();
         let path = repo_path(&dir);
 
-        let mut t1 = Transaction::new(&path, "tx1", BuildCommand::Install).unwrap();
+        let mut t1 = Transaction::new(
+            &path,
+            "tx1",
+            BuildCommand::Install,
+            TransactionPermission::ReadOnly,
+        )
+        .unwrap();
         t1.begin().unwrap();
         t1.rollback().unwrap();
 
-        let mut t2 = Transaction::new(&path, "tx2", BuildCommand::Install).unwrap();
+        let mut t2 = Transaction::new(
+            &path,
+            "tx2",
+            BuildCommand::Install,
+            TransactionPermission::ReadOnly,
+        )
+        .unwrap();
         assert!(
             t2.begin().is_ok(),
             "second transaction should open without error"
@@ -386,7 +528,13 @@ mod no_regression {
     #[test]
     fn double_rollback_does_not_panic() {
         let (dir, _repo) = setup_repo();
-        let mut t = Transaction::new(&repo_path(&dir), "desc", BuildCommand::Install).unwrap();
+        let mut t = Transaction::new(
+            &repo_path(&dir),
+            "desc",
+            BuildCommand::Install,
+            TransactionPermission::ReadOnly,
+        )
+        .unwrap();
         t.begin().unwrap();
         t.rollback().unwrap();
 
@@ -402,20 +550,35 @@ mod no_regression {
     #[test]
     fn double_commit_does_not_panic() {
         let (dir, _repo) = setup_repo();
-        let mut t = Transaction::new(&repo_path(&dir), "desc", BuildCommand::Install).unwrap();
+        let mut t = Transaction::new(
+            &repo_path(&dir),
+            "desc",
+            BuildCommand::Install,
+            TransactionPermission::ReadOnly,
+        )
+        .unwrap();
         t.begin().unwrap();
-        t.commit().unwrap();
+        t.commit(UpdateInput::Keep).unwrap();
 
-        assert!(t.commit().is_err(), "second commit should return an error");
+        assert!(
+            t.commit(UpdateInput::Keep).is_err(),
+            "second commit should return an error"
+        );
     }
 
     /// `rollback` after `commit` returns `TransactionNotBegin` without panicking.
     #[test]
     fn rollback_after_commit_does_not_panic() {
         let (dir, _repo) = setup_repo();
-        let mut t = Transaction::new(&repo_path(&dir), "desc", BuildCommand::Install).unwrap();
+        let mut t = Transaction::new(
+            &repo_path(&dir),
+            "desc",
+            BuildCommand::Install,
+            TransactionPermission::ReadOnly,
+        )
+        .unwrap();
         t.begin().unwrap();
-        t.commit().unwrap();
+        t.commit(UpdateInput::Keep).unwrap();
 
         assert!(matches!(
             t.rollback(),
@@ -432,15 +595,27 @@ mod no_regression {
         let (dir, _repo) = setup_repo();
         let path = repo_path(&dir);
 
-        let mut t1 = Transaction::new(&path, "tx1", BuildCommand::Install).unwrap();
+        let mut t1 = Transaction::new(
+            &path,
+            "tx1",
+            BuildCommand::Install,
+            TransactionPermission::Writtable,
+        )
+        .unwrap();
         t1.begin().unwrap();
-        *t1.get_file("configuration.nix")
+        *t1.get_file_mut("configuration.nix")
             .unwrap()
             .get_mut_file_content()
             .unwrap() = String::from("# poison\n");
         t1.rollback().unwrap();
 
-        let mut t2 = Transaction::new(&path, "tx2", BuildCommand::Install).unwrap();
+        let mut t2 = Transaction::new(
+            &path,
+            "tx2",
+            BuildCommand::Install,
+            TransactionPermission::ReadOnly,
+        )
+        .unwrap();
         t2.begin().unwrap();
         let content = t2
             .get_file("configuration.nix")
@@ -471,7 +646,13 @@ mod no_regression {
         )
         .unwrap();
 
-        let mut t = Transaction::new(&repo_path(&dir), "desc", BuildCommand::Install).unwrap();
+        let mut t = Transaction::new(
+            &repo_path(&dir),
+            "desc",
+            BuildCommand::Install,
+            TransactionPermission::ReadOnly,
+        )
+        .unwrap();
         assert!(
             t.begin().is_ok(),
             "begin should succeed on a repo with no commits"
@@ -484,6 +665,8 @@ mod no_regression {
 // Stash tests
 // ─────────────────────────────────────────────────────────────────────────────
 mod stash {
+    use crate::core::transaction::transaction::{TransactionPermission, UpdateInput};
+
     use super::*;
 
     /// `begin` on a repo with untracked files stashes them instead of failing.
@@ -494,7 +677,13 @@ mod stash {
         // Create an untracked file — would have caused GitNotCommitted before
         fs::write(dir.path().join("untracked.nix"), "untracked content").unwrap();
 
-        let mut t = Transaction::new(&repo_path(&dir), "desc", BuildCommand::Install).unwrap();
+        let mut t = Transaction::new(
+            &repo_path(&dir),
+            "desc",
+            BuildCommand::Install,
+            TransactionPermission::ReadOnly,
+        )
+        .unwrap();
         assert!(t.begin().is_ok(), "begin should stash untracked files");
 
         // The untracked file should be invisible during the transaction
@@ -505,7 +694,7 @@ mod stash {
         assert!(
             statuses
                 .iter()
-                .all(|s| s.path() == Some("configuration.nix")
+                .all(|s| s.path() == Ok("configuration.nix")
                     || s.status() == git2::Status::CURRENT),
             "untracked file should be stashed away during the transaction"
         );
@@ -521,7 +710,13 @@ mod stash {
 
         fs::write(&stashed_file, "stashed content").unwrap();
 
-        let mut t = Transaction::new(&repo_path(&dir), "desc", BuildCommand::Install).unwrap();
+        let mut t = Transaction::new(
+            &repo_path(&dir),
+            "desc",
+            BuildCommand::Install,
+            TransactionPermission::ReadOnly,
+        )
+        .unwrap();
         t.begin().unwrap();
 
         assert!(
@@ -549,9 +744,15 @@ mod stash {
 
         fs::write(&stashed_file, "stashed content").unwrap();
 
-        let mut t = Transaction::new(&repo_path(&dir), "desc", BuildCommand::Install).unwrap();
+        let mut t = Transaction::new(
+            &repo_path(&dir),
+            "desc",
+            BuildCommand::Install,
+            TransactionPermission::ReadOnly,
+        )
+        .unwrap();
         t.begin().unwrap();
-        t.commit().unwrap();
+        t.commit(UpdateInput::Keep).unwrap();
 
         assert!(
             stashed_file.exists(),
@@ -578,7 +779,13 @@ mod stash {
         index.add_path(std::path::Path::new("extra.nix")).unwrap();
         index.write().unwrap();
 
-        let mut t = Transaction::new(&repo_path(&dir), "desc", BuildCommand::Install).unwrap();
+        let mut t = Transaction::new(
+            &repo_path(&dir),
+            "desc",
+            BuildCommand::Install,
+            TransactionPermission::ReadOnly,
+        )
+        .unwrap();
         assert!(
             t.begin().is_ok(),
             "begin should stash staged changes without error"
@@ -600,12 +807,24 @@ mod stash {
         let (dir, _repo) = setup_repo();
         let path = repo_path(&dir);
 
-        let mut t1 = Transaction::new(&path, "tx1", BuildCommand::Install).unwrap();
+        let mut t1 = Transaction::new(
+            &path,
+            "tx1",
+            BuildCommand::Install,
+            TransactionPermission::ReadOnly,
+        )
+        .unwrap();
         t1.begin().unwrap();
         t1.rollback().unwrap();
 
         // Second transaction: if a phantom stash existed it would pop the wrong entry
-        let mut t2 = Transaction::new(&path, "tx2", BuildCommand::Install).unwrap();
+        let mut t2 = Transaction::new(
+            &path,
+            "tx2",
+            BuildCommand::Install,
+            TransactionPermission::ReadOnly,
+        )
+        .unwrap();
         assert!(t2.begin().is_ok());
         t2.rollback().unwrap();
     }
