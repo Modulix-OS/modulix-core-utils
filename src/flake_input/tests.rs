@@ -2,7 +2,10 @@ use super::{
     FlakeInput, remove_follower_no_transaction, remove_input_no_transaction,
     set_follower_no_transaction,
 };
-use crate::core::transaction::{self, transaction::BuildCommand};
+use crate::core::transaction::{
+    self,
+    transaction::{BuildCommand, UpdateInput},
+};
 use git2::Repository;
 use std::fs;
 use tempfile::tempdir;
@@ -36,6 +39,7 @@ fn add_follower_creates_follows_option() {
         &format!("{}/", path),
         "flake.nix",
         BuildCommand::Switch,
+        UpdateInput::Keep,
         |file| set_follower_no_transaction(file, "foo", FlakeInput::Nixpkgs),
     )
     .unwrap();
@@ -55,6 +59,7 @@ fn remove_follower_deletes_follows_option() {
         &format!("{}/", path),
         "flake.nix",
         BuildCommand::Switch,
+        UpdateInput::Keep,
         |file| remove_follower_no_transaction(file, "foo"),
     )
     .unwrap();
@@ -76,6 +81,7 @@ fn remove_input_deletes_input_block() {
         &format!("{}/", path),
         "flake.nix",
         BuildCommand::Switch,
+        UpdateInput::Keep,
         |file| remove_input_no_transaction(file, "foo"),
     )
     .unwrap();

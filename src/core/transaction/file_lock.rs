@@ -9,6 +9,17 @@ use std::fs::OpenOptions;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::AsRawFd;
 
+pub enum NixFilePermission {
+    ReadOnly,
+    Writtable,
+}
+
+impl From<&NixFilePermission> for bool {
+    fn from(p: &NixFilePermission) -> bool {
+        matches!(p, NixFilePermission::Writtable)
+    }
+}
+
 /// NixFile represents a file handle with atomic commit semantics.
 ///
 /// This struct enables atomic manipulation of files by writing all modifications
@@ -34,6 +45,8 @@ pub struct NixFile {
     file_content: String,
 
     was_created: bool,
+
+    writable: bool,
 }
 
 impl NixFile {
@@ -56,10 +69,11 @@ impl NixFile {
             path: String::from(repo_path) + relative_path,
             file_content: String::new(),
             was_created: false,
+            writable: false,
         }
     }
 
-    const EXT2_IMMUTABLE_FL: libc::c_long = 0x00000010;
+    const FS_IMMUTABLE_FL: libc::c_long = 0x00000010;
 
     const FS_IOC_GETFLAGS: libc::c_ulong = 0x80086601;
 
@@ -95,7 +109,7 @@ impl NixFile {
             let fd = file.as_raw_fd();
             let mut flags = Self::get_flags(path)?;
 
-            flags |= Self::EXT2_IMMUTABLE_FL;
+            flags |= Self::FS_IMMUTABLE_FL;
 
             unsafe {
                 if libc::ioctl(fd, Self::FS_IOC_SETFLAGS, &flags) < 0 {
@@ -116,7 +130,7 @@ impl NixFile {
             let mut flags = Self::get_flags(path)?;
 
             // Désactive le bit immutable dans les flags
-            flags &= !Self::EXT2_IMMUTABLE_FL;
+            flags &= !Self::FS_IMMUTABLE_FL;
 
             unsafe {
                 if libc::ioctl(fd, Self::FS_IOC_SETFLAGS, &flags) < 0 {
@@ -146,6 +160,9 @@ impl NixFile {
     }
 
     pub fn get_mut_file_content(&mut self) -> mx::Result<&mut String> {
+        if !self.writable {
+            return Err(mx::ErrorKind::PermissionDenied);
+        }
         if self.file.is_none() {
             return Err(mx::ErrorKind::TransactionNotBegin);
         }
@@ -175,26 +192,27 @@ impl NixFile {
     /// * `mx::ErrorKind::FileNotFound` - The file does not exist
     /// * `mx::ErrorKind::PermissionDenied` - Insufficient permissions
     /// * `mx::ErrorKind::FailToLock` - Failed to acquire exclusive file lock
-    pub(super) fn begin(&mut self) -> mx::Result<()> {
+    pub(super) fn begin(&mut self, permission: NixFilePermission) -> mx::Result<()> {
+        self.writable = bool::from(&permission);
         if self.file.is_none() {
-            // Rendre le fichier mutable avant toute ouverture en écriture
-            match Self::make_mutable(&self.path) {
-                Ok(()) => (),
-                Err(e) => match e {
-                    mx::ErrorKind::IOError(ioe) => match ioe.kind() {
-                        // Le fichier n'existe pas encore : on propage une erreur spécifique
-                        io::ErrorKind::NotFound => return Err(mx::ErrorKind::FileNotFound),
-                        _ => return Err(mx::ErrorKind::IOError(ioe)),
+            if self.writable {
+                match Self::make_mutable(&self.path) {
+                    Ok(()) => (),
+                    Err(e) => match e {
+                        mx::ErrorKind::IOError(ioe) => match ioe.kind() {
+                            io::ErrorKind::NotFound => return Err(mx::ErrorKind::FileNotFound),
+                            _ => return Err(mx::ErrorKind::IOError(ioe)),
+                        },
+                        err => return Err(err),
                     },
-                    err => return Err(err),
-                },
-            };
+                };
+            }
 
             self.file = Some(
                 File::options()
                     .create(false)
                     .read(true)
-                    .write(true)
+                    .write(self.writable)
                     .open(&self.path)
                     .map_err(|e| match e.kind() {
                         io::ErrorKind::PermissionDenied => mx::ErrorKind::PermissionDenied,
@@ -235,7 +253,7 @@ impl NixFile {
     /// * `mx::ErrorKind::InvalidFile` - No active transaction (file was already committed)
     /// * `mx::ErrorKind::PermissionDenied` - Failed to write to file
     pub(super) fn commit(&mut self) -> mx::Result<()> {
-        if self.file.is_none() {
+        if self.file.is_none() || !self.writable {
             return Err(mx::ErrorKind::InvalidFile);
         }
 
@@ -279,6 +297,9 @@ impl NixFile {
     /// This method always returns Ok(()) even if unlocking fails, as per the
     /// intentional design choice to avoid propagating lock-related errors.
     pub(super) fn close(&mut self) -> mx::Result<()> {
+        if self.writable {
+            Self::make_immutable(&self.path)?;
+        }
         if let Some(f) = self.file.as_ref() {
             #[allow(unused_must_use)]
             f.unlock();

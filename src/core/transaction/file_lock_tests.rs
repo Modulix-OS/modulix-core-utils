@@ -22,6 +22,8 @@ use crate::mx;
 // Unit tests – no real I/O
 // ─────────────────────────────────────────────────────────────────────────────
 mod unit {
+    use super::super::NixFilePermission;
+
     use super::*;
 
     // ── new() ─────────────────────────────────────────────────────────────────
@@ -83,7 +85,10 @@ mod unit {
     fn begin_nonexistent_file_returns_file_not_found() {
         let mut f = NixFile::new("/nonexistent_repo_xyz", "/ghost.nix");
         assert!(
-            matches!(f.begin(), Err(mx::ErrorKind::FileNotFound)),
+            matches!(
+                f.begin(NixFilePermission::ReadOnly),
+                Err(mx::ErrorKind::FileNotFound)
+            ),
             "expected FileNotFound"
         );
     }
@@ -109,6 +114,7 @@ mod unit {
 // Integration tests – real temporary files
 // ─────────────────────────────────────────────────────────────────────────────
 mod integration {
+    use super::super::NixFilePermission;
     use super::*;
     use std::fs;
     use tempfile::TempDir;
@@ -167,7 +173,7 @@ mod integration {
         fs::write(format!("{}/test.nix", path), "hello nix").unwrap();
 
         let mut f = NixFile::new(path, "/test.nix");
-        f.begin().unwrap();
+        f.begin(NixFilePermission::ReadOnly).unwrap();
         assert_eq!(f.get_file_content().unwrap(), "hello nix");
         f.close().unwrap();
     }
@@ -186,7 +192,7 @@ mod integration {
             Err(mx::ErrorKind::TransactionNotBegin)
         ));
 
-        f.begin().unwrap();
+        f.begin(NixFilePermission::ReadOnly).unwrap();
         assert!(f.get_file_content().is_ok());
         f.close().unwrap();
 
@@ -204,7 +210,7 @@ mod integration {
         fs::write(format!("{}/empty.nix", path), "").unwrap();
 
         let mut f = NixFile::new(path, "/empty.nix");
-        f.begin().unwrap();
+        f.begin(NixFilePermission::ReadOnly).unwrap();
         assert_eq!(f.get_file_content().unwrap(), "");
         f.close().unwrap();
     }
@@ -219,7 +225,7 @@ mod integration {
         fs::write(format!("{}/config.nix", path), "original content").unwrap();
 
         let mut f = NixFile::new(path, "/config.nix");
-        f.begin().unwrap();
+        f.begin(NixFilePermission::Writtable).unwrap();
         *f.get_mut_file_content().unwrap() = String::from("modified content");
         f.commit().unwrap();
 
@@ -237,7 +243,7 @@ mod integration {
         fs::write(format!("{}/long.nix", path), "a".repeat(200)).unwrap();
 
         let mut f = NixFile::new(path, "/long.nix");
-        f.begin().unwrap();
+        f.begin(NixFilePermission::Writtable).unwrap();
         *f.get_mut_file_content().unwrap() = String::from("short");
         f.commit().unwrap();
 
@@ -255,7 +261,7 @@ mod integration {
         fs::write(format!("{}/config.nix", path), "some data").unwrap();
 
         let mut f = NixFile::new(path, "/config.nix");
-        f.begin().unwrap();
+        f.begin(NixFilePermission::Writtable).unwrap();
         *f.get_mut_file_content().unwrap() = String::new();
         f.commit().unwrap();
 
@@ -276,7 +282,7 @@ mod integration {
         let multiline = "{ config, lib, pkgs, ... }:\n{\n  boot.loader.grub.device = \"/dev/sda\";\n  networking.hostName = \"nixos\";\n}\n";
 
         let mut f = NixFile::new(path, "/ml.nix");
-        f.begin().unwrap();
+        f.begin(NixFilePermission::Writtable).unwrap();
         *f.get_mut_file_content().unwrap() = String::from(multiline);
         f.commit().unwrap();
 
@@ -296,7 +302,7 @@ mod integration {
         let utf8_content = "# Comment with accents: éàü and emoji 🦀\n";
 
         let mut f = NixFile::new(path, "/utf8.nix");
-        f.begin().unwrap();
+        f.begin(NixFilePermission::Writtable).unwrap();
         *f.get_mut_file_content().unwrap() = String::from(utf8_content);
         f.commit().unwrap();
 
@@ -314,7 +320,7 @@ mod integration {
         fs::write(format!("{}/config.nix", path), "data").unwrap();
 
         let mut f = NixFile::new(path, "/config.nix");
-        f.begin().unwrap();
+        f.begin(NixFilePermission::Writtable).unwrap();
         f.commit().unwrap();
 
         assert!(matches!(
@@ -333,7 +339,7 @@ mod integration {
         fs::write(format!("{}/config.nix", path), "original").unwrap();
 
         let mut f = NixFile::new(path, "/config.nix");
-        f.begin().unwrap();
+        f.begin(NixFilePermission::Writtable).unwrap();
         *f.get_mut_file_content().unwrap() = String::from("should not appear on disk");
         f.close().unwrap();
 
@@ -351,7 +357,7 @@ mod integration {
         fs::write(format!("{}/config.nix", path), "data").unwrap();
 
         let mut f = NixFile::new(path, "/config.nix");
-        f.begin().unwrap();
+        f.begin(NixFilePermission::ReadOnly).unwrap();
         f.close().unwrap();
 
         assert!(matches!(
@@ -372,12 +378,12 @@ mod integration {
         f.create_file().unwrap();
         assert!(f.was_created());
 
-        f.begin().unwrap();
+        f.begin(NixFilePermission::Writtable).unwrap();
         *f.get_mut_file_content().unwrap() =
             String::from("{ config, lib, pkgs, ... }:\n{ services.nginx.enable = true; }\n");
         f.commit().unwrap();
 
-        f.begin().unwrap();
+        f.begin(NixFilePermission::ReadOnly).unwrap();
         let content = f.get_file_content().unwrap().clone();
         f.close().unwrap();
 
@@ -395,8 +401,8 @@ mod integration {
         let mut fa = NixFile::new(path, "/a.nix");
         let mut fb = NixFile::new(path, "/b.nix");
 
-        fa.begin().unwrap();
-        fb.begin().unwrap();
+        fa.begin(NixFilePermission::ReadOnly).unwrap();
+        fb.begin(NixFilePermission::ReadOnly).unwrap();
 
         assert_eq!(fa.get_file_content().unwrap(), "content_a");
         assert_eq!(fb.get_file_content().unwrap(), "content_b");
@@ -410,6 +416,7 @@ mod integration {
 // Non-regression tests
 // ─────────────────────────────────────────────────────────────────────────────
 mod no_regression {
+    use super::super::NixFilePermission;
     use super::*;
     use std::fs;
     use tempfile::TempDir;
@@ -430,14 +437,14 @@ mod no_regression {
 
         let mut f = NixFile::new(path, "/f.nix");
 
-        f.begin().unwrap();
+        f.begin(NixFilePermission::ReadOnly).unwrap();
         assert_eq!(f.get_file_content().unwrap(), "v1");
         f.close().unwrap();
 
         // Modify the file on disk between transactions
         fs::write(format!("{}/f.nix", path), "v2").unwrap();
 
-        f.begin().unwrap();
+        f.begin(NixFilePermission::ReadOnly).unwrap();
         assert_eq!(
             f.get_file_content().unwrap(),
             "v2",
@@ -456,7 +463,7 @@ mod no_regression {
         fs::write(format!("{}/f.nix", path), "data").unwrap();
 
         let mut f = NixFile::new(path, "/f.nix");
-        f.begin().unwrap();
+        f.begin(NixFilePermission::ReadOnly).unwrap();
         f.close().unwrap();
 
         assert!(matches!(f.commit(), Err(mx::ErrorKind::InvalidFile)));
@@ -473,7 +480,7 @@ mod no_regression {
         fs::write(format!("{}/f.nix", path), "data").unwrap();
 
         let mut f = NixFile::new(path, "/f.nix");
-        f.begin().unwrap();
+        f.begin(NixFilePermission::ReadOnly).unwrap();
         f.commit().unwrap();
 
         assert!(matches!(
@@ -494,7 +501,7 @@ mod no_regression {
         fs::write(format!("{}/f.nix", path), &long).unwrap();
 
         let mut f = NixFile::new(path, "/f.nix");
-        f.begin().unwrap();
+        f.begin(NixFilePermission::ReadOnly).unwrap();
         *f.get_mut_file_content().unwrap() = String::from("tiny");
         f.commit().unwrap();
 
@@ -513,13 +520,13 @@ mod no_regression {
         fs::write(format!("{}/f.nix", path), "before").unwrap();
 
         let mut f = NixFile::new(path, "/f.nix");
-        f.begin().unwrap();
+        f.begin(NixFilePermission::ReadOnly).unwrap();
         f.close().unwrap();
 
         // External modification between two transactions
         fs::write(format!("{}/f.nix", path), "after").unwrap();
 
-        f.begin().unwrap();
+        f.begin(NixFilePermission::ReadOnly).unwrap();
         assert_eq!(
             f.get_file_content().unwrap(),
             "after",
@@ -538,7 +545,7 @@ mod no_regression {
         let mut f = NixFile::new(path, "/stable.nix");
         let expected = f.get_file_path().to_string();
 
-        f.begin().unwrap();
+        f.begin(NixFilePermission::ReadOnly).unwrap();
         assert_eq!(f.get_file_path(), expected);
         f.close().unwrap();
 

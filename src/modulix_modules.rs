@@ -1,7 +1,11 @@
 use crate::{
     core::{
         option::Option as mxOption,
-        transaction::{self, file_lock::NixFile, transaction::BuildCommand},
+        transaction::{
+            self,
+            file_lock::NixFile,
+            transaction::{BuildCommand, UpdateInput},
+        },
     },
     mx,
 };
@@ -25,6 +29,7 @@ pub fn add_modules(config_dir: &str, module_path: &str) -> mx::Result<()> {
         config_dir,
         FILE_MODULE_PATH,
         BuildCommand::Switch,
+        UpdateInput::Keep,
         |file| add_module_no_transaction(file, module_path),
     )
 }
@@ -35,6 +40,7 @@ pub fn remove_modules(config_dir: &str, module_path: &str) -> mx::Result<()> {
         config_dir,
         FILE_MODULE_PATH,
         BuildCommand::Switch,
+        UpdateInput::Keep,
         |file| remove_module_no_transaction(file, module_path),
     )
 }

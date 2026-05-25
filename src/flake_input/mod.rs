@@ -1,7 +1,11 @@
 use crate::{
     core::{
         option::Option as mxOption,
-        transaction::{self, file_lock::NixFile, transaction::BuildCommand},
+        transaction::{
+            self,
+            file_lock::NixFile,
+            transaction::{BuildCommand, UpdateInput},
+        },
     },
     mx,
 };
@@ -49,6 +53,7 @@ pub fn add_input(
         config_dir,
         FLAKE_INPUT_FILE,
         BuildCommand::Switch,
+        UpdateInput::UpdateSelected(vec![input_name.to_string()]),
         |file| add_input_no_transaction(file, input_name, input, follower),
     )
 }
@@ -69,6 +74,7 @@ pub fn set_follower(config_dir: &str, input_name: &str, follower: FlakeInput) ->
         config_dir,
         FLAKE_INPUT_FILE,
         BuildCommand::Switch,
+        UpdateInput::UpdateSelected(vec![input_name.to_string()]),
         |file| set_follower_no_transaction(file, input_name, follower),
     )
 }
@@ -84,6 +90,7 @@ pub fn remove_follower(config_dir: &str, input_name: &str) -> mx::Result<bool> {
         config_dir,
         FLAKE_INPUT_FILE,
         BuildCommand::Switch,
+        UpdateInput::UpdateSelected(vec![input_name.to_string()]),
         |file| remove_follower_no_transaction(file, input_name),
     )
 }
@@ -98,6 +105,7 @@ pub fn remove_input(config_dir: &str, input_name: &str) -> mx::Result<bool> {
         config_dir,
         FLAKE_INPUT_FILE,
         BuildCommand::Switch,
+        UpdateInput::UpdateSelected(vec![input_name.to_string()]),
         |file| remove_input_no_transaction(file, input_name),
     )
 }

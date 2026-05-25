@@ -1,6 +1,10 @@
 use crate::core::{
     option::Option as mxOption,
-    transaction::{self, file_lock::NixFile, transaction::BuildCommand},
+    transaction::{
+        self,
+        file_lock::NixFile,
+        transaction::{BuildCommand, UpdateInput},
+    },
 };
 use crate::mx;
 
@@ -131,6 +135,7 @@ pub fn set_locale_extra_settings(
         config_dir,
         LOCALE_FILE_PATH,
         BuildCommand::Switch,
+        UpdateInput::Keep,
         |file| {
             set_locale_extra_settings_no_transaction(
                 file,
@@ -164,6 +169,7 @@ pub fn set_locale(
         config_dir,
         LOCALE_FILE_PATH,
         BuildCommand::Switch,
+        UpdateInput::Keep,
         |file| set_locale_no_transaction(file, timezone, default_locale, console_keymap),
     )
 }

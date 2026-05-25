@@ -4,7 +4,11 @@ use crate::{
     core::{
         list::List as mxList,
         param::NixParam,
-        transaction::{self, file_lock::NixFile, transaction::BuildCommand},
+        transaction::{
+            self,
+            file_lock::NixFile,
+            transaction::{BuildCommand, UpdateInput},
+        },
     },
     detect_hardware::driver_config::DriverConfig,
     mx,
@@ -55,6 +59,7 @@ pub fn write_hardware(root_path: &str, config_dir: &str) -> mx::Result<()> {
         config_dir,
         HARDWARE_CONFIG_PATH,
         BuildCommand::Switch,
+        UpdateInput::Keep,
         |file| write_hardware_config_no_transaction(root_path, file),
     )
 }

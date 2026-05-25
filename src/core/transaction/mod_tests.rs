@@ -111,6 +111,8 @@ fn lock_build_queue() -> fs::File {
 // Unit tests – no real Git repo
 // ─────────────────────────────────────────────────────────────────────────────
 mod unit {
+    use crate::core::transaction::transaction::UpdateInput;
+
     use super::*;
 
     /// An invalid `config_dir` errors before calling the closure.
@@ -124,6 +126,7 @@ mod unit {
             "/nonexistent_config_dir_xyz/",
             "file.nix",
             noop_build(),
+            UpdateInput::Keep,
             |_| {
                 flag.store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(())
@@ -140,8 +143,14 @@ mod unit {
     /// An empty description is accepted without error (no validation performed).
     #[test]
     fn empty_description_does_not_error_on_construction() {
-        let result: mx::Result<()> =
-            make_transaction("", "/nonexistent/", "f.nix", noop_build(), |_| Ok(()));
+        let result: mx::Result<()> = make_transaction(
+            "",
+            "/nonexistent/",
+            "f.nix",
+            noop_build(),
+            UpdateInput::Keep,
+            |_| Ok(()),
+        );
         // Error comes from the missing Git repo, not the empty description
         assert!(result.is_err());
     }
@@ -151,6 +160,8 @@ mod unit {
 // Integration tests – real Git repository
 // ─────────────────────────────────────────────────────────────────────────────
 mod integration {
+    use crate::core::transaction::transaction::UpdateInput;
+
     use super::*;
 
     // ── Happy path ────────────────────────────────────────────────────────────
@@ -164,10 +175,17 @@ mod integration {
         // Hold the build-queue lock so commit_impl skips the NixOS rebuild.
         let _guard = lock_build_queue();
 
-        let result = make_transaction("test commit", &path, "test.nix", noop_build(), |file| {
-            file.get_mut_file_content()?.push_str("# modified\n");
-            Ok(42usize)
-        });
+        let result = make_transaction(
+            "test commit",
+            &path,
+            "test.nix",
+            noop_build(),
+            UpdateInput::Keep,
+            |file| {
+                file.get_mut_file_content()?.push_str("# modified\n");
+                Ok(42usize)
+            },
+        );
 
         assert_eq!(result.unwrap(), 42);
         assert!(
@@ -184,8 +202,14 @@ mod integration {
         let path = repo_path(&dir);
         create_and_commit(&dir, "unit.nix", "original");
 
-        let result: mx::Result<()> =
-            make_transaction("unit test", &path, "unit.nix", noop_build(), |_| Ok(()));
+        let result: mx::Result<()> = make_transaction(
+            "unit test",
+            &path,
+            "unit.nix",
+            noop_build(),
+            UpdateInput::Keep,
+            |_| Ok(()),
+        );
 
         assert!(result.is_ok());
     }
@@ -198,10 +222,14 @@ mod integration {
         create_and_commit(&dir, "vec.nix", "line1\nline2\n");
         let _guard = lock_build_queue();
 
-        let result: mx::Result<Vec<String>> =
-            make_transaction("vec return", &path, "vec.nix", noop_build(), |file| {
-                Ok(file.get_file_content()?.lines().map(String::from).collect())
-            });
+        let result: mx::Result<Vec<String>> = make_transaction(
+            "vec return",
+            &path,
+            "vec.nix",
+            noop_build(),
+            UpdateInput::Keep,
+            |file| Ok(file.get_file_content()?.lines().map(String::from).collect()),
+        );
 
         assert_eq!(result.unwrap(), vec!["line1", "line2"]);
     }
@@ -215,10 +243,14 @@ mod integration {
         let path = repo_path(&dir);
         create_and_commit(&dir, "rb.nix", "untouched");
 
-        let result: mx::Result<()> =
-            make_transaction("rollback test", &path, "rb.nix", noop_build(), |_| {
-                Err(mx::ErrorKind::PermissionDenied)
-            });
+        let result: mx::Result<()> = make_transaction(
+            "rollback test",
+            &path,
+            "rb.nix",
+            noop_build(),
+            UpdateInput::Keep,
+            |_| Err(mx::ErrorKind::PermissionDenied),
+        );
 
         assert!(matches!(result, Err(mx::ErrorKind::PermissionDenied)));
         assert_eq!(
@@ -234,10 +266,14 @@ mod integration {
         let path = repo_path(&dir);
         create_and_commit(&dir, "err.nix", "");
 
-        let result: mx::Result<String> =
-            make_transaction("error kind test", &path, "err.nix", noop_build(), |_| {
-                Err(mx::ErrorKind::InvalidFile)
-            });
+        let result: mx::Result<String> = make_transaction(
+            "error kind test",
+            &path,
+            "err.nix",
+            noop_build(),
+            UpdateInput::Keep,
+            |_| Err(mx::ErrorKind::InvalidFile),
+        );
 
         assert!(matches!(result, Err(mx::ErrorKind::InvalidFile)));
     }
@@ -260,6 +296,7 @@ mod integration {
             &path,
             "subdir/does_not_exist.nix",
             noop_build(),
+            UpdateInput::Keep,
             |_| {
                 flag.store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(())
@@ -283,10 +320,17 @@ mod integration {
         create_and_commit(&dir, "content.nix", "before");
         let _guard = lock_build_queue();
 
-        make_transaction::<_, ()>("write test", &path, "content.nix", noop_build(), |file| {
-            *file.get_mut_file_content()? = String::from("after");
-            Ok(())
-        })
+        make_transaction::<_, ()>(
+            "write test",
+            &path,
+            "content.nix",
+            noop_build(),
+            UpdateInput::Keep,
+            |file| {
+                *file.get_mut_file_content()? = String::from("after");
+                Ok(())
+            },
+        )
         .unwrap();
 
         assert_eq!(
@@ -300,6 +344,8 @@ mod integration {
 // No-regression tests
 // ─────────────────────────────────────────────────────────────────────────────
 mod no_regression {
+    use crate::core::transaction::transaction::UpdateInput;
+
     use super::*;
 
     /// Two successive `make_transaction` calls on the same repo both succeed.
@@ -313,8 +359,24 @@ mod no_regression {
         create_and_commit(&dir, "f.nix", "v1");
         let _guard = lock_build_queue();
 
-        make_transaction::<_, ()>("tx1", &path, "f.nix", noop_build(), |_| Ok(())).unwrap();
-        make_transaction::<_, ()>("tx2", &path, "f.nix", noop_build(), |_| Ok(())).unwrap();
+        make_transaction::<_, ()>(
+            "tx1",
+            &path,
+            "f.nix",
+            noop_build(),
+            UpdateInput::Keep,
+            |_| Ok(()),
+        )
+        .unwrap();
+        make_transaction::<_, ()>(
+            "tx2",
+            &path,
+            "f.nix",
+            noop_build(),
+            UpdateInput::Keep,
+            |_| Ok(()),
+        )
+        .unwrap();
     }
 
     /// After a failed transaction, the repo is clean enough for the next one.
@@ -329,12 +391,24 @@ mod no_regression {
         let _guard = lock_build_queue();
 
         // First transaction: deliberate failure
-        let _ = make_transaction::<_, ()>("fail", &path, "f.nix", noop_build(), |_| {
-            Err(mx::ErrorKind::PermissionDenied)
-        });
+        let _ = make_transaction::<_, ()>(
+            "fail",
+            &path,
+            "f.nix",
+            noop_build(),
+            UpdateInput::Keep,
+            |_| Err(mx::ErrorKind::PermissionDenied),
+        );
 
         // Second transaction must not get GitNotCommitted
-        let result = make_transaction::<_, ()>("success", &path, "f.nix", noop_build(), |_| Ok(()));
+        let result = make_transaction::<_, ()>(
+            "success",
+            &path,
+            "f.nix",
+            noop_build(),
+            UpdateInput::Keep,
+            |_| Ok(()),
+        );
         assert!(
             result.is_ok(),
             "repo must not be dirty after a rollback: {:?}",
@@ -353,14 +427,26 @@ mod no_regression {
         create_and_commit(&dir, "f.nix", "clean");
         let _guard = lock_build_queue();
 
-        let _ = make_transaction::<_, ()>("poison", &path, "f.nix", noop_build(), |file| {
-            *file.get_mut_file_content()? = String::from("# poison");
-            Err(mx::ErrorKind::PermissionDenied)
-        });
+        let _ = make_transaction::<_, ()>(
+            "poison",
+            &path,
+            "f.nix",
+            noop_build(),
+            UpdateInput::Keep,
+            |file| {
+                *file.get_mut_file_content()? = String::from("# poison");
+                Err(mx::ErrorKind::PermissionDenied)
+            },
+        );
 
-        let content = make_transaction("read", &path, "f.nix", noop_build(), |file| {
-            Ok(file.get_file_content()?.clone())
-        })
+        let content = make_transaction(
+            "read",
+            &path,
+            "f.nix",
+            noop_build(),
+            UpdateInput::Keep,
+            |file| Ok(file.get_file_content()?.clone()),
+        )
         .unwrap();
 
         assert!(
@@ -378,12 +464,24 @@ mod no_regression {
         let _guard = lock_build_queue();
 
         for _ in 0..3 {
-            let _ = make_transaction::<_, ()>("iter", &path, "res.nix", noop_build(), |_| {
-                Err(mx::ErrorKind::PermissionDenied)
-            });
+            let _ = make_transaction::<_, ()>(
+                "iter",
+                &path,
+                "res.nix",
+                noop_build(),
+                UpdateInput::Keep,
+                |_| Err(mx::ErrorKind::PermissionDenied),
+            );
         }
 
-        let result = make_transaction::<_, ()>("final", &path, "res.nix", noop_build(), |_| Ok(()));
+        let result = make_transaction::<_, ()>(
+            "final",
+            &path,
+            "res.nix",
+            noop_build(),
+            UpdateInput::Keep,
+            |_| Ok(()),
+        );
         assert!(
             result.is_ok(),
             "resources must be released after each error"
@@ -395,6 +493,8 @@ mod no_regression {
 // Stash tests via make_transaction
 // ─────────────────────────────────────────────────────────────────────────────
 mod stash {
+    use crate::core::transaction::transaction::UpdateInput;
+
     use super::*;
 
     /// Untracked files present before `make_transaction` are stashed and then
@@ -410,7 +510,15 @@ mod stash {
         let bystander = dir.path().join("bystander.nix");
         fs::write(&bystander, "bystander content").unwrap();
 
-        make_transaction::<_, ()>("tx", &path, "target.nix", noop_build(), |_| Ok(())).unwrap();
+        make_transaction::<_, ()>(
+            "tx",
+            &path,
+            "target.nix",
+            noop_build(),
+            UpdateInput::Keep,
+            |_| Ok(()),
+        )
+        .unwrap();
 
         // bystander must be back after the transaction
         assert!(
@@ -430,9 +538,14 @@ mod stash {
         let bystander = dir.path().join("bystander.nix");
         fs::write(&bystander, "bystander content").unwrap();
 
-        let _ = make_transaction::<_, ()>("tx", &path, "target.nix", noop_build(), |_| {
-            Err(mx::ErrorKind::PermissionDenied)
-        });
+        let _ = make_transaction::<_, ()>(
+            "tx",
+            &path,
+            "target.nix",
+            noop_build(),
+            UpdateInput::Keep,
+            |_| Err(mx::ErrorKind::PermissionDenied),
+        );
 
         assert!(
             bystander.exists(),
@@ -453,10 +566,17 @@ mod stash {
         // untracked bystander triggers the stash
         fs::write(dir.path().join("bystander.nix"), "bystander").unwrap();
 
-        make_transaction::<_, ()>("tx", &path, "target.nix", noop_build(), |file| {
-            *file.get_mut_file_content()? = String::from("modified");
-            Ok(())
-        })
+        make_transaction::<_, ()>(
+            "tx",
+            &path,
+            "target.nix",
+            noop_build(),
+            UpdateInput::Keep,
+            |file| {
+                *file.get_mut_file_content()? = String::from("modified");
+                Ok(())
+            },
+        )
         .unwrap();
 
         assert_eq!(

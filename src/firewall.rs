@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use crate::core::list::List as mxList;
 use crate::core::transaction::file_lock::NixFile;
-use crate::core::transaction::transaction::BuildCommand;
+use crate::core::transaction::transaction::{BuildCommand, UpdateInput};
 use crate::{core::transaction, mx};
 
 pub enum NetworkProtocol {
@@ -143,6 +143,7 @@ pub fn add_global_allow_port(
         config_dir,
         FILE_FIREWALL_PATH,
         BuildCommand::Switch,
+        UpdateInput::Keep,
         |file| add_global_allow_port_no_transaction(file, allowed_port, protocol),
     )
 }
@@ -157,6 +158,7 @@ pub fn remove_global_allowed_port(
         config_dir,
         FILE_FIREWALL_PATH,
         BuildCommand::Switch,
+        UpdateInput::Keep,
         |file| remove_global_allowed_port_no_transaction(file, allowed_port, protocol),
     )
 }
@@ -176,6 +178,7 @@ pub fn add_global_allowed_port_range(
         config_dir,
         FILE_FIREWALL_PATH,
         BuildCommand::Switch,
+        UpdateInput::Keep,
         |file| add_global_allowed_port_range_no_transaction(file, allowed_ports, protocol),
     )
 }
@@ -195,6 +198,7 @@ pub fn remove_global_allowed_port_range(
         config_dir,
         FILE_FIREWALL_PATH,
         BuildCommand::Switch,
+        UpdateInput::Keep,
         |file| remove_global_allowed_port_range_no_transaction(file, allowed_ports, protocol),
     )
 }
@@ -215,6 +219,7 @@ pub fn add_interface_allow_port(
         config_dir,
         FILE_FIREWALL_PATH,
         BuildCommand::Switch,
+        UpdateInput::Keep,
         |file| add_interface_allow_port_no_transaction(file, allowed_port, protocol, interface),
     )
 }
@@ -235,6 +240,7 @@ pub fn remove_interface_allowed_port(
         config_dir,
         FILE_FIREWALL_PATH,
         BuildCommand::Switch,
+        UpdateInput::Keep,
         |file| {
             remove_interface_allowed_port_no_transaction(file, allowed_port, protocol, interface)
         },
@@ -258,6 +264,7 @@ pub fn add_interface_allow_port_range(
         config_dir,
         FILE_FIREWALL_PATH,
         BuildCommand::Switch,
+        UpdateInput::Keep,
         |file| {
             add_interface_allow_port_range_no_transaction(file, allowed_ports, protocol, interface)
         },
@@ -281,6 +288,7 @@ pub fn remove_interface_allowed_port_range(
         config_dir,
         FILE_FIREWALL_PATH,
         BuildCommand::Switch,
+        UpdateInput::Keep,
         |file| {
             remove_interface_allowed_port_range_no_transaction(
                 file,

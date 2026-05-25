@@ -1,7 +1,11 @@
 use std::{collections::HashMap, fs, path, process};
 
 use super::file_lock::NixFile;
-use crate::{CONFIG_NAME, core::list::List as mxList, mx};
+use crate::{
+    CONFIG_NAME,
+    core::{list::List as mxList, transaction::file_lock::NixFilePermission},
+    mx,
+};
 
 /// Chemin du verrou global empêchant deux builds simultanés.
 const LOCK_BUILD_FILE: &str = "/tmp/mx-build.lock";
@@ -23,6 +27,32 @@ pub enum BuildCommand {
     /// Installation initiale sur une nouvelle machine (`nixos-install`).
     /// La commande de build est vide en release ; déclenche `build-vm` en debug.
     Install,
+}
+
+pub enum UpdateInput {
+    Keep,
+    UpdateAll,
+    UpdateSelected(Vec<String>),
+}
+
+pub enum TransactionPermission {
+    ReadOnly,
+    Writtable,
+}
+
+impl From<&TransactionPermission> for bool {
+    fn from(p: &TransactionPermission) -> bool {
+        matches!(p, TransactionPermission::Writtable)
+    }
+}
+
+impl From<&TransactionPermission> for NixFilePermission {
+    fn from(p: &TransactionPermission) -> NixFilePermission {
+        match p {
+            TransactionPermission::ReadOnly => NixFilePermission::ReadOnly,
+            TransactionPermission::Writtable => NixFilePermission::Writtable,
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -173,6 +203,8 @@ pub struct Transaction<'a> {
     /// modifications non commitées. `None` si aucun stash n'a été nécessaire.
     /// Restauré automatiquement par [`commit`] et [`rollback`].
     stash_oid: Option<git2::Oid>,
+
+    permission_transaction: TransactionPermission,
 }
 
 impl<'a> Transaction<'a> {
@@ -188,6 +220,7 @@ impl<'a> Transaction<'a> {
         config_dir: &str,
         transaction_description: &str,
         build_type: BuildCommand,
+        permission: TransactionPermission,
     ) -> mx::Result<Self> {
         Ok(Transaction {
             info: transaction_description.to_string(),
@@ -198,6 +231,7 @@ impl<'a> Transaction<'a> {
             build_type,
             old_commit: git2::Oid::zero(),
             stash_oid: None,
+            permission_transaction: permission,
         })
     }
 
@@ -426,13 +460,23 @@ impl<'a> Transaction<'a> {
     /// # Erreurs
     /// * `mx::ErrorKind::TransactionNotBegin` – `begin` n'a pas encore été appelé.
     /// * `mx::ErrorKind::FileNotFound`        – `path` n'a pas été ajouté via `add_file`.
-    pub fn get_file(&mut self, path: &str) -> mx::Result<&mut NixFile> {
+    pub fn get_file_mut(&mut self, path: &str) -> mx::Result<&mut NixFile> {
         if self.git_repo.is_none() {
             return Err(mx::ErrorKind::TransactionNotBegin);
+        }
+        if let TransactionPermission::ReadOnly = self.permission_transaction {
+            return Err(mx::ErrorKind::PermissionDenied);
         }
         self.list_file
             .get_mut(path)
             .ok_or(mx::ErrorKind::FileNotFound)
+    }
+
+    pub fn get_file(&mut self, path: &str) -> mx::Result<&NixFile> {
+        if self.git_repo.is_none() {
+            return Err(mx::ErrorKind::TransactionNotBegin);
+        }
+        self.list_file.get(path).ok_or(mx::ErrorKind::FileNotFound)
     }
 
     /// Ouvre la transaction : initialise le dépôt Git, stashe les éventuelles
@@ -495,13 +539,15 @@ impl<'a> Transaction<'a> {
             }
 
             for (path_file, file) in self.list_file.iter_mut() {
-                match file.begin() {
+                match file.begin(NixFilePermission::from(&self.permission_transaction)) {
                     Ok(_) => (),
-                    Err(mx::ErrorKind::FileNotFound) => {
+                    Err(mx::ErrorKind::FileNotFound)
+                        if let TransactionPermission::Writtable = self.permission_transaction =>
+                    {
                         // Le fichier n'existe pas encore : on le crée et on note
                         // qu'il devra être déclaré dans configuration.nix
                         file.create_file()?;
-                        file.begin()?;
+                        file.begin(NixFilePermission::Writtable)?;
                         new_file.push(path_file.clone());
                     }
                     Err(e) => return Err(e),
@@ -515,14 +561,14 @@ impl<'a> Transaction<'a> {
                     if e.code() == git2::ErrorCode::UnbornBranch
                         || e.code() == git2::ErrorCode::NotFound =>
                 {
-                    git2::Oid::zero()
+                    git2::Oid::ZERO_SHA1
                 }
                 Err(e) => return Err(mx::ErrorKind::GitError(e)),
             };
         }
-        {
+        if let TransactionPermission::Writtable = self.permission_transaction {
             // Ajoute les nouveaux fichiers à la liste imports de configuration.nix
-            let config_file = self.get_file("configuration.nix")?;
+            let config_file = self.get_file_mut("configuration.nix")?;
             let import_file = mxList::new("imports", true);
             for path in new_file {
                 import_file.add(config_file, &format!("./{}", &path))?;
@@ -565,19 +611,25 @@ impl<'a> Transaction<'a> {
     ///    b. Crée le commit Git.
     ///    c. Tente d'acquérir le verrou de build ; si obtenu, lance `nixos-rebuild`.
     /// 4. Ferme tous les [`NixFile`] et libère le dépôt Git.
-    fn commit_impl(&mut self) -> mx::Result<()> {
+    fn commit_impl(&mut self, update_input: UpdateInput) -> mx::Result<()> {
         if self.git_repo.is_none() {
             return Err(mx::ErrorKind::TransactionNotBegin);
         }
-        for (_, nix_file) in self.list_file.iter_mut() {
-            nix_file.commit()?;
-        }
 
         let mut need_modif = false;
-        for (path, _) in self.list_file.iter() {
-            if Self::has_diff_with_commit(self.git_repo.as_ref().unwrap(), self.old_commit, path)? {
-                need_modif = true;
-                self.git_add(path)?;
+        if let TransactionPermission::Writtable = self.permission_transaction {
+            for (_, nix_file) in self.list_file.iter_mut() {
+                nix_file.commit()?;
+            }
+            for (path, _) in self.list_file.iter() {
+                if Self::has_diff_with_commit(
+                    self.git_repo.as_ref().unwrap(),
+                    self.old_commit,
+                    path,
+                )? {
+                    need_modif = true;
+                    self.git_add(path)?;
+                }
             }
         }
 
@@ -589,6 +641,23 @@ impl<'a> Transaction<'a> {
                     .current_dir(&self.git_repo_path)
                     .output()
                     .map_err(mx::ErrorKind::IOError)?;
+            } else {
+                let mut args = vec!["flake".to_string(), "update".to_string()];
+                let command = match update_input {
+                    UpdateInput::UpdateAll => args,
+                    UpdateInput::UpdateSelected(s) => {
+                        args.extend(s);
+                        args
+                    }
+                    UpdateInput::Keep => vec![],
+                };
+                if !command.is_empty() {
+                    process::Command::new("nix")
+                        .args(command)
+                        .current_dir(&self.git_repo_path)
+                        .output()
+                        .map_err(mx::ErrorKind::IOError)?;
+                }
             }
             self.git_commit(Some("HEAD"), &self.git_user, &self.git_user, &self.info)?;
 
@@ -625,8 +694,8 @@ impl<'a> Transaction<'a> {
     ///
     /// En cas d'échec interne, un [`rollback`] automatique est tenté avant de
     /// propager l'erreur.
-    pub fn commit(&mut self) -> mx::Result<()> {
-        self.commit_impl().map_err(|e| {
+    pub fn commit(&mut self, update_input: UpdateInput) -> mx::Result<()> {
+        self.commit_impl(update_input).map_err(|e| {
             let _ = self.rollback();
             e
         })
@@ -662,11 +731,9 @@ impl<'a> Transaction<'a> {
             let repo = self.git_repo.as_ref().unwrap();
             let head = repo.head().map_err(mx::ErrorKind::GitError)?;
 
-            let refname = head
-                .name()
-                .ok_or(mx::ErrorKind::GitError(git2::Error::from_str(
-                    "HEAD is not a symbolic ref",
-                )))?;
+            let refname = head.name().map_err(|_| {
+                mx::ErrorKind::GitError(git2::Error::from_str("HEAD is not a symbolic ref"))
+            })?;
 
             // Repointe la référence HEAD sur l'ancien commit
             repo.find_reference(refname)

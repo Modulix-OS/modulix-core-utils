@@ -1,7 +1,10 @@
 pub mod file_lock;
 pub mod transaction;
 
-use crate::{core::transaction::transaction::BuildCommand, mx};
+use crate::{
+    core::transaction::transaction::{BuildCommand, TransactionPermission, UpdateInput},
+    mx,
+};
 use file_lock::NixFile;
 pub use transaction::Transaction;
 
@@ -49,16 +52,59 @@ pub fn make_transaction<F, R>(
     config_dir: &str,
     file_path: &str,
     build_command: BuildCommand,
+    updated_input: UpdateInput,
     f: F,
 ) -> mx::Result<R>
 where
     F: FnOnce(&mut NixFile) -> mx::Result<R>,
 {
-    let mut transaction = Transaction::new(config_dir, description, build_command)?;
+    let mut transaction = Transaction::new(
+        config_dir,
+        description,
+        build_command,
+        TransactionPermission::Writtable,
+    )?;
     transaction.add_file(file_path)?;
     transaction.begin()?;
 
-    // Récupère le handle du fichier ; en cas d'échec, annule immédiatement
+    let file = match transaction.get_file_mut(file_path) {
+        Ok(file) => file,
+        Err(e) => {
+            transaction.rollback()?;
+            return Err(e);
+        }
+    };
+    match f(file) {
+        Ok(ret) => {
+            transaction.commit(updated_input)?;
+            Ok(ret)
+        }
+        Err(e) => {
+            transaction.rollback()?;
+            Err(e)
+        }
+    }
+}
+
+pub fn make_transaction_read_only<F, R>(
+    description: &str,
+    config_dir: &str,
+    file_path: &str,
+    build_command: BuildCommand,
+    f: F,
+) -> mx::Result<R>
+where
+    F: FnOnce(&NixFile) -> mx::Result<R>,
+{
+    let mut transaction = Transaction::new(
+        config_dir,
+        description,
+        build_command,
+        TransactionPermission::ReadOnly,
+    )?;
+    transaction.add_file(file_path)?;
+    transaction.begin()?;
+
     let file = match transaction.get_file(file_path) {
         Ok(file) => file,
         Err(e) => {
@@ -66,11 +112,9 @@ where
             return Err(e);
         }
     };
-
-    // Exécute la logique métier ; commit si succès, rollback si erreur
     match f(file) {
         Ok(ret) => {
-            transaction.commit()?;
+            transaction.commit(UpdateInput::Keep)?;
             Ok(ret)
         }
         Err(e) => {

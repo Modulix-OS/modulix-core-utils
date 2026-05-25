@@ -1,5 +1,7 @@
 use crate::core::transaction::Transaction;
-use crate::core::transaction::transaction::BuildCommand;
+use crate::core::transaction::file_lock::NixFile;
+use crate::core::transaction::transaction::TransactionPermission;
+use crate::core::transaction::transaction::{BuildCommand, UpdateInput};
 use crate::{CONFIG_DIRECTORY, filesystem, mx};
 use std::path::Path;
 use std::{fs, process};
@@ -82,11 +84,19 @@ pub fn init_repo(root_path: &str) -> mx::Result<()> {
     );
 
     #[cfg(debug_assertions)]
-    let mut initial_transaction =
-        Transaction::new(&path_config, "initial commit", BuildCommand::Boot)?;
+    let mut initial_transaction = Transaction::new(
+        &path_config,
+        "initial commit",
+        BuildCommand::Boot,
+        TransactionPermission::Writtable,
+    )?;
     #[cfg(not(debug_assertions))]
-    let mut initial_transaction =
-        Transaction::new(&path_config, "initial commit", BuildCommand::Install)?;
+    let mut initial_transaction = Transaction::new(
+        &path_config,
+        "initial commit",
+        BuildCommand::Install,
+        TransactionPermission::Writtable,
+    )?;
 
     let files: &[(&str, &str)] = &[
         ("flake.nix", FLAKE_FILE),
@@ -103,7 +113,7 @@ pub fn init_repo(root_path: &str) -> mx::Result<()> {
     // Associer chaque fichier à son contenu
 
     for (filename, content) in files {
-        let file_content = match initial_transaction.get_file(filename) {
+        let file_content = match initial_transaction.get_file_mut(filename) {
             Ok(file) => match file.get_mut_file_content() {
                 Ok(c) => c,
                 Err(e) => {
@@ -119,7 +129,7 @@ pub fn init_repo(root_path: &str) -> mx::Result<()> {
         *file_content = content.to_string();
     }
 
-    initial_transaction.commit()?;
+    initial_transaction.commit(UpdateInput::UpdateAll)?;
 
     Ok(())
 }

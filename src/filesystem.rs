@@ -4,7 +4,11 @@ use crate::{
     core::{
         list::List as mxList,
         option::Option as mxOption,
-        transaction::{self, file_lock::NixFile, transaction::BuildCommand},
+        transaction::{
+            self,
+            file_lock::NixFile,
+            transaction::{BuildCommand, UpdateInput},
+        },
     },
     mx,
 };
@@ -64,6 +68,7 @@ pub fn add_entry(
         config_dir,
         FILE_SYSTEM_PATH,
         BuildCommand::Switch,
+        UpdateInput::Keep,
         |file| add_entry_no_transaction(file, mount_point, device, fs_type, option, encrypted),
     )
 }
@@ -80,6 +85,7 @@ pub fn remove_entry(config_dir: &str, mount_point: &str) -> mx::Result<bool> {
         config_dir,
         FILE_SYSTEM_PATH,
         BuildCommand::Switch,
+        UpdateInput::Keep,
         |file| remove_entry_no_transaction(file, mount_point),
     )
 }
@@ -97,6 +103,7 @@ pub fn add_swap(config_dir: &str, device: &str) -> mx::Result<()> {
         config_dir,
         FILE_SYSTEM_PATH,
         BuildCommand::Switch,
+        UpdateInput::Keep,
         |file| add_swap_no_transaction(file, device),
     )
 }
@@ -114,6 +121,7 @@ pub fn remove_swap(config_dir: &str, device: &str) -> mx::Result<()> {
         config_dir,
         FILE_SYSTEM_PATH,
         BuildCommand::Switch,
+        UpdateInput::Keep,
         |file| remove_swap_no_transaction(file, device),
     )
 }
@@ -158,6 +166,7 @@ pub fn def_filesystem_from_unix_fstab(config_dir: &str) -> mx::Result<()> {
         config_dir,
         FILE_SYSTEM_PATH,
         BuildCommand::Switch,
+        UpdateInput::Keep,
         |file| def_filesystem_from_unix_fstab_no_transaction(file),
     )
 }

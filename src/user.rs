@@ -1,9 +1,12 @@
 use crate::{
-    core::transaction,
     core::{
         list::List as mxList,
         option::Option as mxOption,
-        transaction::{file_lock::NixFile, transaction::BuildCommand},
+        transaction::{
+            self,
+            file_lock::NixFile,
+            transaction::{BuildCommand, UpdateInput},
+        },
     },
     mx,
 };
@@ -59,6 +62,7 @@ pub fn add(
         config_dir,
         USER_FILE_PATH,
         BuildCommand::Switch,
+        UpdateInput::Keep,
         |file| {
             add_no_transaction(
                 file,
@@ -79,6 +83,7 @@ pub fn remove(config_dir: &str, username: &str) -> mx::Result<bool> {
         config_dir,
         USER_FILE_PATH,
         BuildCommand::Switch,
+        UpdateInput::Keep,
         |file| remove_no_transaction(file, username),
     )
 }
