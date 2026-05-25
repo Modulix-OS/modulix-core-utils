@@ -229,7 +229,7 @@ impl<'a> Transaction<'a> {
             git_repo_path: config_dir.to_string(),
             git_user: git2::Signature::now("Modulix-OS", "modulix.os@ik-mail.com").unwrap(),
             build_type,
-            old_commit: git2::Oid::zero(),
+            old_commit: git2::Oid::ZERO_SHA1,
             stash_oid: None,
             permission_transaction: permission,
         })
@@ -304,7 +304,7 @@ impl<'a> Transaction<'a> {
         let statuses = repo.statuses(None).map_err(mx::ErrorKind::GitError)?;
 
         Ok(statuses.iter().any(|s| {
-            s.path() == Some("flake.lock")
+            s.path() == Ok("flake.lock")
                 && s.status().intersects(
                     git2::Status::WT_MODIFIED
                         | git2::Status::WT_NEW
