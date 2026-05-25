@@ -5,7 +5,6 @@ edition = "2024"
 
 [features]
 # Core
-core-arch-info = []
 core-nix-file = ["dep:rnix", "dep:rowan", "unix"]
 core-user-info = ["dep:serde", "serde-json"]
 core-nix-plugin-namespace = ["dep:phf"]
