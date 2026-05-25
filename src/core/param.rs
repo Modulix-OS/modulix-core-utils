@@ -4,8 +4,6 @@ use rowan::ast::AstNode as _;
 use super::transaction::file_lock::NixFile;
 use crate::mx;
 
-// ── Position ──────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
 pub struct PatternInfo {
     pub open_brace: usize,
@@ -30,11 +28,6 @@ pub enum ParamPosition {
     NoPattern,
 }
 
-// ── Helpers internes ──────────────────────────────────────────────────────────
-
-/// Extrait le `Pattern` depuis l'AST en passant par `Lambda::param()`.
-/// C'est la seule approche fiable : `Pattern` n'apparaît dans l'AST que
-/// comme variant de `Param`, lui-même accessible via `Lambda`.
 fn find_pattern(content: &str) -> Option<ast::Pattern> {
     let root = Root::parse(content).tree();
     for node in root.syntax().descendants() {
@@ -234,8 +227,6 @@ impl NixParam {
         Ok(a == b)
     }
 }
-
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

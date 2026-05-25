@@ -9,39 +9,47 @@ use std::fs::OpenOptions;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::AsRawFd;
 
-/// Représente un fichier NixOS géré avec des garanties d'intégrité via les attributs
-/// étendus du système de fichiers ext2/ext4 (flag `immutable`).
+/// NixFile represents a file handle with atomic commit semantics.
 ///
-/// Un `NixFile` encapsule l'accès à un fichier de configuration Nix en suivant
-/// un cycle de vie explicite : `begin` → modifications → `commit` ou `close`.
-/// Tant qu'une transaction n'est pas ouverte via `begin`, la lecture/écriture
-/// du contenu est interdite.
+/// This struct enables atomic manipulation of files by writing all modifications
+/// only at commit time. It handles files marked as immutable using EXT2 flags,
+/// and enforces exclusive file locking: a lock is acquired at begin() and released at commit().
+/// The object can only be instantiated through a transaction context to maintain
+/// file system consistency and prevent partial writes.
 ///
-/// Le flag `immutable` du noyau Linux est utilisé pour protéger le fichier entre
-/// deux transactions. Il n'est retiré que le temps d'une transaction active, puis
-/// restauré au `commit`.
+/// # Atomicity Guarantee
+/// All content modifications accumulated during the transaction are written to disk
+/// atomically only when commit() is called. This prevents partial writes from being
+/// visible to other processes.
+///
+/// # Immutable File Support
+/// After successful commit(), files are marked with the immutable flag to prevent
+/// accidental modifications or deletions. This is particularly important for NixOS
+/// configuration files that must remain stable between rebuilds.
 pub struct NixFile {
-    /// Handle vers le fichier ouvert, présent uniquement pendant une transaction active.
     file: Option<fs::File>,
 
-    /// Chemin absolu vers le fichier sur le système de fichiers.
     path: String,
 
-    /// Contenu textuel du fichier, chargé en mémoire lors du `begin`.
     file_content: String,
 
-    /// Indique si le fichier a été créé par `create_file` (absent au départ).
     was_created: bool,
 }
 
 impl NixFile {
-    /// Construit un nouveau `NixFile` à partir d'un chemin de dépôt et d'un chemin relatif.
+    /// Creates a new NixFile instance associated with the given repository path
+    /// and relative file path.
     ///
-    /// Le fichier n'est pas ouvert à ce stade ; aucune opération I/O n'est effectuée.
+    /// This constructor can only be used within an active transaction context.
+    /// The returned object will participate in the current transaction and support
+    /// atomic file modifications via begin()/commit()/close() lifecycle.
     ///
     /// # Arguments
-    /// * `repo_path` – Chemin racine du dépôt NixOS (ex. `/etc/nixos`).
-    /// * `relative_path` – Chemin du fichier relatif à `repo_path` (ex. `/hardware.nix`).
+    /// * `repo_path` - The root path of the NixOS repository (e.g., `/etc/nixos`)
+    /// * `relative_path` - The relative path to the file within the repository
+    ///
+    /// # Returns
+    /// A new NixFile instance initialized with the provided paths.
     pub fn new(repo_path: &str, relative_path: &str) -> Self {
         NixFile {
             file: None,
@@ -51,32 +59,17 @@ impl NixFile {
         }
     }
 
-    /// Flag ext2/ext4 indiquant qu'un fichier est immuable (lecture seule au niveau noyau).
-    /// Valeur issue de `<linux/fs.h>` : `FS_IMMUTABLE_FL`.
     const EXT2_IMMUTABLE_FL: libc::c_long = 0x00000010;
 
-    /// Numéro ioctl pour lire les flags d'un fichier (`FS_IOC_GETFLAGS`).
     const FS_IOC_GETFLAGS: libc::c_ulong = 0x80086601;
 
-    /// Numéro ioctl pour écrire les flags d'un fichier (`FS_IOC_SETFLAGS`).
     const FS_IOC_SETFLAGS: libc::c_ulong = 0x40086602;
 
-    /// Vérifie si le fichier situé à `path` appartient à l'utilisateur root (uid 0).
-    ///
-    /// Les opérations `ioctl` sur les flags immutables ne sont significatives que pour
-    /// les fichiers root ; cette vérification évite des erreurs silencieuses sur des
-    /// fichiers appartenant à d'autres utilisateurs.
     fn is_owned_by_root(path: &str) -> mx::Result<bool> {
         let metadata = std::fs::metadata(path).map_err(mx::ErrorKind::IOError)?;
         Ok(metadata.uid() == 0)
     }
 
-    /// Lit les flags ioctl courants du fichier situé à `path`.
-    ///
-    /// Ouvre le fichier en lecture seule et exécute `FS_IOC_GETFLAGS` via `ioctl`.
-    ///
-    /// # Erreurs
-    /// Retourne `mx::ErrorKind::UnixError` si l'appel `ioctl` échoue.
     fn get_flags(path: &str) -> mx::Result<libc::c_long> {
         let file = OpenOptions::new()
             .read(true)
@@ -93,16 +86,6 @@ impl NixFile {
         Ok(flags)
     }
 
-    /// Active le flag `immutable` sur le fichier situé à `path`.
-    ///
-    /// Cette opération n'est effectuée que si le fichier appartient à root.
-    /// Une fois immutable, le fichier ne peut plus être modifié ni supprimé,
-    /// même par root, sans retirer explicitement le flag.
-    ///
-    /// Appelé automatiquement après `create_file` et après `commit`.
-    ///
-    /// # Erreurs
-    /// Retourne `mx::ErrorKind::UnixError` si l'appel `ioctl` échoue.
     pub(super) fn make_immutable(path: &str) -> mx::Result<()> {
         if Self::is_owned_by_root(path)? {
             let file = OpenOptions::new()
@@ -112,7 +95,6 @@ impl NixFile {
             let fd = file.as_raw_fd();
             let mut flags = Self::get_flags(path)?;
 
-            // Active le bit immutable dans les flags
             flags |= Self::EXT2_IMMUTABLE_FL;
 
             unsafe {
@@ -124,15 +106,6 @@ impl NixFile {
         Ok(())
     }
 
-    /// Désactive le flag `immutable` sur le fichier situé à `path`.
-    ///
-    /// Cette opération n'est effectuée que si le fichier appartient à root.
-    /// Doit être appelée avant toute écriture sur un fichier précédemment rendu immutable.
-    ///
-    /// Appelé automatiquement au début de `begin`.
-    ///
-    /// # Erreurs
-    /// Retourne `mx::ErrorKind::UnixError` si l'appel `ioctl` échoue.
     pub(super) fn make_mutable(path: &str) -> mx::Result<()> {
         if Self::is_owned_by_root(path)? {
             let file = OpenOptions::new()
@@ -154,16 +127,6 @@ impl NixFile {
         Ok(())
     }
 
-    /// Crée physiquement le fichier Nix sur le disque avec un squelette de module vide.
-    ///
-    /// Le contenu initial est `{config, lib, pkgs, ...}:\n{\n}\n`, ce qui correspond
-    /// à un module NixOS minimal valide.
-    ///
-    /// Après création, le fichier est rendu immutable pour empêcher toute modification
-    /// accidentelle hors transaction.
-    ///
-    /// # Erreurs
-    /// Retourne une erreur I/O si la création ou l'écriture initiale échoue.
     pub(super) fn create_file(&mut self) -> mx::Result<()> {
         let mut file = fs::File::create(&self.path).map_err(mx::ErrorKind::IOError)?;
         file.write_all("{config, lib, pkgs, ...}:\n{\n}\n".as_bytes())
@@ -173,9 +136,6 @@ impl NixFile {
         Ok(())
     }
 
-    /// Indique si le fichier a été créé par cet objet (via `create_file`).
-    ///
-    /// Utile pour distinguer un fichier nouvellement généré d'un fichier préexistant.
     pub fn was_created(&self) -> bool {
         self.was_created
     }
@@ -185,11 +145,6 @@ impl NixFile {
         return &self.path;
     }
 
-    /// Retourne une référence mutable sur le contenu du fichier en mémoire.
-    ///
-    /// # Erreurs
-    /// Retourne `mx::ErrorKind::TransactionNotBegin` si aucune transaction n'est active
-    /// (c'est-à-dire si `begin` n'a pas encore été appelé avec succès).
     pub fn get_mut_file_content(&mut self) -> mx::Result<&mut String> {
         if self.file.is_none() {
             return Err(mx::ErrorKind::TransactionNotBegin);
@@ -197,10 +152,6 @@ impl NixFile {
         Ok(&mut self.file_content)
     }
 
-    /// Retourne une référence partagée sur le contenu du fichier en mémoire.
-    ///
-    /// # Erreurs
-    /// Retourne `mx::ErrorKind::TransactionNotBegin` si aucune transaction n'est active.
     pub fn get_file_content(&self) -> mx::Result<&String> {
         if self.file.is_none() {
             return Err(mx::ErrorKind::TransactionNotBegin);
@@ -208,19 +159,22 @@ impl NixFile {
         Ok(&self.file_content)
     }
 
-    /// Ouvre une transaction sur le fichier : retire le flag immutable, pose un verrou
-    /// exclusif et charge le contenu en mémoire dans `file_content`.
+    /// Begins a transaction on the file by making it mutable, acquiring an
+    /// exclusive lock, and loading its content into memory.
     ///
-    /// Si une transaction est déjà active (`self.file.is_some()`), l'appel est sans effet.
+    /// This method:
+    /// - Removesthe immutable flag if present (making the file writable)
+    /// - Opens the file in read-write mode
+    /// - Acquires an exclusive lock on the file
+    /// - Reads the entire file content into memory
     ///
-    /// # Cycle de vie attendu
-    /// `begin` → modifications via `get_mut_file_content` → `commit` ou `close`
+    /// Only one transaction can be active at a time. If a transaction is already
+    /// in progress, this call has no effect.
     ///
-    /// # Erreurs
-    /// * `mx::ErrorKind::FileNotFound` – Le fichier n'existe pas.
-    /// * `mx::ErrorKind::PermissionDenied` – Permissions insuffisantes pour ouvrir le fichier.
-    /// * `mx::ErrorKind::FailToLock` – Impossible d'acquérir le verrou de fichier.
-    /// * `mx::ErrorKind::IOError` – Autre erreur I/O lors de la lecture.
+    /// # Errors
+    /// * `mx::ErrorKind::FileNotFound` - The file does not exist
+    /// * `mx::ErrorKind::PermissionDenied` - Insufficient permissions
+    /// * `mx::ErrorKind::FailToLock` - Failed to acquire exclusive file lock
     pub(super) fn begin(&mut self) -> mx::Result<()> {
         if self.file.is_none() {
             // Rendre le fichier mutable avant toute ouverture en écriture
@@ -236,7 +190,6 @@ impl NixFile {
                 },
             };
 
-            // Ouvre le fichier existant en lecture+écriture, sans le créer
             self.file = Some(
                 File::options()
                     .create(false)
@@ -251,7 +204,6 @@ impl NixFile {
             )
         }
 
-        // Pose un verrou exclusif puis lit le contenu intégral en mémoire
         if let Some(f) = self.file.as_mut() {
             f.lock().or(Err(mx::ErrorKind::FailToLock))?;
             f.read_to_string(&mut self.file_content)
@@ -262,21 +214,31 @@ impl NixFile {
         }
     }
 
-    /// Valide la transaction : réécrit le contenu en mémoire dans le fichier, remet
-    /// le flag immutable et libère le verrou.
+    /// Commits the transaction by atomically writing the modified content to disk,
+    /// restoring the immutable flag, releasing the lock, and resetting the state.
     ///
-    /// Le fichier est tronqué à zéro avant réécriture pour éviter tout résidu si le
-    /// nouveau contenu est plus court que l'ancien.
+    /// This method performs all operations atomically in this order:
+    /// 1. Truncates the file to zero length
+    /// 2. Writes the complete modified content
+    /// 3. Restores the immutable flag
+    /// 4. Releases the exclusive lock
+    /// 5. Resets the internal state (clears content and file handle)
     ///
-    /// # Erreurs
-    /// * `mx::ErrorKind::InvalidFile` – Aucune transaction active.
-    /// * `mx::ErrorKind::PermissionDenied` – Échec de l'écriture.
+    /// Calling commit() ensures that all modifications are durably persisted
+    /// before the file becomes immutable again. If the write fails, no partial
+    /// changes are visible to other processes.
+    ///
+    /// Note: Unlike close(), commit() persists changes before releasing the file.
+    /// close() only releases the lock without persisting content.
+    ///
+    /// # Errors
+    /// * `mx::ErrorKind::InvalidFile` - No active transaction (file was already committed)
+    /// * `mx::ErrorKind::PermissionDenied` - Failed to write to file
     pub(super) fn commit(&mut self) -> mx::Result<()> {
         if self.file.is_none() {
             return Err(mx::ErrorKind::InvalidFile);
         }
 
-        // Retour au début du fichier, puis troncature pour repartir de zéro
         self.file
             .as_mut()
             .unwrap()
@@ -284,14 +246,12 @@ impl NixFile {
             .unwrap();
         self.file.as_ref().unwrap().set_len(0).unwrap();
 
-        // Écriture du contenu modifié
         self.file
             .as_ref()
             .unwrap()
             .write_all(&self.file_content.as_bytes())
             .or(Err(mx::ErrorKind::PermissionDenied))?;
 
-        // Protection du fichier et libération du verrou
         Self::make_immutable(&self.path)?;
         self.file
             .as_ref()
@@ -299,23 +259,25 @@ impl NixFile {
             .unlock()
             .map_err(mx::ErrorKind::IOError)?;
 
-        // Réinitialise l'état : la transaction est terminée après un commit.
-        // Sans ceci, file.is_some() resterait vrai et get_file_content()
-        // continuerait de retourner Ok au lieu de TransactionNotBegin.
         self.file_content = String::new();
         self.file = None;
         Ok(())
     }
 
-    /// Annule la transaction sans persister les modifications : libère le verrou,
-    /// vide le contenu en mémoire et ferme le handle.
+    /// Closes the transaction by releasing the lock and resetting the state,
+    /// without persisting any modifications to disk.
     ///
-    /// Le flag immutable n'est PAS restauré ici : si `begin` avait retiré le flag
-    /// (fichier root), celui-ci reste mutable après `close`. Préférer `commit` pour
-    /// toujours laisser le fichier dans un état protégé.
+    /// This method:
+    /// - Releases the exclusive lock on the file
+    /// - Clears the in-memory content
+    /// - Closes the file handle
     ///
-    /// # Erreurs
-    /// Toujours `Ok(())` (l'erreur de déverrouillage est intentionnellement ignorée).
+    /// Unlike commit(), this method does NOT write the content back to disk or
+    /// restore the immutable flag. Any modifications made during the transaction
+    /// are discarded when close() is called. Use commit() to persist changes.
+    ///
+    /// This method always returns Ok(()) even if unlocking fails, as per the
+    /// intentional design choice to avoid propagating lock-related errors.
     pub(super) fn close(&mut self) -> mx::Result<()> {
         if let Some(f) = self.file.as_ref() {
             #[allow(unused_must_use)]
