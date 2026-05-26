@@ -14,7 +14,7 @@ pub struct SizedScreenshot<'a> {
 }
 
 #[derive(Debug)]
-pub struct AppSreenshot<'a> {
+pub struct AppScreenshot<'a> {
     pub default: usize,
     pub screenshots: Vec<SizedScreenshot<'a>>,
 }

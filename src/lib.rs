@@ -1,12 +1,15 @@
 use const_format::concatcp;
 
-#[cfg(feature = "package-info-minimal")]
+#[cfg(feature = "package-info")]
 pub mod package_info;
 
 #[cfg(feature = "config-store")]
 mod config_store;
 
 mod core;
+
+#[cfg(feature = "core-app-info-trait")]
+pub use core::app_info_trait::{AppInfoGui, AppInfoMinimal};
 
 #[cfg(feature = "desktop-environment")]
 pub mod desktop_environment;

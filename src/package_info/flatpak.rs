@@ -1,6 +1,8 @@
 use crate::mx;
 
-use super::screenshot::{AppSreenshot, Screenshot, SizedScreenshot};
+use crate::core::app_info_trait::app_info_screenshot::{
+    AppScreenshot, Screenshot, SizedScreenshot,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -87,7 +89,7 @@ impl FlatpakInfo {
         &self.description
     }
 
-    pub fn screenshots<'a>(&'a self) -> Option<AppSreenshot<'a>> {
+    pub fn screenshots<'a>(&'a self) -> Option<AppScreenshot<'a>> {
         let screenshots = self.screenshots.as_ref()?;
 
         let app_screenshots: Vec<SizedScreenshot> = screenshots
@@ -105,7 +107,7 @@ impl FlatpakInfo {
                 caption: sizes.caption.as_deref().unwrap_or(""),
             })
             .collect();
-        Some(AppSreenshot {
+        Some(AppScreenshot {
             screenshots: app_screenshots,
             default: screenshots
                 .iter()

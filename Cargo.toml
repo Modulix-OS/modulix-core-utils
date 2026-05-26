@@ -7,17 +7,20 @@ edition = "2024"
 # Core
 core-nix-file = ["dep:rnix", "dep:rowan", "unix"]
 core-user-info = ["dep:serde", "serde-json"]
-core-nix-plugin-namespace = ["dep:phf"]
+core-app-info-trait = [
+    "dep:phf",
+    "dep:serde",
+]
 
 # Modules
-package-info-minimal = [
-    "core-nix-plugin-namespace",
+package-info = [
+    "core-app-info-trait",
     "dep:serde",
     "serde-json",
     "dep:tokio"
 ]
-package-info-full = [
-    "package-info-minimal",
+app-info-gui = [
+    "core-app-info-trait",
     "reqwest"
 ]
 config-store = []
@@ -47,12 +50,12 @@ locale = ["core-nix-file"]
 modulix-module = ["core-nix-file"]
 install-package = [
     "core-nix-file",
-    "package-info-minimal",
+    "package-info",
     "dep:phf",
     "dep:xz2",
     "serde-json",
     "dep:tokio",
-    "core-nix-plugin-namespace"
+    "core-app-info-trait"
 ]
 user = ["core-nix-file"]
 
@@ -105,7 +108,7 @@ required-features = ["filesystem"]
 
 [[exemple]]
 name = "search-package"
-required-features = ["dep:tokio", "package-info-full"]
+required-features = ["package-info", "app-info-gui", "dep:tokio"]
 
 [[exemple]]
 name = "package"

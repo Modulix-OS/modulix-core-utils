@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
-#[cfg(feature = "package-info-full")]
+#[cfg(feature = "app-info-gui")]
 use tokio::sync::OnceCell;
 
-use crate::core::plugin_namespace::PLUGIN_NAMESPACES;
+use crate::core::app_info_trait::PLUGIN_NAMESPACES;
 
 use crate::core::transaction::transaction::UpdateInput;
 use crate::{
@@ -169,7 +169,7 @@ fn build_package(
             .to_string(),
         outputs: vec![explicit_output],
         pkg_name: name,
-        #[cfg(feature = "package-info-full")]
+        #[cfg(feature = "app-info-gui")]
         flatpak: OnceCell::new(),
     }
 }

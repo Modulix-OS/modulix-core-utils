@@ -1,23 +1,30 @@
+#[cfg(feature = "app-info-gui")]
+use std::borrow::Cow;
 use std::{collections::HashMap, fmt::Debug};
 
 use serde::{Deserialize, Serialize};
 
+use crate::core::app_info_trait::AppPlugin;
 use crate::mx;
 
-#[cfg(feature = "package-info-full")]
+#[cfg(feature = "app-info-gui")]
+use crate::core::app_info_trait::AppInfoGui;
+
+#[cfg(feature = "app-info-gui")]
+use crate::core::app_info_trait::AppScreenshot;
+
+use crate::core::app_info_trait::AppInfoMinimal;
+
+#[cfg(feature = "app-info-gui")]
 mod flatpak;
-#[cfg(feature = "package-info-full")]
+#[cfg(feature = "app-info-gui")]
 use flatpak::FlatpakInfo;
-#[cfg(feature = "package-info-full")]
+#[cfg(feature = "app-info-gui")]
 mod package_basic_info;
 
-#[cfg(feature = "package-info-full")]
-mod screenshot;
-use crate::core::plugin_namespace::PLUGIN_NAMESPACES;
-#[cfg(feature = "package-info-full")]
-pub use screenshot::AppSreenshot;
+use crate::core::app_info_trait::PLUGIN_NAMESPACES;
 
-#[cfg(feature = "package-info-full")]
+#[cfg(feature = "app-info-gui")]
 use tokio::sync::OnceCell;
 
 type Url = str;
@@ -34,19 +41,13 @@ pub struct NixPackage {
     #[serde(default)]
     pub(crate) outputs: Vec<String>,
 
-    #[cfg(feature = "package-info-full")]
+    #[cfg(feature = "app-info-gui")]
     #[serde(skip)]
     pub(crate) flatpak: OnceCell<Option<FlatpakInfo>>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct NixPlugin {
-    pub name: String,
-    pub description: String,
-}
-
 impl NixPackage {
-    #[cfg(feature = "package-info-full")]
+    #[cfg(feature = "app-info-gui")]
     async fn get_flatpak(&self) -> Option<&FlatpakInfo> {
         self.flatpak
             .get_or_init(|| async { FlatpakInfo::new(self.id()?).await.ok() })
@@ -86,7 +87,7 @@ impl NixPackage {
             _ => 0,
         };
 
-        #[cfg(feature = "package-info-full")]
+        #[cfg(feature = "app-info-gui")]
         if let Some(keywords) = package_basic_info::get_keywords(name) {
             for keyword in keywords {
                 let keyword_lower = keyword.to_lowercase();
@@ -133,7 +134,32 @@ impl NixPackage {
         dp[m][n]
     }
 
-    pub async fn new(pkg_name: &str) -> crate::mx::Result<Self> {
+    pub async fn get_outputs(&self) -> mx::Result<Vec<String>> {
+        let expr = format!("nixpkgs#{}.outputs", self.pkg_name);
+
+        let output = tokio::process::Command::new("nix")
+            .args(["eval", "--json", &expr])
+            .output()
+            .await
+            .map_err(mx::ErrorKind::IOError)?;
+
+        if !output.status.success() {
+            return Err(mx::ErrorKind::NixCommandError(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+
+        let stdout = String::from_utf8(output.stdout).map_err(mx::ErrorKind::FromUtf8Error)?;
+        let outputs: Vec<String> = serde_json::from_str(&stdout).map_err(|_| {
+            mx::ErrorKind::NixCommandError(String::from("Impossible to grep output format"))
+        })?;
+
+        Ok(outputs)
+    }
+}
+
+impl AppInfoMinimal for NixPackage {
+    async fn new(pkg_name: &str) -> mx::Result<Self> {
         let expr = format!(
             r#"let p = (import <nixpkgs> {{}}).{}; in {{ name = p.meta.name or p.name; version = p.version; description = p.meta.description or ""; outputs = p.outputs or []; }}"#,
             pkg_name
@@ -151,7 +177,7 @@ impl NixPackage {
         Ok(info)
     }
 
-    pub async fn search(query: &str, number_app: u32) -> mx::Result<Vec<Self>> {
+    async fn search(query: &str, number_app: u32) -> mx::Result<Vec<Self>> {
         let output = tokio::process::Command::new("nix")
             .args(["search", "nixpkgs", "--json", query])
             .env("NIXPKGS_ALLOW_UNFREE", "1")
@@ -185,7 +211,7 @@ impl NixPackage {
                         description: value.description,
                         pname: value.pname,
                         outputs: vec![],
-                        #[cfg(feature = "package-info-full")]
+                        #[cfg(feature = "app-info-gui")]
                         flatpak: OnceCell::new(),
                     },
                 ))
@@ -197,71 +223,19 @@ impl NixPackage {
         Ok(packages.into_iter().map(|(_, pkg)| pkg).collect())
     }
 
-    pub fn package_name(&self) -> &str {
+    fn package_name(&self) -> &str {
         &self.pkg_name
     }
 
-    pub fn name(&self) -> &str {
+    fn display_name(&self) -> &str {
         &self.pname
     }
 
-    pub fn summary(&self) -> &str {
+    fn summary(&self) -> &str {
         &self.description
     }
 
-    #[cfg(feature = "package-info-full")]
-    pub fn id(&self) -> Option<&str> {
-        package_basic_info::get_app_id(self.name())
-    }
-
-    #[cfg(feature = "package-info-full")]
-    pub fn icon(&self) -> Option<&Url> {
-        package_basic_info::get_icon(self.name())
-    }
-
-    #[cfg(feature = "package-info-full")]
-    pub fn keyword(&self) -> Option<&[&str]> {
-        package_basic_info::get_keywords(&self.pkg_name)
-    }
-
-    #[cfg(feature = "package-info-full")]
-    pub async fn description(&self) -> &str {
-        if let Some(flatpak) = self.get_flatpak().await {
-            flatpak.description()
-        } else {
-            self.summary()
-        }
-    }
-
-    #[cfg(feature = "package-info-full")]
-    pub async fn screenshots<'a>(&'a self) -> Option<AppSreenshot<'a>> {
-        self.get_flatpak().await?.screenshots()
-    }
-
-    pub async fn get_outputs(&self) -> mx::Result<Vec<String>> {
-        let expr = format!("nixpkgs#{}.outputs", self.pkg_name);
-
-        let output = tokio::process::Command::new("nix")
-            .args(["eval", "--json", &expr])
-            .output()
-            .await
-            .map_err(mx::ErrorKind::IOError)?;
-
-        if !output.status.success() {
-            return Err(mx::ErrorKind::NixCommandError(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
-        }
-
-        let stdout = String::from_utf8(output.stdout).map_err(mx::ErrorKind::FromUtf8Error)?;
-        let outputs: Vec<String> = serde_json::from_str(&stdout).map_err(|_| {
-            mx::ErrorKind::NixCommandError(String::from("Impossible to grep output format"))
-        })?;
-
-        Ok(outputs)
-    }
-
-    pub async fn list_plugins(package: &str) -> mx::Result<Vec<NixPlugin>> {
+    async fn list_plugins(package: &str) -> mx::Result<Vec<AppPlugin>> {
         let namespace = PLUGIN_NAMESPACES
             .get(package)
             .ok_or_else(|| {
@@ -318,8 +292,54 @@ impl NixPackage {
                     .and_then(|d| d.as_str())
                     .unwrap_or("")
                     .to_string();
-                NixPlugin { name, description }
+                AppPlugin { name, description }
             })
             .collect())
+    }
+}
+
+#[cfg(feature = "app-info-gui")]
+impl AppInfoGui for NixPackage {
+    fn id(&self) -> Option<&str> {
+        package_basic_info::get_app_id(self.display_name())
+    }
+
+    fn icon(&self) -> Option<&Url> {
+        package_basic_info::get_icon(self.display_name())
+    }
+
+    fn keyword(&self) -> Option<&[&str]> {
+        package_basic_info::get_keywords(&self.pkg_name)
+    }
+
+    async fn description(&self) -> Cow<'_, str> {
+        if let Some(flatpak) = self.get_flatpak().await {
+            Cow::Borrowed(flatpak.description())
+        } else {
+            Cow::Borrowed(self.summary())
+        }
+    }
+
+    async fn screenshots<'a>(&'a self) -> Option<AppScreenshot<'a>> {
+        self.get_flatpak().await?.screenshots()
+    }
+
+    async fn main_program(&self) -> mx::Result<Cow<'_, str>> {
+        let expr = format!("nixpkgs#{}.meta.mainProgram", self.pkg_name);
+        let output = tokio::process::Command::new("nix")
+            .args(["eval", "--json", &expr])
+            .output()
+            .await
+            .map_err(mx::ErrorKind::IOError)?;
+        if !output.status.success() {
+            return Err(mx::ErrorKind::NixCommandError(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+        let stdout = String::from_utf8(output.stdout).map_err(mx::ErrorKind::FromUtf8Error)?;
+        let main_program: String = serde_json::from_str(&stdout).map_err(|_| {
+            mx::ErrorKind::NixCommandError(String::from("Impossible to parse mainProgram"))
+        })?;
+        Ok(Cow::Owned(main_program))
     }
 }
