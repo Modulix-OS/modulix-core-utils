@@ -1,4 +1,5 @@
 use modulix_core_utils::mx;
+use phf::phf_map;
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -34,7 +35,15 @@ async fn get_flathub_id() -> mx::Result<Vec<String>> {
         .map_err(|e| mx::ErrorKind::HttpError(e))
 }
 
+static KNOWN_ID_MATCHES: phf::Map<&'static str, &'static str> = phf_map! {
+    "obs" => "com.obsproject.Studio",
+};
+
 pub fn matches_flathub(exe: &str, app_id: &str) -> bool {
+    if let Some(match_id) = KNOWN_ID_MATCHES.get(exe) {
+        return app_id == *match_id;
+    }
+
     let segments: Vec<&str> = app_id.split('.').collect();
     let n = segments.len();
     if n == 0 {

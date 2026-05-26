@@ -63,7 +63,14 @@ unix = ["dep:nix"]
 
 
 # Generator
-flathub-info-gen = ["reqwest", "serde-json", "dep:futures", "dep:tokio", "dep:serde"]
+flathub-info-gen = [
+    "reqwest",
+    "serde-json",
+    "dep:futures",
+    "dep:tokio",
+    "dep:serde",
+    "dep:phf",
+]
 
 [dependencies]
 const_format = "0.2.36"
@@ -88,7 +95,7 @@ tokio = { version = "1.52.3", features = ["macros", "process", "rt-multi-thread"
 tempfile = "3"
 
 [[bin]]
-name = "flathub-incommit_implfo-gen"
+name = "flathub-info-gen"
 path = "bin/flathub-info-gen.rs"
 required-features = ["flathub-info-gen"]
 
