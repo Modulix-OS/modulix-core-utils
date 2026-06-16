@@ -1,5 +1,6 @@
 use std::{collections::HashMap, fs, path, process};
 
+use super::build_queue::BuildQueue;
 use super::file_lock::NixFile;
 use crate::{
     CONFIG_NAME,
@@ -7,7 +8,11 @@ use crate::{
     mx,
 };
 
-const LOCK_BUILD_FILE: &str = "/tmp/mx-build.lock";
+/// Rebuild-disable sentinel. If this file is already locked (by a test or a
+/// maintenance operation), `commit_impl` skips the NixOS rebuild. Tests hold it
+/// both to avoid invoking `nixos-rebuild` and to serialize their access to the
+/// shared fixture repo.
+const LOCK_SKIP_REBUILD_FILE: &str = "/tmp/mx-skip-rebuild.lock";
 
 /// `nixos-rebuild` (or `nixos-install`) command to run after a successful commit.
 ///
@@ -637,10 +642,18 @@ impl<'a> Transaction<'a> {
             }
             self.git_commit(Some("HEAD"), &self.git_user, &self.git_user, &self.info)?;
 
-            let mut queue = LockFile::try_lock(LOCK_QUEUE_BUILD_FILE)?;
-            if queue.is_some() {
-                let mut lock_build = LockFile::lock(LOCK_BUILD_FILE)?;
-                queue.as_mut().unwrap().unlock();
+            // Test/maintenance hook: if the sentinel is already held, skip the
+            // rebuild (tests hold it to avoid nixos-rebuild and to serialize
+            // access to the shared fixture repo).
+            let skip = LockFile::try_lock(LOCK_SKIP_REBUILD_FILE)?;
+            if let Some(mut sentinel) = skip {
+                sentinel.unlock(); // sentinel free → real run
+
+                // Strict FIFO queue: a single operation is rebuilt at a time, in
+                // arrival order. Blocks until at the head of the queue.
+                let ticket = BuildQueue::enqueue()?;
+                ticket.wait_turn()?;
+
                 let mut stderr = String::new();
                 let success = Self::rebuild_config(
                     &self.git_repo_path,
@@ -648,7 +661,7 @@ impl<'a> Transaction<'a> {
                     self.build_type.clone(),
                     Some(&mut stderr),
                 )?;
-                lock_build.unlock();
+                // `ticket` is dropped at the end of the block (or on early-return) → dequeue.
                 if !success {
                     return Err(mx::ErrorKind::BuildError(stderr));
                 }
