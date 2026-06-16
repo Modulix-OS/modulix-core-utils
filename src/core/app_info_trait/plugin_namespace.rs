@@ -1,32 +1,7 @@
-use phf::phf_map;
-
-pub struct PluginNamespace {
-    pub path_plugin: &'static str,
-    pub path_enable_programs: &'static str,
-    pub path_plugin_list: &'static str,
-}
-
-impl PluginNamespace {
-    pub const fn new(
-        path_plugin: &'static str,
-        path_enable_programs: &'static str,
-        path_plugin_list: &'static str,
-    ) -> Self {
-        Self {
-            path_plugin,
-            path_enable_programs,
-            path_plugin_list,
-        }
-    }
-}
-
-pub static PLUGIN_NAMESPACES: phf::Map<&'static str, PluginNamespace> = phf_map! {
-    "vscode" => PluginNamespace::new(
-        "vscode-extensions",
-        "programs.vscode.enable",
-        "programs.vscode.extensions"),
-    "obs-studio" => PluginNamespace::new(
-        "obs-studio-plugins",
-        "programs.obs-studio.enable",
-        "programs.obs-studio.plugins"),
-};
+/// nixpkgs attribute-set prefixes that hold plugin packages rather than
+/// standalone applications.
+///
+/// These are hidden from package search: every plugin set is surfaced through a
+/// dedicated module (`mx.<module>.plugins`) instead of appearing as an
+/// installable package.
+pub static PLUGIN_NAMESPACE_PREFIXES: &[&str] = &["vscode-extensions", "obs-studio-plugins"];

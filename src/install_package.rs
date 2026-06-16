@@ -3,13 +3,10 @@ use std::collections::HashMap;
 #[cfg(feature = "app-info-gui")]
 use tokio::sync::OnceCell;
 
-use crate::core::app_info_trait::PLUGIN_NAMESPACES;
-
 use crate::core::transaction::transaction::UpdateInput;
 use crate::{
     core::{
         list::List as mxList,
-        option::Option as mxOption,
         transaction::{self, file_lock::NixFile, transaction::BuildCommand},
     },
     mx,
@@ -34,39 +31,6 @@ pub fn uninstall_no_transaction(file: &mut NixFile, packages: &[&str]) -> mx::Re
     Ok(())
 }
 
-pub fn install_plugin_no_transaction(
-    file: &mut NixFile,
-    package_name: &str,
-    plugin_name: &str,
-) -> mx::Result<()> {
-    let pkgs_info = PLUGIN_NAMESPACES
-        .get(package_name)
-        .ok_or(mx::ErrorKind::PackageDoesNotHaveAPlugin)?;
-
-    mxOption::new(pkgs_info.path_enable_programs).set(file, "true")?;
-    mxList::new(pkgs_info.path_plugin_list, true).add(
-        file,
-        &format!("pkgs.{}.{}", pkgs_info.path_plugin, plugin_name),
-    )?;
-    Ok(())
-}
-
-pub fn remove_plugin_no_transaction(
-    file: &mut NixFile,
-    package_name: &str,
-    plugin_name: &str,
-) -> mx::Result<()> {
-    let pkgs_info = PLUGIN_NAMESPACES
-        .get(package_name)
-        .ok_or(mx::ErrorKind::PackageDoesNotHaveAPlugin)?;
-
-    mxList::new(pkgs_info.path_plugin_list, true).remove(
-        file,
-        &format!("pkgs.{}.{}", pkgs_info.path_plugin, plugin_name),
-    )?;
-    Ok(())
-}
-
 const NIX_OUTPUTS: &[&str] = &["out", "dev", "lib", "doc", "man", "info", "static"];
 
 fn parse_pkg_entry(raw: &str) -> (String, String) {
@@ -81,22 +45,11 @@ fn parse_pkg_entry(raw: &str) -> (String, String) {
 
 fn collect_entries(file: &NixFile) -> mx::Result<Vec<(String, String)>> {
     let pkgs = mxList::new("environment.systemPackages", true);
-    let mut entries: Vec<(String, String)> = match pkgs.get_element_in_list(file) {
+    let entries: Vec<(String, String)> = match pkgs.get_element_in_list(file) {
         Ok(e) => e.map(|n| parse_pkg_entry(n)).collect(),
         Err(mx::ErrorKind::OptionNotFound) => vec![],
         Err(e) => return Err(e),
     };
-    for (pkg, pkgs_info) in PLUGIN_NAMESPACES.entries() {
-        let option_pkgs = mxOption::new(pkgs_info.path_enable_programs);
-        if match option_pkgs.get(file) {
-            Ok(res) => res,
-            Err(mx::ErrorKind::OptionNotFound) => "false",
-            Err(e) => return Err(e),
-        } == "true"
-        {
-            entries.push((pkg.to_string(), "out".to_string()));
-        }
-    }
     Ok(entries)
 }
 
@@ -195,28 +148,6 @@ pub fn uninstall(config_dir: &str, packages: &[&str]) -> mx::Result<()> {
         BuildCommand::Switch,
         UpdateInput::Keep,
         |file| uninstall_no_transaction(file, packages),
-    )
-}
-
-pub fn install_plugin(config_dir: &str, package_name: &str, plugin_name: &str) -> mx::Result<()> {
-    transaction::make_transaction(
-        &format!("Install {} plugin for {}", plugin_name, package_name),
-        config_dir,
-        FILE_PACKAGE_PATH,
-        BuildCommand::Switch,
-        UpdateInput::Keep,
-        |file| install_plugin_no_transaction(file, package_name, plugin_name),
-    )
-}
-
-pub fn remove_plugin(config_dir: &str, package_name: &str, plugin_name: &str) -> mx::Result<()> {
-    transaction::make_transaction(
-        &format!("Remove {} plugin for {}", plugin_name, package_name),
-        config_dir,
-        FILE_PACKAGE_PATH,
-        BuildCommand::Switch,
-        UpdateInput::Keep,
-        |file| remove_plugin_no_transaction(file, package_name, plugin_name),
     )
 }
 

@@ -9,7 +9,10 @@ mod config_store;
 mod core;
 
 #[cfg(feature = "core-app-info-trait")]
-pub use core::app_info_trait::{AppInfoGui, AppInfoMinimal};
+pub use core::app_info_trait::AppInfoMinimal;
+
+#[cfg(feature = "app-info-gui")]
+pub use core::app_info_trait::AppInfoGui;
 
 #[cfg(feature = "desktop-environment")]
 pub mod desktop_environment;
@@ -35,7 +38,11 @@ pub mod init;
 #[cfg(feature = "locale")]
 pub mod locale;
 
-//pub mod module;
+#[cfg(feature = "module-info")]
+pub mod module_info;
+
+#[cfg(feature = "install-module")]
+pub mod install_module;
 
 #[cfg(feature = "modulix-module")]
 pub mod modulix_modules;
@@ -77,6 +84,14 @@ pub const REMOTE_CONFIG_URL: &str = concatcp!(
     "/",
     REFS_FOLLOWED,
     "/"
+);
+
+pub const REMOTE_MODULE_URL: &str = concatcp!(
+    "https://raw.githubusercontent.com/Modulix-OS/modules/",
+    REFS_FOLLOW_PATH,
+    "/",
+    REFS_FOLLOWED,
+    "/modules/"
 );
 
 const CONFIG_NAME: &str = "default";

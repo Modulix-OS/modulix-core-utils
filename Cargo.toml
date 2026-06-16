@@ -48,6 +48,20 @@ init = [
 ]
 locale = ["core-nix-file"]
 modulix-module = ["core-nix-file"]
+module-info = [
+    "core-app-info-trait",
+    "dep:serde",
+    "serde-json",
+    "dep:tokio",
+    "reqwest"
+]
+install-module = [
+    "core-nix-file",
+    "module-info",
+    "serde-json",
+    "dep:tokio",
+    "core-app-info-trait"
+]
 install-package = [
     "core-nix-file",
     "package-info",
@@ -113,6 +127,14 @@ required-features = ["package-info", "app-info-gui", "dep:tokio"]
 [[exemple]]
 name = "package"
 required-features = ["install-package"]
+
+[[exemple]]
+name = "module"
+required-features = ["install-module"]
+
+[[exemple]]
+name = "search_module"
+required-features = ["module-info", "app-info-gui"]
 
 [[exemple]]
 name = "firewall"
