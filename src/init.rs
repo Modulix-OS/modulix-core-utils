@@ -124,7 +124,7 @@ pub fn init_repo(root_path: &str) -> mx::Result<()> {
 
     initial_transaction.begin()?;
 
-    // Associer chaque fichier à son contenu
+    // Associate each file with its content
 
     for (filename, content) in files {
         let file_content = match initial_transaction.get_file_mut(filename) {

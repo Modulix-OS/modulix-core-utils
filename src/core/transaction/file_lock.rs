@@ -129,7 +129,7 @@ impl NixFile {
             let fd = file.as_raw_fd();
             let mut flags = Self::get_flags(path)?;
 
-            // Désactive le bit immutable dans les flags
+            // Clear the immutable bit in the flags
             flags &= !Self::FS_IMMUTABLE_FL;
 
             unsafe {
@@ -154,7 +154,7 @@ impl NixFile {
         self.was_created
     }
 
-    /// Retourne le chemin absolu du fichier.
+    /// Returns the absolute path of the file.
     pub fn get_file_path(&self) -> &str {
         return &self.path;
     }
@@ -180,7 +180,7 @@ impl NixFile {
     /// exclusive lock, and loading its content into memory.
     ///
     /// This method:
-    /// - Removesthe immutable flag if present (making the file writable)
+    /// - Removes the immutable flag if present (making the file writable)
     /// - Opens the file in read-write mode
     /// - Acquires an exclusive lock on the file
     /// - Reads the entire file content into memory

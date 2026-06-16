@@ -9,6 +9,6 @@ fn main() {
         _ => "unknown",
     };
 
-    // Injecte la valeur comme variable d'environnement de compilation
+    // Inject the value as a compile-time environment variable
     println!("cargo:rustc-env=TARGET_NIX={}", target_nix);
 }

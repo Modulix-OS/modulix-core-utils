@@ -292,26 +292,26 @@ mod v1 {
             Self::localise_option(&nix_ast, &settings, 0usize).ok_or(mx::ErrorKind::InvalidFile)
         }
 
-        /// Localise récursivement une option dans l'AST Nix.
+        /// Recursively locates an option in the Nix AST.
         ///
-        /// Cette fonction privée est le point d'entrée de l'algorithme de recherche.
-        /// Elle dispatch vers les fonctions spécialisées selon le type de nœud rencontré :
+        /// This private function is the entry point of the search algorithm.
+        /// It dispatches to the specialized functions depending on the node type:
         ///
-        /// - `NODE_ATTR_SET` : Ensemble d'attributs (`{ ... }`)
-        /// - `NODE_ATTRPATH_VALUE` : Attribution (`key = value;`)
-        /// - Autres : Parcours récursif des enfants
+        /// - `NODE_ATTR_SET`: Attribute set (`{ ... }`)
+        /// - `NODE_ATTRPATH_VALUE`: Assignment (`key = value;`)
+        /// - Other: Recursive traversal of the children
         ///
         /// # Arguments
         ///
-        /// * `ast` - Nœud de l'arbre syntaxique à analyser
-        /// * `settings` - Chemin de l'option recherchée
+        /// * `ast` - Syntax tree node to analyze
+        /// * `settings` - Path of the searched option
         ///
-        /// # Algorithme
+        /// # Algorithm
         ///
-        /// 1. Identifie le type de nœud
-        /// 2. Délègue au gestionnaire approprié
-        /// 3. Pour les autres nœuds, parcourt récursivement les enfants
-        /// 4. Retourne le premier match trouvé
+        /// 1. Identify the node type
+        /// 2. Delegate to the appropriate handler
+        /// 3. For other nodes, traverse the children recursively
+        /// 4. Return the first match found
         fn localise_option(
             ast: &rnix::SyntaxNode,
             settings: &str,
@@ -337,46 +337,46 @@ mod v1 {
             };
         }
 
-        /// Traite un nœud de type ensemble d'attributs (`NODE_ATTR_SET`).
+        /// Handles an attribute-set node (`NODE_ATTR_SET`).
         ///
-        /// Cette fonction recherche la meilleure correspondance parmi tous les enfants
-        /// de l'ensemble d'attributs. Elle implémente une stratégie de recherche qui :
+        /// This function looks for the best match among all the children of the
+        /// attribute set. It implements a search strategy that:
         ///
-        /// 1. Parcourt tous les enfants à la recherche de correspondances
-        /// 2. Conserve le match avec le chemin le plus long (correspondance la plus spécifique)
-        /// 3. Retourne immédiatement si un match exact est trouvé (`option_path = None`)
-        /// 4. Sinon, retourne le meilleur match partiel ou un point d'insertion
+        /// 1. Traverses all children looking for matches
+        /// 2. Keeps the match with the longest path (most specific match)
+        /// 3. Returns immediately if an exact match is found (`option_path = None`)
+        /// 4. Otherwise, returns the best partial match or an insertion point
         ///
         /// # Arguments
         ///
-        /// * `ast` - Nœud de type `NODE_ATTR_SET` à analyser
-        /// * `setting` - Chemin de l'option recherchée
+        /// * `ast` - `NODE_ATTR_SET` node to analyze
+        /// * `setting` - Path of the searched option
         ///
-        /// # Retour
+        /// # Returns
         ///
-        /// Toujours retourne une `SettingsPosition` avec trois cas possibles :
+        /// Always returns a `SettingsPosition` with three possible cases:
         ///
-        /// 1. **Match complet** (`option_path = None`) : L'option existe exactement
-        /// 2. **Match partiel** (`option_path = Some(...)`) : Une partie du chemin existe
-        /// 3. **Aucun match** : Retourne une position d'insertion avant le `}` fermant
+        /// 1. **Full match** (`option_path = None`): The option exists exactly
+        /// 2. **Partial match** (`option_path = Some(...)`): Part of the path exists
+        /// 3. **No match**: Returns an insertion position before the closing `}`
         ///
-        /// # Exemples
+        /// # Examples
         ///
         /// ```text
-        /// // Cas 1: Match complet
-        /// // Fichier: { services.nginx.enable = true; }
-        /// // Recherche: "services.nginx.enable"
-        /// // Résultat: option_path = None
+        /// // Case 1: Full match
+        /// // File: { services.nginx.enable = true; }
+        /// // Search: "services.nginx.enable"
+        /// // Result: option_path = None
         ///
-        /// // Cas 2: Match partiel
-        /// // Fichier: { services.nginx = {}; }
-        /// // Recherche: "services.nginx.enable"
-        /// // Résultat: option_path = Some("enable")
+        /// // Case 2: Partial match
+        /// // File: { services.nginx = {}; }
+        /// // Search: "services.nginx.enable"
+        /// // Result: option_path = Some("enable")
         ///
-        /// // Cas 3: Aucun match
-        /// // Fichier: { services = {}; }
-        /// // Recherche: "network.proxy"
-        /// // Résultat: Point d'insertion avant le '}'
+        /// // Case 3: No match
+        /// // File: { services = {}; }
+        /// // Search: "network.proxy"
+        /// // Result: Insertion point before the '}'
         /// ```
         fn localise_option_node_attr_set(
             ast: &rnix::SyntaxNode,
@@ -385,11 +385,11 @@ mod v1 {
         ) -> SettingsPosition {
             let mut best_opt_pos: Option<NewInsertion> = None;
 
-            // Parcourir tous les enfants pour trouver des correspondances
+            // Traverse all children to find matches
             for c in ast.children() {
                 let opt_pos = Self::localise_option(&c, &settings, indent_level);
                 if let Some(pos) = opt_pos {
-                    // Si match exact trouvé, retourner immédiatement
+                    // If an exact match is found, return immediately
                     match pos {
                         Self::ExistingOption(p) => return Self::ExistingOption(p),
                         Self::NewInsertion(new_pos) => match &best_opt_pos {
@@ -404,11 +404,11 @@ mod v1 {
                         },
                     }
 
-                    // Sinon, conserver le meilleur match (option dans la définition la plus proche)
+                    // Otherwise, keep the best match (option in the closest definition)
                 }
             }
 
-            // Retourner le meilleur match ou un point d'insertion
+            // Return the best match or an insertion point
             match best_opt_pos {
                 Some(best_pos) => SettingsPosition::NewInsertion(best_pos),
                 None => SettingsPosition::NewInsertion(NewInsertion::new(
@@ -419,64 +419,64 @@ mod v1 {
             }
         }
 
-        /// Traite un nœud d'attribution (`NODE_ATTRPATH_VALUE`).
+        /// Handles an assignment node (`NODE_ATTRPATH_VALUE`).
         ///
-        /// Cette fonction analyse les nœuds d'attribution (ex: `services.nginx.enable = true;`)
-        /// en vérifiant si le chemin d'attribut correspond au setting recherché.
+        /// This function analyzes assignment nodes (e.g. `services.nginx.enable = true;`)
+        /// by checking whether the attribute path matches the searched setting.
         ///
         /// # Arguments
         ///
-        /// * `ast` - Nœud de type `NODE_ATTRPATH_VALUE` à analyser
-        /// * `settings` - Chemin complet de l'option recherchée
+        /// * `ast` - `NODE_ATTRPATH_VALUE` node to analyze
+        /// * `settings` - Full path of the searched option
         ///
-        /// # Algorithme
+        /// # Algorithm
         ///
-        /// 1. **Extraction du chemin** : Récupère le chemin d'attribut du nœud
-        /// 2. **Vérification du préfixe** : Compare segment par segment avec le setting
-        ///    - Compte les segments de chaque chemin (séparés par '.')
-        ///    - Vérifie que l'attr_path est un préfixe du setting
-        ///    - Compare chaque segment individuellement
-        /// 3. **Analyse de la valeur** :
-        ///    - Si `NODE_ATTR_SET` : Recherche récursive dans le sous-ensemble
-        ///    - Si valeur simple : Retourne la position (match exact)
+        /// 1. **Path extraction**: Get the attribute path of the node
+        /// 2. **Prefix check**: Compare segment by segment with the setting
+        ///    - Count the segments of each path (separated by '.')
+        ///    - Check that the attr_path is a prefix of the setting
+        ///    - Compare each segment individually
+        /// 3. **Value analysis**:
+        ///    - If `NODE_ATTR_SET`: Recursive search in the sub-set
+        ///    - If a simple value: Return the position (exact match)
         ///
-        /// # Retour
+        /// # Returns
         ///
-        /// - `Some(SettingsPosition)` : Si le chemin d'attribut est un préfixe du setting
-        /// - `None` : Si aucune correspondance de préfixe n'est trouvée
+        /// - `Some(SettingsPosition)`: If the attribute path is a prefix of the setting
+        /// - `None`: If no prefix match is found
         ///
-        /// # Correspondance de préfixe
+        /// # Prefix matching
         ///
-        /// Un attr_path est considéré comme un préfixe valide si :
-        /// - Il a le même nombre ou moins de segments que le setting
-        /// - Tous ses segments correspondent aux segments correspondants du setting
+        /// An attr_path is considered a valid prefix if:
+        /// - It has the same number of segments or fewer than the setting
+        /// - All its segments match the corresponding segments of the setting
         ///
-        /// Exemples de préfixes valides :
+        /// Examples of valid prefixes:
         ///
         /// ```text
         /// Attr path: services.nginx
         /// Settings:  services.nginx.enable
-        /// ✓ Préfixe valide (2 ≤ 3 segments, tous identiques)
+        /// ✓ Valid prefix (2 ≤ 3 segments, all identical)
         ///
         /// Attr path: services.nginx.enable
         /// Settings:  services.nginx.enable
-        /// ✓ Match exact (3 = 3 segments)
+        /// ✓ Exact match (3 = 3 segments)
         ///
         /// Attr path: services.apache
         /// Settings:  services.nginx.enable
-        /// ✗ Pas un préfixe (apache ≠ nginx)
+        /// ✗ Not a prefix (apache ≠ nginx)
         /// ```
         ///
-        /// # Types de valeurs supportés
+        /// # Supported value types
         ///
-        /// - `NODE_ATTR_SET` : Ensemble imbriqué (`{ ... }`)
-        /// - `NODE_IDENT` : Identifiant (`true`, `false`, variable)
-        /// - `NODE_LITERAL` : Valeur littérale (nombre, boolean)
-        /// - `NODE_STRING` : Chaîne de caractères
-        /// - `NODE_PATH_REL` : Chemin relatif (`./path`)
-        /// - `NODE_PATH_ABS` : Chemin absolu (`/path`)
-        /// - `NODE_PATH_HOME` : Chemin home (`~/path`)
-        /// - `NODE_PATH_SEARCH` : Chemin de recherche (`<nixpkgs>`)
+        /// - `NODE_ATTR_SET`: Nested set (`{ ... }`)
+        /// - `NODE_IDENT`: Identifier (`true`, `false`, variable)
+        /// - `NODE_LITERAL`: Literal value (number, boolean)
+        /// - `NODE_STRING`: String
+        /// - `NODE_PATH_REL`: Relative path (`./path`)
+        /// - `NODE_PATH_ABS`: Absolute path (`/path`)
+        /// - `NODE_PATH_HOME`: Home path (`~/path`)
+        /// - `NODE_PATH_SEARCH`: Search path (`<nixpkgs>`)
         fn localise_option_node_attrpath_value(
             ast: &rnix::SyntaxNode,
             settings: &str,
@@ -484,7 +484,7 @@ mod v1 {
         ) -> Option<SettingsPosition> {
             let mut attr_path_valid: Option<String> = None;
 
-            // Étape 1: Trouver le chemin d'attribut qui correspond
+            // Step 1: Find the matching attribute path
             for c in ast
                 .children()
                 .filter(|c| c.kind() == rnix::SyntaxKind::NODE_ATTRPATH)
@@ -494,7 +494,7 @@ mod v1 {
                 let count_split_settings = settings.split('.').count();
                 let count_split_attr_path = attr_path.split('.').count();
 
-                // Vérifier si attr_path est un préfixe de settings
+                // Check whether attr_path is a prefix of settings
                 let is_prefix = count_split_attr_path <= count_split_settings
                     && attr_path
                         .split('.')
@@ -507,12 +507,12 @@ mod v1 {
                 }
             }
 
-            // Si aucun préfixe valide trouvé, retourner None
+            // If no valid prefix was found, return None
             if let None = attr_path_valid {
                 return None;
             }
 
-            // Étape 2: Analyser la valeur associée
+            // Step 2: Analyze the associated value
             let children_value = ast.children().filter(|cv| match cv.kind() {
                 rnix::SyntaxKind::NODE_ATTR_SET
                 | rnix::SyntaxKind::NODE_LIST
@@ -529,8 +529,8 @@ mod v1 {
 
             for c in children_value {
                 if c.kind() == rnix::SyntaxKind::NODE_ATTR_SET {
-                    // Cas 1: La valeur est un ensemble imbriqué
-                    // Retirer le préfixe déjà traité et continuer la recherche
+                    // Case 1: The value is a nested set
+                    // Strip the already-processed prefix and continue the search
                     let setting_whitout_path =
                         settings.strip_prefix(&attr_path_valid.unwrap()).unwrap();
                     let new_settings = setting_whitout_path
@@ -544,7 +544,7 @@ mod v1 {
                         )));
                     }
 
-                    // Recherche récursive dans le sous-ensemble
+                    // Recursive search in the sub-set
                     return Some(Self::localise_option_node_attr_set(
                         &c,
                         new_settings,
@@ -569,7 +569,7 @@ mod v1 {
                     }
                     return None;
                 } else {
-                    // Cas 2: On mets comme on peut a la fin du set
+                    // Case 2: Place it as best we can at the end of the set
                     return Some(SettingsPosition::ExistingOption(ExistingOption::new(
                         <TextRange as Into<Range<usize>>>::into(ast.text_range()),
                         <TextRange as Into<Range<usize>>>::into(c.text_range()),
@@ -578,7 +578,7 @@ mod v1 {
                 }
             }
 
-            // Aucune valeur trouvée (cas très rare)
+            // No value found (very rare case)
             None
         }
     }

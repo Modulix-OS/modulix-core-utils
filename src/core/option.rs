@@ -134,12 +134,12 @@ impl<'a> Option<'a> {
                 let content = nix_file.get_mut_file_content()?;
                 let start = option.get_range_option().start - 1;
 
-                // Trouver jusqu'où remonter en une seule passe
+                // Find how far back to go in a single pass
                 let trim_start = content[..start]
                     .trim_end_matches(|c| c == ' ' || c == '\t' || c == '\n')
                     .len();
 
-                // Supprimer en une seule opération
+                // Remove in a single operation
                 content.drain(trim_start..start);
                 Ok(true)
             }

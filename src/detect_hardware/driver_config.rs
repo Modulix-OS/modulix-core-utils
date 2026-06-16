@@ -64,7 +64,7 @@ impl DriverConfig {
                     }
                 }
                 _ if parts.len() == depth + 1 => {
-                    // Pas de segment suivant : c'est un module "feuille" (défaut)
+                    // No next segment: this is a "leaf" module (default)
                     def = Some(i);
                     if begin.is_some() {
                         end = Some(i);

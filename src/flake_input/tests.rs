@@ -19,21 +19,21 @@ fn create_flake_file(content: &str) -> (tempfile::TempDir, String) {
     (dir, path)
 }
 
-fn lock_build_queue() -> fs::File {
+fn disable_rebuild() -> fs::File {
     let f = fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .open("/tmp/mx-queue-build.lock")
-        .expect("failed to create build-queue lock file");
-    f.lock().expect("failed to lock build-queue lock file");
+        .open("/tmp/mx-skip-rebuild.lock")
+        .expect("failed to create skip-rebuild lock file");
+    f.lock().expect("failed to lock skip-rebuild lock file");
     f
 }
 
 #[test]
 fn add_follower_creates_follows_option() {
     let (_dir, path) = create_flake_file("{ config, lib, pkgs, ... }:\n{\n}\n");
-    let _guard = lock_build_queue();
+    let _guard = disable_rebuild();
     transaction::make_transaction(
         "add follower",
         &format!("{}/", path),
@@ -53,7 +53,7 @@ fn remove_follower_deletes_follows_option() {
     let (_dir, path) = create_flake_file(
         "{ config, lib, pkgs, ... }:\n{\n  inputs.foo = {\n    url = \"github:example/repo\";\n    follows = \"nixpkgs\";\n  };\n}\n",
     );
-    let _guard = lock_build_queue();
+    let _guard = disable_rebuild();
     let removed = transaction::make_transaction(
         "remove follower",
         &format!("{}/", path),
@@ -75,7 +75,7 @@ fn remove_input_deletes_input_block() {
     let (_dir, path) = create_flake_file(
         "{ config, lib, pkgs, ... }:\n{\n  inputs.foo = {\n    url = \"github:example/repo\";\n    follows = \"nixpkgs\";\n  };\n}\n",
     );
-    let _guard = lock_build_queue();
+    let _guard = disable_rebuild();
     let removed = transaction::make_transaction(
         "remove input",
         &format!("{}/", path),

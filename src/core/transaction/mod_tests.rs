@@ -88,22 +88,23 @@ fn create_and_commit(dir: &TempDir, file_name: &str, content: &str) -> std::path
     file_path
 }
 
-/// Acquires the build-queue lock so that `commit_impl` skips the NixOS rebuild.
+/// Holds the skip-rebuild sentinel so that `commit_impl` skips the NixOS rebuild.
 ///
 /// Returns the lock file handle — it **must** stay alive for the duration of
-/// the test (dropping it releases the lock).  Usage:
+/// the test (dropping it releases the lock).  Holding it also serializes tests
+/// that mutate the shared fixture repo.  Usage:
 /// ```rust
-/// let _guard = lock_build_queue();
+/// let _guard = disable_rebuild();
 /// make_transaction(...)?;
 /// ```
-fn lock_build_queue() -> fs::File {
+fn disable_rebuild() -> fs::File {
     let f = fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .open("/tmp/mx-queue-build.lock")
-        .expect("failed to create build-queue lock file");
-    f.lock().expect("failed to lock build-queue lock file");
+        .open("/tmp/mx-skip-rebuild.lock")
+        .expect("failed to create skip-rebuild lock file");
+    f.lock().expect("failed to lock skip-rebuild lock file");
     f
 }
 
@@ -173,7 +174,7 @@ mod integration {
         let path = repo_path(&dir);
         create_and_commit(&dir, "test.nix", "");
         // Hold the build-queue lock so commit_impl skips the NixOS rebuild.
-        let _guard = lock_build_queue();
+        let _guard = disable_rebuild();
 
         let result = make_transaction(
             "test commit",
@@ -220,7 +221,7 @@ mod integration {
         let dir = setup_repo();
         let path = repo_path(&dir);
         create_and_commit(&dir, "vec.nix", "line1\nline2\n");
-        let _guard = lock_build_queue();
+        let _guard = disable_rebuild();
 
         let result: mx::Result<Vec<String>> = make_transaction(
             "vec return",
@@ -318,7 +319,7 @@ mod integration {
         let dir = setup_repo();
         let path = repo_path(&dir);
         create_and_commit(&dir, "content.nix", "before");
-        let _guard = lock_build_queue();
+        let _guard = disable_rebuild();
 
         make_transaction::<_, ()>(
             "write test",
@@ -357,7 +358,7 @@ mod no_regression {
         let dir = setup_repo();
         let path = repo_path(&dir);
         create_and_commit(&dir, "f.nix", "v1");
-        let _guard = lock_build_queue();
+        let _guard = disable_rebuild();
 
         make_transaction::<_, ()>(
             "tx1",
@@ -388,7 +389,7 @@ mod no_regression {
         let dir = setup_repo();
         let path = repo_path(&dir);
         create_and_commit(&dir, "f.nix", "original");
-        let _guard = lock_build_queue();
+        let _guard = disable_rebuild();
 
         // First transaction: deliberate failure
         let _ = make_transaction::<_, ()>(
@@ -425,7 +426,7 @@ mod no_regression {
         let dir = setup_repo();
         let path = repo_path(&dir);
         create_and_commit(&dir, "f.nix", "clean");
-        let _guard = lock_build_queue();
+        let _guard = disable_rebuild();
 
         let _ = make_transaction::<_, ()>(
             "poison",
@@ -461,7 +462,7 @@ mod no_regression {
         let dir = setup_repo();
         let path = repo_path(&dir);
         create_and_commit(&dir, "res.nix", "data");
-        let _guard = lock_build_queue();
+        let _guard = disable_rebuild();
 
         for _ in 0..3 {
             let _ = make_transaction::<_, ()>(
@@ -504,7 +505,7 @@ mod stash {
         let dir = setup_repo();
         let path = repo_path(&dir);
         create_and_commit(&dir, "target.nix", "original");
-        let _guard = lock_build_queue();
+        let _guard = disable_rebuild();
 
         // untracked bystander — must NOT be committed, so make_transaction stashes it
         let bystander = dir.path().join("bystander.nix");
@@ -562,7 +563,7 @@ mod stash {
         let dir = setup_repo();
         let path = repo_path(&dir);
         create_and_commit(&dir, "target.nix", "original");
-        let _guard = lock_build_queue();
+        let _guard = disable_rebuild();
         // untracked bystander triggers the stash
         fs::write(dir.path().join("bystander.nix"), "bystander").unwrap();
 

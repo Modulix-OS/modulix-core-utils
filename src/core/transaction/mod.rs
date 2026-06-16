@@ -8,35 +8,35 @@ use crate::{
 use file_lock::NixFile;
 pub use transaction::Transaction;
 
-/// Point d'entrée haut niveau pour effectuer une opération sur un fichier Nix
-/// au sein d'une transaction atomique.
+/// High-level entry point for performing an operation on a Nix file within an
+/// atomic transaction.
 ///
-/// Cette fonction orchestre l'intégralité du cycle de vie d'une transaction :
-/// création, ajout du fichier cible, ouverture, exécution de la logique métier
-/// fournie par l'appelant, puis commit ou rollback automatique selon le résultat.
+/// This function orchestrates the entire transaction lifecycle: creation,
+/// adding the target file, opening, running the caller-provided business logic,
+/// then automatic commit or rollback depending on the result.
 ///
-/// # Comportement
-/// 1. Crée une nouvelle [`Transaction`] avec la description et la commande de build fournies.
-/// 2. Ajoute `file_path` à la transaction et ouvre une transaction (`begin`).
-/// 3. Passe le [`NixFile`] correspondant à la closure `f`.
-/// 4. Si `f` retourne `Ok` → [`Transaction::commit`] est appelé.
-/// 5. Si `f` retourne `Err`, ou si `get_file` échoue → [`Transaction::rollback`] est appelé.
+/// # Behavior
+/// 1. Creates a new [`Transaction`] with the given description and build command.
+/// 2. Adds `file_path` to the transaction and opens it (`begin`).
+/// 3. Passes the corresponding [`NixFile`] to the closure `f`.
+/// 4. If `f` returns `Ok` → [`Transaction::commit`] is called.
+/// 5. If `f` returns `Err`, or if `get_file` fails → [`Transaction::rollback`] is called.
 ///
 /// # Arguments
-/// * `description`     – Libellé humain de la transaction (utilisé pour les logs / historique).
-/// * `config_dir`      – Répertoire racine de la configuration NixOS.
-/// * `file_path`       – Chemin relatif du fichier Nix à modifier.
-/// * `build_command`   – Commande à exécuter après le commit (ex. `nixos-rebuild switch`).
-/// * `f`               – Closure recevant le [`NixFile`] ouvert ; doit retourner `mx::Result<R>`.
+/// * `description`     – Human-readable label of the transaction (used for logs / history).
+/// * `config_dir`      – Root directory of the NixOS configuration.
+/// * `file_path`       – Relative path of the Nix file to edit.
+/// * `build_command`   – Command to run after the commit (e.g. `nixos-rebuild switch`).
+/// * `f`               – Closure receiving the open [`NixFile`]; must return `mx::Result<R>`.
 ///
-/// # Retour
-/// Retourne `Ok(R)` si la transaction s'est terminée avec succès, ou une
-/// `mx::ErrorKind` en cas d'échec à n'importe quelle étape.
+/// # Returns
+/// Returns `Ok(R)` if the transaction completed successfully, or an
+/// `mx::ErrorKind` on failure at any step.
 ///
-/// # Exemple
+/// # Example
 /// ```ignore
 /// make_transaction(
-///     "activer nginx",
+///     "enable nginx",
 ///     "/etc/nixos",
 ///     "/services/nginx.nix",
 ///     BuildCommand::Switch,
