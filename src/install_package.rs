@@ -18,29 +18,18 @@ use crate::{
 
 const FILE_PACKAGE_PATH: &str = "package.nix";
 
-pub fn install_no_transaction(file: &mut NixFile, package_name: &str) -> mx::Result<()> {
-    if let Some(pkgs_info) = PLUGIN_NAMESPACES.get(package_name) {
-        mxOption::new(pkgs_info.path_enable_programs).set(file, "true")?;
-    } else {
-        mxList::new("environment.systemPackages", true)
-            .add(file, &format!("pkgs.{}", package_name))?;
+pub fn install_no_transaction(file: &mut NixFile, packages: &[&str]) -> mx::Result<()> {
+    let list = mxList::new("environment.systemPackages", true);
+    for package_name in packages {
+        list.add(file, &format!("pkgs.{}", package_name))?;
     }
     Ok(())
 }
 
-pub fn uninstall_no_transaction(file: &mut NixFile, package_name: &str) -> mx::Result<()> {
-    if let Some(pkgs_info) = PLUGIN_NAMESPACES.get(package_name) {
-        match pkgs_info.path_enable_programs.strip_suffix(".enable") {
-            Some(path) => {
-                mxOption::new(path).set_option_all_instance_to_default(file)?;
-            }
-            None => {
-                mxOption::new(pkgs_info.path_enable_programs).set(file, "false")?;
-            }
-        }
-    } else {
-        mxList::new("environment.systemPackages", true)
-            .remove(file, &format!("pkgs.{}", package_name))?;
+pub fn uninstall_no_transaction(file: &mut NixFile, packages: &[&str]) -> mx::Result<()> {
+    let list = mxList::new("environment.systemPackages", true);
+    for package_name in packages {
+        list.remove(file, &format!("pkgs.{}", package_name))?;
     }
     Ok(())
 }
@@ -187,25 +176,25 @@ pub fn list_installed_package_no_transaction(
         .collect())
 }
 
-pub fn install(config_dir: &str, package_name: &str) -> mx::Result<()> {
+pub fn install(config_dir: &str, packages: &[&str]) -> mx::Result<()> {
     transaction::make_transaction(
-        &format!("Install package {}", package_name),
+        &format!("Install packages {}", packages.join(", ")),
         config_dir,
         FILE_PACKAGE_PATH,
         BuildCommand::Switch,
         UpdateInput::Keep,
-        |file| install_no_transaction(file, package_name),
+        |file| install_no_transaction(file, packages),
     )
 }
 
-pub fn uninstall(config_dir: &str, package_name: &str) -> mx::Result<()> {
+pub fn uninstall(config_dir: &str, packages: &[&str]) -> mx::Result<()> {
     transaction::make_transaction(
-        &format!("Uninstall {}", package_name),
+        &format!("Uninstall {}", packages.join(", ")),
         config_dir,
         FILE_PACKAGE_PATH,
         BuildCommand::Switch,
         UpdateInput::Keep,
-        |file| uninstall_no_transaction(file, package_name),
+        |file| uninstall_no_transaction(file, packages),
     )
 }
 
