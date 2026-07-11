@@ -11,6 +11,7 @@ core-app-info-trait = [
     "dep:phf",
     "dep:serde",
 ]
+core-nix-eval = ["dep:tokio", "serde-json"]
 
 # Modules
 package-info = [
@@ -50,6 +51,7 @@ locale = ["core-nix-file"]
 modulix-module = ["core-nix-file"]
 module-info = [
     "core-app-info-trait",
+    "core-nix-eval",
     "dep:serde",
     "serde-json",
     "dep:tokio",

@@ -52,6 +52,11 @@ impl NixPackage {
             .as_ref()
     }
 
+    /// Package version string (e.g. `"115.0"`), as evaluated from nixpkgs.
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
     pub async fn get_outputs(&self) -> mx::Result<Vec<String>> {
         let expr = format!("nixpkgs#{}.outputs", self.pkg_name);
 
@@ -162,11 +167,22 @@ impl AppInfoMinimal for NixPackage {
 #[cfg(feature = "app-info-gui")]
 impl AppInfoGui for NixPackage {
     fn id(&self) -> Option<&str> {
-        package_basic_info::get_app_id(self.display_name())
+        // `NIX_INFO` is keyed by the nixpkgs attribute (`pkg_name`); look that up
+        // first and only fall back to the `pname` for the rare attr-not-in-table
+        // case. Looking up `display_name()` alone misses every variant whose
+        // attribute differs from its pname (firefox-bin, firefox-esr, …).
+        package_basic_info::get_app_id(&self.pkg_name)
+            .or_else(|| package_basic_info::get_app_id(self.display_name()))
+    }
+
+    fn app_name(&self) -> Option<&str> {
+        package_basic_info::get_name(&self.pkg_name)
+            .or_else(|| package_basic_info::get_name(self.display_name()))
     }
 
     fn icon(&self) -> Option<&Url> {
-        package_basic_info::get_icon(self.display_name())
+        package_basic_info::get_icon(&self.pkg_name)
+            .or_else(|| package_basic_info::get_icon(self.display_name()))
     }
 
     fn keyword(&self) -> Vec<&str> {
@@ -205,4 +221,41 @@ impl AppInfoGui for NixPackage {
         })?;
         Ok(Cow::Owned(main_program))
     }
+}
+
+/// Canonical AppStream/Flathub app-ids for which the **Flatpak** source should
+/// rank above the nixpkgs package(s) when GNOME Software lists install sources
+/// of the same application. A Modulix module, when one exists for the app,
+/// always outranks both — this table never overrides that.
+///
+/// Curated on purpose: add an entry only for apps whose Flatpak build is the
+/// recommended one on Modulix-OS. Keyed by the same id returned by
+/// [`AppInfoGui::id`] (see [`packages_for_app_id`]).
+#[cfg(feature = "app-info-gui")]
+pub static FLATPAK_PREFERRED_APP_IDS: &[&str] = &[
+    // "com.spotify.Client",
+    // "com.discordapp.Discord",
+];
+
+/// Whether the Flatpak source is preferred over nixpkgs for the given canonical
+/// app-id (see [`FLATPAK_PREFERRED_APP_IDS`]).
+#[cfg(feature = "app-info-gui")]
+pub fn is_flatpak_preferred(app_id: &str) -> bool {
+    FLATPAK_PREFERRED_APP_IDS.contains(&app_id)
+}
+
+/// All nixpkgs attribute names that map to the given canonical app-id, i.e. the
+/// nix install variants of one application (e.g. `org.mozilla.firefox` →
+/// `["firefox", "firefox-esr", …]`). Used to populate the "other sources" of an
+/// app for GNOME Software's `alternate-of` query.
+#[cfg(feature = "app-info-gui")]
+pub fn packages_for_app_id(app_id: &str) -> Vec<&'static str> {
+    package_basic_info::get_packages_by_app_id(app_id)
+}
+
+/// Flatpak/AppStream display name for a nixpkgs attribute, when matched (e.g.
+/// `firefox-bin` → `"Firefox"`).
+#[cfg(feature = "app-info-gui")]
+pub fn name_for_package(pkg_name: &str) -> Option<&'static str> {
+    package_basic_info::get_name(pkg_name)
 }

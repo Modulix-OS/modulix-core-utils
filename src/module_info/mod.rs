@@ -5,6 +5,7 @@ use tokio::sync::OnceCell;
 
 use crate::REMOTE_MODULE_URL;
 use crate::core::app_info_trait::{AppInfoMinimal, AppPlugin, score};
+use crate::core::nix_eval;
 use crate::mx;
 
 #[cfg(feature = "app-info-gui")]
@@ -106,38 +107,22 @@ async fn list_plugins_in_namespace(namespace: &str) -> mx::Result<Vec<AppPlugin>
         env!("TARGET_NIX"),
         namespace
     );
-    let output = tokio::process::Command::new("nix")
-        .args([
-            "eval",
-            "--json",
-            &expr,
-            "--apply",
-            "attrs: builtins.mapAttrs
-                (
-                    name: pkg:
-                    let tried = builtins.tryEval
-                        (pkg.meta.description or \"\");
-                    in {
-                        description = if tried.success then
-                                        tried.value
-                                        else \"\";
-                    }
-                ) attrs",
-        ])
-        .env("NIXPKGS_ALLOW_UNFREE", "1")
-        .output()
-        .await
-        .map_err(mx::ErrorKind::IOError)?;
-
-    if !output.status.success() {
-        return Err(mx::ErrorKind::NixCommandError(
-            String::from_utf8_lossy(&output.stderr).to_string(),
-        ));
-    }
-
-    let stdout = String::from_utf8(output.stdout).map_err(mx::ErrorKind::FromUtf8Error)?;
-    let raw: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_str(&stdout).map_err(|e| mx::ErrorKind::NixCommandError(e.to_string()))?;
+    let raw: serde_json::Map<String, serde_json::Value> = nix_eval::eval_json(&[
+        &expr,
+        "--apply",
+        "attrs: builtins.mapAttrs
+            (
+                name: pkg:
+                let tried = builtins.tryEval
+                    (pkg.meta.description or \"\");
+                in {
+                    description = if tried.success then
+                                    tried.value
+                                    else \"\";
+                }
+            ) attrs",
+    ])
+    .await?;
 
     Ok(raw
         .into_iter()
@@ -280,6 +265,12 @@ impl AppInfoGui for ModuleInfo {
         self.flathub_id.as_deref()
     }
 
+    /// Modules keep their own display name (the plugin never appends a Flatpak
+    /// title for them), so this is always `None`.
+    fn app_name(&self) -> Option<&str> {
+        None
+    }
+
     fn icon(&self) -> Option<&Url> {
         if let Some(Some(flatpak)) = self.flatpak.get() {
             return Some(flatpak.icon());
@@ -329,20 +320,7 @@ impl AppInfoGui for ModuleInfo {
             mx::ErrorKind::NixCommandError(String::from("Module has no nix_info"))
         })?;
         let expr = format!("nixpkgs#{}.meta.mainProgram", attr);
-        let output = tokio::process::Command::new("nix")
-            .args(["eval", "--json", &expr])
-            .output()
-            .await
-            .map_err(mx::ErrorKind::IOError)?;
-        if !output.status.success() {
-            return Err(mx::ErrorKind::NixCommandError(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
-        }
-        let stdout = String::from_utf8(output.stdout).map_err(mx::ErrorKind::FromUtf8Error)?;
-        let main_program: String = serde_json::from_str(&stdout).map_err(|_| {
-            mx::ErrorKind::NixCommandError(String::from("Impossible to parse mainProgram"))
-        })?;
+        let main_program: String = nix_eval::eval_json(&[&expr]).await?;
         Ok(Cow::Owned(main_program))
     }
 }

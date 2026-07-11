@@ -1,6 +1,6 @@
 use super::TABULATION_SIZE;
 use super::transaction::file_lock::NixFile;
-use crate::core::localise_option::{ExistingOption, SettingsPosition};
+use crate::core::localise_option::{ExistingOption, SettingsPosition, collect_child_names};
 use crate::mx;
 use std::str;
 
@@ -49,6 +49,15 @@ impl<'a> Option<'a> {
         Option {
             nix_option: nix_option,
         }
+    }
+
+    /// Immediate child attribute names nested under this option's dotted path
+    /// (e.g. `mxOption::new("mx")` returns every enabled/declared module name).
+    /// Flat and nested spellings are merged; the value under each child is read
+    /// separately with [`Option::get`].
+    pub fn list_children(&self, nix_file: &NixFile) -> mx::Result<Vec<String>> {
+        let ast = rnix::Root::parse(nix_file.get_file_content()?);
+        Ok(collect_child_names(&ast.syntax(), self.nix_option))
     }
 
     pub fn set(&self, nix_file: &mut NixFile, option_value: &str) -> mx::Result<&Self> {

@@ -13,6 +13,9 @@ pub mod transaction;
 #[cfg(feature = "core-nix-file")]
 pub mod param;
 
+#[cfg(feature = "core-nix-eval")]
+pub mod nix_eval;
+
 #[cfg(feature = "core-user-info")]
 pub mod user;
 

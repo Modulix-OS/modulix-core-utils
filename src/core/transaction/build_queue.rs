@@ -164,7 +164,8 @@ fn next_seq() -> mx::Result<u64> {
         .map_err(mx::ErrorKind::IOError)?;
     let next = content.trim().parse::<u64>().unwrap_or(0) + 1;
 
-    file.seek(SeekFrom::Start(0)).map_err(mx::ErrorKind::IOError)?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(mx::ErrorKind::IOError)?;
     file.set_len(0).map_err(mx::ErrorKind::IOError)?;
     file.write_all(next.to_string().as_bytes())
         .map_err(mx::ErrorKind::IOError)?;

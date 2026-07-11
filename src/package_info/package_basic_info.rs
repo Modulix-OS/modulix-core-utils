@@ -2,6 +2,7 @@
 include!("../../flathub_basic_info.rs");
 
 pub struct NixInfo {
+    pub name: &'static str,
     pub app_id: &'static str,
     pub icon: &'static str,
     pub keywords: &'static [&'static str],
@@ -10,6 +11,13 @@ pub struct NixInfo {
 #[cfg(not(feature = "flathub-info-gen"))]
 pub fn get_app_id(pkg_name: &str) -> Option<&'static str> {
     Some(NIX_INFO.get(pkg_name)?.app_id)
+}
+
+/// Flatpak/AppStream display name for a nix attribute, when matched.
+#[cfg(not(feature = "flathub-info-gen"))]
+pub fn get_name(pkg_name: &str) -> Option<&'static str> {
+    let name = NIX_INFO.get(pkg_name)?.name;
+    (!name.is_empty()).then_some(name)
 }
 
 #[cfg(not(feature = "flathub-info-gen"))]

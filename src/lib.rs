@@ -14,6 +14,12 @@ pub use core::app_info_trait::AppInfoMinimal;
 #[cfg(feature = "app-info-gui")]
 pub use core::app_info_trait::AppInfoGui;
 
+#[cfg(feature = "app-info-gui")]
+pub use core::app_info_trait::AppScreenshot;
+
+#[cfg(feature = "app-info-gui")]
+pub use core::app_info_trait::FlatpakInfo;
+
 #[cfg(feature = "desktop-environment")]
 pub mod desktop_environment;
 
