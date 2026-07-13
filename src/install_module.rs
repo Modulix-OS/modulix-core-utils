@@ -53,26 +53,52 @@ pub fn remove_plugin_no_transaction(
     Ok(())
 }
 
-pub fn install(config_dir: &str, module_name: &str) -> mx::Result<()> {
-    transaction::make_transaction(
-        &format!("Install module {}", module_name),
-        config_dir,
-        FILE_MODULE_PATH,
-        BuildCommand::Switch,
-        UpdateInput::Keep,
-        |file| install_no_transaction(file, module_name),
-    )
+async fn edit_modules(
+    config_dir: &str,
+    description: String,
+    targets: Vec<String>,
+    edit: fn(&mut NixFile, &str) -> mx::Result<()>,
+) -> mx::Result<()> {
+    let config_dir = config_dir.to_string();
+    tokio::task::spawn_blocking(move || {
+        transaction::make_transaction(
+            &description,
+            &config_dir,
+            FILE_MODULE_PATH,
+            BuildCommand::Switch,
+            UpdateInput::Keep,
+            |file| {
+                for target in &targets {
+                    edit(file, target)?;
+                }
+                Ok(())
+            },
+        )
+    })
+    .await
+    .map_err(|_| mx::ErrorKind::ThreadError)?
 }
 
-pub fn uninstall(config_dir: &str, module_name: &str) -> mx::Result<()> {
-    transaction::make_transaction(
-        &format!("Uninstall module {}", module_name),
+pub async fn install(config_dir: &str, module_name: &str) -> mx::Result<()> {
+    let targets = crate::module_info::resolve_with_children(module_name).await?;
+    edit_modules(
         config_dir,
-        FILE_MODULE_PATH,
-        BuildCommand::Switch,
-        UpdateInput::Keep,
-        |file| uninstall_no_transaction(file, module_name),
+        format!("Install module {module_name}"),
+        targets,
+        install_no_transaction,
     )
+    .await
+}
+
+pub async fn uninstall(config_dir: &str, module_name: &str) -> mx::Result<()> {
+    let targets = crate::module_info::resolve_with_children(module_name).await?;
+    edit_modules(
+        config_dir,
+        format!("Uninstall module {module_name}"),
+        targets,
+        uninstall_no_transaction,
+    )
+    .await
 }
 
 pub fn install_plugin(

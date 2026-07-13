@@ -20,34 +20,26 @@
          let
             pkgs = import nixpkgs { inherit system; };
             naerskLib = pkgs.callPackage naersk {};
-         in {
-            default = naerskLib.buildPackage {
+         in rec {
+            mx-init = naerskLib.buildPackage {
                 src = ./.;
+                cargoBuildOptions = x: x ++ [ "--features" "init" ];
                 buildInputs = with pkgs; [ openssl ];
-                runtimeInputs = with pkgs; [ pciutils usbutils cpuid ];
-                nativeBuildInputs = with pkgs; [ pkg-config ]; # makeWrapper ];
-
+                nativeBuildInputs = with pkgs; [ pkg-config makeWrapper ];
                 postInstall = ''
-                    wrapProgram $out/bin/winteros-detect-hardware \
-                        --prefix PATH : ${pkgs.pciutils}/bin \
-                        --prefix PATH : ${pkgs.usbutils}/bin \
-                        --prefix PATH : ${pkgs.cpuid}/bin
-                  '';
-            };
-            debug = naerskLib.buildPackage {
-                src = ./.;
-                release = false;
-                buildInputs = with pkgs; [ openssl ];
-                runtimeInputs = with pkgs; [ pciutils usbutils cpuid ];
-                nativeBuildInputs = with pkgs; [ pkg-config ];# makeWrapper ];
-
-                postInstall = ''
-                wrapProgram $out/bin/winteros-detect-hardware \
-                    --prefix PATH : ${pkgs.pciutils}/bin \
-                    --prefix PATH : ${pkgs.usbutils}/bin \
-                    --prefix PATH : ${pkgs.cpuid}/bin
+                    wrapProgram $out/bin/mx-init \
+                      --prefix PATH : ${pkgs.lib.makeBinPath (with pkgs; [
+                        pciutils
+                        usbutils
+                        cpuid
+                        nixos-install-tools
+                        util-linux
+                        nix
+                      ])}
                 '';
             };
+
+            default = mx-init;
          });
         devShell = forAllSystems (system:
          let

@@ -71,16 +71,18 @@ pub struct FlatpakInfo {
 
 impl FlatpakInfo {
     pub async fn new(app_id: &str) -> mx::Result<Self> {
-        Ok(
-            reqwest::get(format!("https://flathub.org/api/v2/appstream/{}", app_id))
-                .await
-                .map_err(mx::ErrorKind::HttpError)?
-                .error_for_status()
-                .map_err(mx::ErrorKind::HttpError)?
-                .json::<Self>()
-                .await
-                .map_err(mx::ErrorKind::HttpError)?,
-        )
+        let url = match crate::core::lang::current_lang() {
+            Some(lang) => format!("https://flathub.org/api/v2/appstream/{app_id}?locale={lang}"),
+            None => format!("https://flathub.org/api/v2/appstream/{app_id}"),
+        };
+        Ok(reqwest::get(url)
+            .await
+            .map_err(mx::ErrorKind::HttpError)?
+            .error_for_status()
+            .map_err(mx::ErrorKind::HttpError)?
+            .json::<Self>()
+            .await
+            .map_err(mx::ErrorKind::HttpError)?)
     }
 
     pub fn icon(&self) -> &str {

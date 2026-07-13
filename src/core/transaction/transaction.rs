@@ -8,11 +8,7 @@ use crate::{
     mx,
 };
 
-/// Rebuild-disable sentinel. If this file is already locked (by a test or a
-/// maintenance operation), `commit_impl` skips the NixOS rebuild. Tests hold it
-/// both to avoid invoking `nixos-rebuild` and to serialize their access to the
-/// shared fixture repo.
-const LOCK_SKIP_REBUILD_FILE: &str = "/tmp/mx-skip-rebuild.lock";
+pub(crate) const LOCK_SKIP_REBUILD_FILE: &str = "/tmp/mx-skip-rebuild.lock";
 
 /// `nixos-rebuild` (or `nixos-install`) command to run after a successful commit.
 ///

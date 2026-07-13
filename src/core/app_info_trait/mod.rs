@@ -40,6 +40,7 @@ pub trait AppInfoMinimal: Sized {
 #[cfg(feature = "app-info-gui")]
 pub trait AppInfoGui {
     fn id(&self) -> Option<&str>;
+    fn app_name(&self) -> Option<&str>;
     fn icon(&self) -> Option<&Url>;
     fn keyword(&self) -> Vec<&str>;
     fn description(&self) -> impl Future<Output = Cow<'_, str>> + Send;

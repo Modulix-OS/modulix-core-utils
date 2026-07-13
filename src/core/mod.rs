@@ -22,6 +22,9 @@ pub mod user;
 #[cfg(feature = "core-app-info-trait")]
 pub mod app_info_trait;
 
+#[cfg(any(feature = "module-info", feature = "app-info-gui"))]
+pub mod lang;
+
 //pub mod utils;
 #[cfg(feature = "core-nix-file")]
 pub const TABULATION_SIZE: usize = 2;

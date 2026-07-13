@@ -45,7 +45,10 @@ hardware-config = [
 ]
 init = [
     "core-nix-file",
-    "filesystem"
+    "filesystem",
+    "hardware-config",
+    "locale",
+    "user"
 ]
 locale = ["core-nix-file"]
 modulix-module = ["core-nix-file"]
@@ -117,6 +120,11 @@ tempfile = "3"
 name = "flathub-info-gen"
 path = "bin/flathub-info-gen.rs"
 required-features = ["flathub-info-gen"]
+
+[[bin]]
+name = "mx-init"
+path = "bin/init.rs"
+required-features = ["init"]
 
 [[exemple]]
 name = "filesystem"

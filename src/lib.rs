@@ -93,7 +93,7 @@ pub const REMOTE_CONFIG_URL: &str = concatcp!(
 );
 
 pub const REMOTE_MODULE_URL: &str = concatcp!(
-    "https://raw.githubusercontent.com/Modulix-OS/modules/",
+    "https://raw.githubusercontent.com/Modulix-OS/mxpkgs/",
     REFS_FOLLOW_PATH,
     "/",
     REFS_FOLLOWED,
