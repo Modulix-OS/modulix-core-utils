@@ -8,6 +8,7 @@ async fn main() {
         "obs-studio-plugins",
         "obs-tuna",
     )
+    .await
     .unwrap();
     install_module::uninstall(CONFIG_DIRECTORY, "programs.games.steam")
         .await

@@ -101,36 +101,56 @@ pub async fn uninstall(config_dir: &str, module_name: &str) -> mx::Result<()> {
     .await
 }
 
-pub fn install_plugin(
+pub async fn install_plugin(
     config_dir: &str,
     module_name: &str,
     plugin_namespace: &str,
     plugin_name: &str,
 ) -> mx::Result<()> {
-    transaction::make_transaction(
-        &format!("Install {} plugin for module {}", plugin_name, module_name),
-        config_dir,
-        FILE_MODULE_PATH,
-        BuildCommand::Switch,
-        UpdateInput::Keep,
-        |file| install_plugin_no_transaction(file, module_name, plugin_namespace, plugin_name),
-    )
+    let config_dir = config_dir.to_string();
+    let module_name = module_name.to_string();
+    let plugin_namespace = plugin_namespace.to_string();
+    let plugin_name = plugin_name.to_string();
+    tokio::task::spawn_blocking(move || {
+        transaction::make_transaction(
+            &format!("Install {} plugin for module {}", plugin_name, module_name),
+            &config_dir,
+            FILE_MODULE_PATH,
+            BuildCommand::Switch,
+            UpdateInput::Keep,
+            |file| {
+                install_plugin_no_transaction(file, &module_name, &plugin_namespace, &plugin_name)
+            },
+        )
+    })
+    .await
+    .map_err(|_| mx::ErrorKind::ThreadError)?
 }
 
-pub fn remove_plugin(
+pub async fn remove_plugin(
     config_dir: &str,
     module_name: &str,
     plugin_namespace: &str,
     plugin_name: &str,
 ) -> mx::Result<()> {
-    transaction::make_transaction(
-        &format!("Remove {} plugin for module {}", plugin_name, module_name),
-        config_dir,
-        FILE_MODULE_PATH,
-        BuildCommand::Switch,
-        UpdateInput::Keep,
-        |file| remove_plugin_no_transaction(file, module_name, plugin_namespace, plugin_name),
-    )
+    let config_dir = config_dir.to_string();
+    let module_name = module_name.to_string();
+    let plugin_namespace = plugin_namespace.to_string();
+    let plugin_name = plugin_name.to_string();
+    tokio::task::spawn_blocking(move || {
+        transaction::make_transaction(
+            &format!("Remove {} plugin for module {}", plugin_name, module_name),
+            &config_dir,
+            FILE_MODULE_PATH,
+            BuildCommand::Switch,
+            UpdateInput::Keep,
+            |file| {
+                remove_plugin_no_transaction(file, &module_name, &plugin_namespace, &plugin_name)
+            },
+        )
+    })
+    .await
+    .map_err(|_| mx::ErrorKind::ThreadError)?
 }
 
 /// Collect the names of every module enabled via `mx.<name>.enable = true;`.
@@ -162,7 +182,10 @@ pub fn list_enabled_module_names(config_dir: &str) -> mx::Result<Vec<String>> {
 /// so GUI metadata (display name, summary, icon) is available. Modules enabled
 /// locally but absent from the index are skipped.
 pub async fn list_installed_modules(config_dir: &str) -> mx::Result<Vec<ModuleInfo>> {
-    let names = list_enabled_module_names(config_dir)?;
+    let config_dir = config_dir.to_string();
+    let names = tokio::task::spawn_blocking(move || list_enabled_module_names(&config_dir))
+        .await
+        .map_err(|_| mx::ErrorKind::ThreadError)??;
     let mut modules = Vec::with_capacity(names.len());
     for name in names {
         if let Ok(module) = ModuleInfo::new(&name).await {
