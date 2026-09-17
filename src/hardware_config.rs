@@ -40,8 +40,6 @@ pub fn write_hardware_config_no_transaction(
     let param = NixParam::new();
     param.add(hardware_file, "nixos-hardware")?;
 
-    dbg!(config.get_module());
-
     let imports = mxList::new("imports", true);
 
     for import in config.get_module() {

@@ -8,7 +8,7 @@ use crate::core::{
 };
 use crate::mx;
 
-const LOCALE_FILE_PATH: &str = "locale.nix";
+pub(crate) const LOCALE_FILE_PATH: &str = "locale.nix";
 
 // --- no_transaction ---
 
@@ -111,6 +111,32 @@ pub fn set_locale_no_transaction(
     )
 }
 
+/// Sets the X11 keyboard layout.
+///
+/// Lives next to `console.keyMap` in `locale.nix` so both keyboards are described in
+/// one place. mxpkgs sets these two options with `lib.mkMxDefault` (priority 900) in
+/// `modulixos/desktop/default.nix`; a plain definition here is priority 100, so it
+/// wins.
+pub fn set_keyboard_no_transaction(
+    file: &mut NixFile,
+    kb_layout: &str,
+    kb_variant: &str,
+) -> mx::Result<()> {
+    let options = [
+        ("services.xserver.xkb.layout", format!("\"{}\"", kb_layout)),
+        (
+            "services.xserver.xkb.variant",
+            format!("\"{}\"", kb_variant),
+        ),
+    ];
+
+    for (key, value) in &options {
+        mxOption::new(key).set(file, value)?;
+    }
+
+    Ok(())
+}
+
 // --- transaction ---
 
 pub fn set_locale_extra_settings(
@@ -171,5 +197,16 @@ pub fn set_locale(
         BuildCommand::Switch,
         UpdateInput::Keep,
         |file| set_locale_no_transaction(file, timezone, default_locale, console_keymap),
+    )
+}
+
+pub fn set_keyboard(config_dir: &str, kb_layout: &str, kb_variant: &str) -> mx::Result<()> {
+    transaction::make_transaction(
+        "Set keyboard layout",
+        config_dir,
+        LOCALE_FILE_PATH,
+        BuildCommand::Switch,
+        UpdateInput::Keep,
+        |file| set_keyboard_no_transaction(file, kb_layout, kb_variant),
     )
 }

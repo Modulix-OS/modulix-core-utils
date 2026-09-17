@@ -3,16 +3,13 @@
 //! Parses command-line arguments and calls [`modulix_core_utils::init::init`] to write
 //! the initial configuration.
 
-use std::process::ExitCode;
 use std::env;
+use std::process::ExitCode;
 
-use modulix_core_utils::init::{InitParams, init};
+use modulix_core_utils::init::{Desktop, InitParams, init};
 
 fn print_usage(program: &str) {
-    eprintln!(
-        "Usage: {} [OPTIONS]",
-        program
-    );
+    eprintln!("Usage: {} [OPTIONS]", program);
     eprintln!();
     eprintln!(
         "Options:
@@ -20,12 +17,14 @@ fn print_usage(program: &str) {
     --hostname <NAME>\tHostname (default: modulix)
     --username <NAME>\tUsername (default: user)
     --fullname <NAME>\tFull name (default: same as username if empty)
-    --desktop <DESKTOP>\tDesktop environment: gnome, plasma, or lxqt (default: gnome)
+    --desktop <DESKTOP>\tDesktop environment: gnome, plasma, lxqt, or cli (default: gnome)
     --locale <LOCALE>\tLocale (default: en_US.UTF-8)
     --timezone <TIMEZONE>\tTimezone (default: UTC)
     --kb-layout <LAYOUT>\tKeyboard layout (default: us)
     --kb-variant <VARIANT>\tKeyboard variant (default: empty)
-    --console-keymap <KEYMAP>\tConsole keymap (default: us)"
+    --console-keymap <KEYMAP>\tConsole keymap (default: us)
+    --config-dir <PATH>\tWrite the config repo here instead of the default location
+    --debug\t\tSeed with `nixos-rebuild build-vm` instead of installing/switching"
     );
 }
 
@@ -41,6 +40,8 @@ fn parse_args() -> InitParams {
     let mut kb_layout = String::new();
     let mut kb_variant = String::new();
     let mut console_keymap = String::new();
+    let mut config_dir: Option<String> = None;
+    let mut debug = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -105,6 +106,20 @@ fn parse_args() -> InitParams {
                     console_keymap = args[i].clone();
                 }
             }
+            "--config-dir" => {
+                // Unlike the other flags, a missing value must not fall back to the
+                // default: `init` deletes whatever directory it ends up resolving to.
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --config-dir requires a path");
+                    print_usage(&args[0]);
+                    std::process::exit(1);
+                }
+                config_dir = Some(args[i].clone());
+            }
+            "--debug" => {
+                debug = true;
+            }
             "--help" | "-h" => {
                 print_usage(&args[0]);
                 std::process::exit(0);
@@ -118,20 +133,70 @@ fn parse_args() -> InitParams {
         i += 1;
     }
 
+    let username = if username.is_empty() {
+        "user".to_string()
+    } else {
+        username
+    };
+
     // full_name is empty -> use username as full_name (same behavior as env variables)
-    let full_name = if full_name.is_empty() { username.clone() } else { full_name };
+    let full_name = if full_name.is_empty() {
+        username.clone()
+    } else {
+        full_name
+    };
+
+    // An unknown name used to fall through and produce a system with no desktop and
+    // no display manager at all, so reject it here instead.
+    let desktop = if desktop.is_empty() {
+        Desktop::Gnome
+    } else {
+        match Desktop::parse(&desktop) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        }
+    };
 
     InitParams {
-        root: if root.is_empty() { "/mnt".to_string() } else { root },
-        hostname: if hostname.is_empty() { "modulix".to_string() } else { hostname },
+        root: if root.is_empty() {
+            "/mnt".to_string()
+        } else {
+            root
+        },
+        hostname: if hostname.is_empty() {
+            "modulix".to_string()
+        } else {
+            hostname
+        },
         username,
         full_name,
         desktop,
-        locale,
-        timezone,
-        kb_layout,
+        locale: if locale.is_empty() {
+            "en_US.UTF-8".to_string()
+        } else {
+            locale
+        },
+        timezone: if timezone.is_empty() {
+            "UTC".to_string()
+        } else {
+            timezone
+        },
+        kb_layout: if kb_layout.is_empty() {
+            "us".to_string()
+        } else {
+            kb_layout
+        },
         kb_variant,
-        console_keymap,
+        console_keymap: if console_keymap.is_empty() {
+            "us".to_string()
+        } else {
+            console_keymap
+        },
+        config_dir,
+        debug,
     }
 }
 

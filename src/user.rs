@@ -11,7 +11,7 @@ use crate::{
     mx,
 };
 
-const USER_FILE_PATH: &str = "users.nix";
+pub(crate) const USER_FILE_PATH: &str = "users.nix";
 
 pub fn add_no_transaction(
     file: &mut NixFile,
