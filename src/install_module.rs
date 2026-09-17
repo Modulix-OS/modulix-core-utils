@@ -9,6 +9,7 @@ use crate::{
     },
     mx,
 };
+use std::path;
 
 const FILE_MODULE_PATH: &str = "module.nix";
 
@@ -156,7 +157,10 @@ pub async fn remove_plugin(
 /// Collect the names of every module enabled via `mx.<name>.enable = true;`.
 fn enabled_module_names(file: &NixFile) -> mx::Result<Vec<String>> {
     let mut names = Vec::new();
-    for module in mxOption::new("mx").list_children(file)? {
+    // Module names are dotted paths of arbitrary depth
+    // (`programs.studio.obs-studio`), so the candidates are every `enable`
+    // descendant of `mx`, not the immediate children of `mx`.
+    for module in mxOption::new("mx").list_enable_descendants(file)? {
         match mxOption::new(&enable_path(&module)).get(file) {
             Ok(value) if value.trim() == "true" => names.push(module),
             Ok(_) | Err(mx::ErrorKind::OptionNotFound) => {}
@@ -168,7 +172,17 @@ fn enabled_module_names(file: &NixFile) -> mx::Result<Vec<String>> {
 
 /// Names of the modules currently enabled in the configuration (`mx.*.enable`),
 /// read from `module.nix` without resolving remote metadata.
+///
+/// A configuration that has never had a module installed has no `module.nix`
+/// at all: that is "no module enabled", not an error. The check is done here
+/// rather than by catching `FileNotFound` from the transaction, which also
+/// opens `configuration.nix` and would make a genuinely broken configuration
+/// look like an empty one.
 pub fn list_enabled_module_names(config_dir: &str) -> mx::Result<Vec<String>> {
+    // Same concatenation as `NixFile::new`, which the transaction uses.
+    if !path::Path::new(&format!("{config_dir}{FILE_MODULE_PATH}")).exists() {
+        return Ok(Vec::new());
+    }
     transaction::make_transaction_read_only(
         "List enabled modules",
         config_dir,
@@ -194,3 +208,7 @@ pub async fn list_installed_modules(config_dir: &str) -> mx::Result<Vec<ModuleIn
     }
     Ok(modules)
 }
+
+#[cfg(test)]
+#[path = "install_module_tests.rs"]
+mod tests;

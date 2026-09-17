@@ -1,6 +1,8 @@
 use super::TABULATION_SIZE;
 use super::transaction::file_lock::NixFile;
-use crate::core::localise_option::{ExistingOption, SettingsPosition, collect_child_names};
+use crate::core::localise_option::{
+    ExistingOption, SettingsPosition, collect_child_names, collect_enable_paths,
+};
 use crate::mx;
 use std::str;
 
@@ -58,6 +60,17 @@ impl<'a> Option<'a> {
     pub fn list_children(&self, nix_file: &NixFile) -> mx::Result<Vec<String>> {
         let ast = rnix::Root::parse(nix_file.get_file_content()?);
         Ok(collect_child_names(&ast.syntax(), self.nix_option))
+    }
+
+    /// Dotted paths of the descendants of this option that declare an `enable`
+    /// attribute, at any depth: `mxOption::new("mx")` on
+    /// `mx.programs.studio.obs-studio.enable` yields
+    /// `["programs.studio.obs-studio"]`. [`Option::list_children`] only sees the
+    /// first segment (`programs`), which is not a module name. The value under
+    /// each `enable` is read separately with [`Option::get`].
+    pub fn list_enable_descendants(&self, nix_file: &NixFile) -> mx::Result<Vec<String>> {
+        let ast = rnix::Root::parse(nix_file.get_file_content()?);
+        Ok(collect_enable_paths(&ast.syntax(), self.nix_option))
     }
 
     pub fn set(&self, nix_file: &mut NixFile, option_value: &str) -> mx::Result<&Self> {

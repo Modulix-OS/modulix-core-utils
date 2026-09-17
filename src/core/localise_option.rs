@@ -5,6 +5,9 @@ use std::ops::Range;
 
 use crate::mx;
 
+/// The attribute that marks a Modulix module as enabled.
+const ENABLE_ATTR: &str = "enable";
+
 fn text_range_to_range(r: TextRange) -> Range<usize> {
     r.start().into()..r.end().into()
 }
@@ -254,3 +257,74 @@ fn collect_child_names_rec(
         }
     }
 }
+
+/// Dotted paths under `prefix` that declare an `enable` attribute, e.g.
+/// `prefix = "mx"` on `mx.programs.studio.obs-studio.enable = true;` yields
+/// `["programs.studio.obs-studio"]`. Module names are dotted paths of arbitrary
+/// depth, so listing the immediate children of `mx` with
+/// [`collect_child_names`] is not enough: it would stop at `programs`.
+/// Both spellings — flat and nested (`mx = { programs.studio = { obs-studio =
+/// { enable = true; }; }; }`) — are merged. The result is sorted and
+/// deduplicated; reading the value under each `enable` is left to
+/// [`super::option::Option::get`].
+///
+/// A path that extends another one is dropped: modules may declare sub-options
+/// of their own named `enable`, and `mx.programs.steam.enable = true;` next to
+/// `mx.programs.steam.gamescope.enable = true;` describes one module, not two.
+pub(crate) fn collect_enable_paths(node: &rnix::SyntaxNode, prefix: &str) -> Vec<String> {
+    let prefix_segments: Vec<&str> = prefix.split('.').collect();
+    let mut names = Vec::new();
+    collect_enable_paths_rec(node, &[], &prefix_segments, &mut names);
+    names.sort();
+    names.dedup();
+
+    // Sorting puts a path immediately before the paths that extend it, so
+    // keeping the shortest of each chain is a single pass over the sorted list.
+    let mut modules: Vec<String> = Vec::with_capacity(names.len());
+    for name in names {
+        let nested_in_previous = modules.last().is_some_and(|kept: &String| {
+            name.len() > kept.len()
+                && name.starts_with(kept.as_str())
+                && name.as_bytes()[kept.len()] == b'.'
+        });
+        if !nested_in_previous {
+            modules.push(name);
+        }
+    }
+    modules
+}
+
+fn collect_enable_paths_rec(
+    node: &rnix::SyntaxNode,
+    path: &[String],
+    prefix: &[&str],
+    out: &mut Vec<String>,
+) {
+    for child in node.children() {
+        let Some(apv) = AttrpathValue::cast(child.clone()) else {
+            collect_enable_paths_rec(&child, path, prefix, out);
+            continue;
+        };
+        let Some(attrpath) = apv.attrpath() else {
+            continue;
+        };
+        let mut full: Vec<String> = path.to_vec();
+        full.extend(attrpath.attrs().map(|a| a.to_string()));
+
+        // `<prefix>.<one segment at least>.enable`: record what sits between.
+        if full.len() > prefix.len() + 1
+            && full[full.len() - 1] == ENABLE_ATTR
+            && prefix.iter().enumerate().all(|(i, p)| full[i] == *p)
+        {
+            out.push(full[prefix.len()..full.len() - 1].join("."));
+        }
+
+        if let Some(Expr::AttrSet(set)) = apv.value() {
+            collect_enable_paths_rec(set.syntax(), &full, prefix, out);
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "localise_option_tests.rs"]
+mod tests;
