@@ -17,7 +17,6 @@ mod build;
 mod reader;
 mod search;
 
-use std::path::Path;
 use std::sync::{Arc, OnceLock, RwLock};
 
 use crate::mx;
@@ -28,9 +27,14 @@ pub(crate) use search::search;
 pub(crate) const MAGIC: u32 = u32::from_le_bytes(*b"MXPI");
 pub(crate) const FORMAT_VERSION: u32 = 1;
 
-/// Single system-wide index (phase 1.6: owned and rebuilt by the daemon,
-/// shared by every user — no per-user copy).
-const SYSTEM_CACHE_PATH: &str = "/var/cache/modulix/nix-index-v1.bin";
+/// File name of the single system-wide index (phase 1.6: owned and rebuilt by
+/// the daemon, shared by every user — no per-user copy). It lives in
+/// [`crate::cache_dir`], alongside the module index.
+const SYSTEM_CACHE_FILE: &str = "nix-index-v1.bin";
+
+fn system_cache_path() -> std::path::PathBuf {
+    crate::cache_dir().join(SYSTEM_CACHE_FILE)
+}
 
 static SLOT: OnceLock<RwLock<Option<Arc<Index>>>> = OnceLock::new();
 static FINGERPRINT: RwLock<Option<[u8; 32]>> = RwLock::new(None);
@@ -60,7 +64,7 @@ pub fn invalidate_fingerprint() {
 }
 
 fn try_load(fingerprint: &[u8; 32]) -> Option<Arc<Index>> {
-    Index::open(Path::new(SYSTEM_CACHE_PATH), fingerprint).map(Arc::new)
+    Index::open(&system_cache_path(), fingerprint).map(Arc::new)
 }
 
 /// The mmap'd package index, if a fresh one is available on disk. `None`
@@ -97,15 +101,15 @@ pub async fn ensure_fresh_in_background() {
     let Some(fp) = fingerprint().await else {
         return;
     };
-    if let Some(index) = Index::open(Path::new(SYSTEM_CACHE_PATH), &fp) {
+    if let Some(index) = Index::open(&system_cache_path(), &fp) {
         *slot().write().unwrap() = Some(Arc::new(index));
     }
 }
 
-/// Builds the system-wide index at [`SYSTEM_CACHE_PATH`] unconditionally —
+/// Builds the system-wide index at [`system_cache_path`] unconditionally —
 /// the entry point for the daemon's startup/timer/rebuild-signal paths, not
 /// for interactive callers (which want [`ensure_fresh_in_background`]'s
 /// "only if missing" and immediate-visibility behaviour instead).
 pub async fn build_system_index() -> mx::Result<()> {
-    build::build(Path::new(SYSTEM_CACHE_PATH)).await
+    build::build(&system_cache_path()).await
 }

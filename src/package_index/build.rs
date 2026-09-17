@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -152,14 +153,24 @@ fn serialize(fingerprint: [u8; 32], raw: HashMap<String, RawPackage>) -> Vec<u8>
     out
 }
 
+/// Disambiguates temp files written by two builders inside the same process.
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 fn write_atomically(dest: &Path, bytes: &[u8]) -> mx::Result<()> {
     let dir = dest
         .parent()
         .ok_or_else(|| mx::ErrorKind::InvalidArgument("index path has no parent".to_string()))?;
     std::fs::create_dir_all(dir).map_err(mx::ErrorKind::IOError)?;
+    // Unique per builder: `LockGuard::try_acquire` deliberately steals a stale
+    // lock, so two builders can legitimately run at once. Sharing one fixed temp
+    // path would let them interleave their writes into the same file, and the
+    // renamed result would carry a valid header over another build's arena —
+    // wrong names and descriptions rather than a detectable corruption.
     let tmp = dir.join(format!(
-        ".{}.tmp",
-        dest.file_name().and_then(|n| n.to_str()).unwrap_or("index")
+        ".{}.{}.{}.tmp",
+        dest.file_name().and_then(|n| n.to_str()).unwrap_or("index"),
+        std::process::id(),
+        TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::write(&tmp, bytes).map_err(mx::ErrorKind::IOError)?;
     // `rename` (not an in-place write) so a reader with the old file already
