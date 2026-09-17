@@ -1,7 +1,8 @@
-use std::{collections::HashMap, fs, path, process};
+use std::{collections::HashMap, fs, io, path, process};
 
 use super::build_queue::BuildQueue;
 use super::file_lock::NixFile;
+use crate::error::io_error_at;
 use crate::{
     CONFIG_NAME,
     core::{list::List as mxList, transaction::file_lock::NixFilePermission},
@@ -23,6 +24,10 @@ pub enum BuildCommand {
     /// Initial install on a new machine (`nixos-install`).
     /// The build command is empty in release; triggers `build-vm` in debug.
     Install,
+    /// Builds a VM image (`nixos-rebuild build-vm`), never touches the running
+    /// system. Runtime-selected (not a debug-only gate) so a release binary
+    /// (e.g. `mx-init --debug`) can also seed a disposable test VM.
+    BuildVm,
 }
 
 pub enum UpdateInput {
@@ -69,19 +74,30 @@ struct LockFile {
 impl LockFile {
     /// Attempts to take a non-blocking exclusive lock.
     ///
+    /// The file is opened read-only when it already exists, and only created
+    /// when missing: `flock` does not need a writable descriptor, and these
+    /// sentinels live in `/tmp`, where they are routinely left behind by
+    /// another user (a root run, then a user run, or the reverse) — a
+    /// create-always open would then fail with `EACCES` for no good reason.
+    ///
     /// # Returns
     /// * `Ok(Some(lock))` – Lock acquired.
     /// * `Ok(None)`       – The file is already locked by another process.
     /// * `Err(_)`         – Unexpected I/O error.
     pub fn try_lock(path: &str) -> mx::Result<Option<Self>> {
+        let opened = match fs::OpenOptions::new().read(true).open(path) {
+            Ok(f) => Ok(f),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => fs::File::create(path),
+            Err(e) => Err(e),
+        };
         Ok(Some(LockFile {
-            file: match fs::File::create(path) {
+            file: match opened {
                 Ok(f) => match f.try_lock() {
                     Ok(_) => Some(f),
                     Err(fs::TryLockError::WouldBlock) => return Ok(None),
                     Err(_) => return Err(mx::ErrorKind::FailToLock),
                 },
-                Err(e) => return Err(mx::ErrorKind::IOError(e)),
+                Err(e) => return Err(io_error_at(path, e)),
             },
         }))
     }
@@ -115,6 +131,7 @@ impl BuildCommand {
             BuildCommand::Switch => "switch",
             BuildCommand::Boot => "boot",
             BuildCommand::Install => "",
+            BuildCommand::BuildVm => "build-vm",
         }
     }
 
@@ -124,6 +141,7 @@ impl BuildCommand {
             BuildCommand::Switch => "build-vm",
             BuildCommand::Boot => "build-vm",
             BuildCommand::Install => "build-vm",
+            BuildCommand::BuildVm => "build-vm",
         }
     }
 }
@@ -216,7 +234,9 @@ impl<'a> Transaction<'a> {
     ///
     /// Depending on the `build_command` variant:
     /// * [`BuildCommand::Install`] → `nixos-install --root /mnt --no-root-password --flake …`
-    /// * [`BuildCommand::Switch`] / [`BuildCommand::Boot`] → `nixos-rebuild <cmd> --flake …`
+    /// * [`BuildCommand::Switch`] / [`BuildCommand::Boot`] / [`BuildCommand::BuildVm`] →
+    ///   `nixos-rebuild <cmd> --flake …`. `build-vm` drops its `result` symlink in
+    ///   the calling process's working directory.
     ///
     /// Standard output is inherited (visible in the parent terminal); standard
     /// error is captured into `stderr` if provided.
@@ -240,14 +260,19 @@ impl<'a> Transaction<'a> {
                 .stderr(process::Stdio::piped())
                 .spawn()
                 .map_err(mx::ErrorKind::IOError)?,
-            BuildCommand::Switch | BuildCommand::Boot => process::Command::new("nixos-rebuild")
-                .arg(build_command.as_str())
-                .arg("--flake")
-                .arg(format!("{}#{}", path_config, config_name))
-                .stdout(process::Stdio::inherit())
-                .stderr(process::Stdio::piped())
-                .spawn()
-                .map_err(mx::ErrorKind::IOError)?,
+            // `build-vm` writes `./result` in the process's cwd (no `--out-link`),
+            // so the caller picks where it lands by setting its own working
+            // directory — deliberately not the config repo, which git watches.
+            BuildCommand::Switch | BuildCommand::Boot | BuildCommand::BuildVm => {
+                process::Command::new("nixos-rebuild")
+                    .arg(build_command.as_str())
+                    .arg("--flake")
+                    .arg(format!("{}#{}", path_config, config_name))
+                    .stdout(process::Stdio::inherit())
+                    .stderr(process::Stdio::piped())
+                    .spawn()
+                    .map_err(mx::ErrorKind::IOError)?
+            }
         };
 
         let stderr_output = {
@@ -295,10 +320,12 @@ impl<'a> Transaction<'a> {
     ///
     /// If the file is absent, a `nix flake update` will be run before the commit
     /// to generate the initial lockfile.
+    fn flake_lock_path(&self) -> path::PathBuf {
+        path::Path::new(&self.git_repo_path).join("flake.lock")
+    }
+
     fn flake_lock_exists(&self) -> bool {
-        path::Path::new(&self.git_repo_path)
-            .join("flake.lock")
-            .exists()
+        self.flake_lock_path().exists()
     }
 
     /// Creates a Git commit with the current working tree.
@@ -629,11 +656,31 @@ impl<'a> Transaction<'a> {
                     UpdateInput::Keep => vec![],
                 };
                 if !command.is_empty() {
-                    process::Command::new("nix")
+                    // `init` seals flake.lock immutable like every other base
+                    // file, and `nix flake update` rewrites it in place — clear
+                    // the flag for the call, restore it right after. Only restore
+                    // it if it *was* set: on a config repo not produced by `init`
+                    // the file is writable on purpose, and sealing it here would
+                    // permanently break the admin's own `nix flake update`.
+                    // No-op when the file is not root-owned (dev checkouts).
+                    let lock_path = self.flake_lock_path();
+                    let lock_path = lock_path.to_str().ok_or(mx::ErrorKind::InvalidFile)?;
+                    let was_immutable = NixFile::is_immutable(lock_path)?;
+                    NixFile::make_mutable(lock_path)?;
+                    let result = process::Command::new("nix")
                         .args(command)
                         .current_dir(&self.git_repo_path)
                         .output()
-                        .map_err(mx::ErrorKind::IOError)?;
+                        .map_err(mx::ErrorKind::IOError);
+                    let resealed = if was_immutable {
+                        NixFile::make_immutable(lock_path)
+                    } else {
+                        Ok(())
+                    };
+                    // `result` first: a failure to re-seal must not mask the
+                    // actual `nix flake update` error.
+                    result?;
+                    resealed?;
                 }
             }
             self.git_commit(Some("HEAD"), &self.git_user, &self.git_user, &self.info)?;
@@ -701,13 +748,33 @@ impl<'a> Transaction<'a> {
         }
 
         {
-            // Special case: empty repository, no commit to restore
+            // Special case: empty repository, no commit to restore. There is
+            // nothing to check out, but the files `begin` created still have to
+            // go: otherwise a failed first transaction (typically `init`, whose
+            // repo is unborn by construction) leaves the empty `{ }` skeletons
+            // behind and the next run sees a half-populated config directory.
             if self.old_commit.is_zero() {
                 for (_, nix_file) in self.list_file.iter_mut() {
                     let _ = nix_file.close();
+                    if nix_file.was_created() {
+                        NixFile::make_mutable(nix_file.get_file_path()).ok();
+                        std::fs::remove_file(nix_file.get_file_path()).ok();
+                    }
                 }
                 self.git_repo = None;
                 return Ok(());
+            }
+
+            // `flake.lock` is rewritten and re-sealed during `commit_impl` but no
+            // NixFile owns it, so the make_mutable loop below never reaches it.
+            // Left immutable, `checkout_head` fails with EPERM while restoring the
+            // previous lock file and the rollback aborts with HEAD already moved.
+            let flake_lock = self.flake_lock_path();
+            let flake_lock = flake_lock.to_str().unwrap_or_default().to_owned();
+            let flake_lock_sealed =
+                !flake_lock.is_empty() && NixFile::is_immutable(&flake_lock).unwrap_or(false);
+            if flake_lock_sealed {
+                NixFile::make_mutable(&flake_lock).ok();
             }
 
             let repo = self.git_repo.as_ref().unwrap();
@@ -746,6 +813,9 @@ impl<'a> Transaction<'a> {
                 } else if path::Path::new(nix_file.get_file_path()).exists() {
                     NixFile::make_immutable(nix_file.get_file_path()).ok();
                 }
+            }
+            if flake_lock_sealed && path::Path::new(&flake_lock).exists() {
+                NixFile::make_immutable(&flake_lock).ok();
             }
 
             // Release the locks and reset the state of each NixFile.

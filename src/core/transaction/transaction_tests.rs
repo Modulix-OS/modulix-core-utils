@@ -199,6 +199,7 @@ mod unit {
         assert_eq!(BuildCommand::Switch.as_str(), "build-vm");
         assert_eq!(BuildCommand::Boot.as_str(), "build-vm");
         assert_eq!(BuildCommand::Install.as_str(), "build-vm");
+        assert_eq!(BuildCommand::BuildVm.as_str(), "build-vm");
     }
 
     /// In release mode each variant returns its expected string.
@@ -208,6 +209,7 @@ mod unit {
         assert_eq!(BuildCommand::Switch.as_str(), "switch");
         assert_eq!(BuildCommand::Boot.as_str(), "boot");
         assert_eq!(BuildCommand::Install.as_str(), "");
+        assert_eq!(BuildCommand::BuildVm.as_str(), "build-vm");
     }
 
     /// `BuildCommand` is clonable without panicking.
@@ -216,6 +218,7 @@ mod unit {
         let _ = BuildCommand::Switch.clone();
         let _ = BuildCommand::Boot.clone();
         let _ = BuildCommand::Install.clone();
+        let _ = BuildCommand::BuildVm.clone();
     }
 }
 

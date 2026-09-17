@@ -3,6 +3,9 @@ use const_format::concatcp;
 #[cfg(feature = "package-info")]
 pub mod package_info;
 
+#[cfg(feature = "package-info")]
+pub mod package_index;
+
 #[cfg(feature = "config-store")]
 mod config_store;
 
@@ -19,6 +22,9 @@ pub use core::app_info_trait::AppScreenshot;
 
 #[cfg(feature = "app-info-gui")]
 pub use core::app_info_trait::FlatpakInfo;
+
+#[cfg(any(feature = "package-info", feature = "app-info-gui"))]
+pub use core::license;
 
 #[cfg(feature = "desktop-environment")]
 pub mod desktop_environment;
@@ -66,6 +72,26 @@ pub const CONFIG_DIRECTORY: &str = "/etc/modulix-os/";
 #[cfg(debug_assertions)]
 pub const CONFIG_DIRECTORY: &str = concatcp!(env!("CARGO_MANIFEST_DIR"), "/test/");
 
+/// Name of the generated-index directory inside the config directory.
+///
+/// Kept dot-prefixed and listed in the repo's `.git/info/exclude` by
+/// [`init::init`]: the indexes are rebuilt artifacts, and an untracked
+/// directory inside the config repo would otherwise be stashed away by
+/// every transaction.
+pub const CACHE_DIRECTORY_NAME: &str = ".cache";
+
+/// Directory holding the generated indexes (module index, package index).
+///
+/// Defaults to `CACHE_DIRECTORY_NAME` inside [`CONFIG_DIRECTORY`]. Since
+/// `CONFIG_DIRECTORY` is fixed at compile time, `$MX_CACHE_DIR` overrides it
+/// for deployments whose config repo lives elsewhere — notably a debug build
+/// driving a real system, where the compiled-in path is the source fixture.
+pub fn cache_dir() -> std::path::PathBuf {
+    std::env::var_os("MX_CACHE_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::Path::new(CONFIG_DIRECTORY).join(CACHE_DIRECTORY_NAME))
+}
+
 enum GitRefs {
     Branch,
     Tag,
@@ -108,4 +134,7 @@ pub mod mx {
 
     #[cfg(feature = "firewall")]
     pub use crate::firewall::NetworkProtocol;
+
+    #[cfg(feature = "init")]
+    pub use crate::init::Desktop;
 }

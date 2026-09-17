@@ -100,7 +100,17 @@ impl NixFile {
         Ok(flags)
     }
 
-    pub(super) fn make_immutable(path: &str) -> mx::Result<()> {
+    /// Reports whether the immutable flag is currently set on `path`.
+    ///
+    /// Callers that clear the flag around an external write use this to restore
+    /// the *previous* state instead of unconditionally sealing the file: a
+    /// config repo not produced by `init` may legitimately keep `flake.lock`
+    /// writable, and sealing it would break the admin's own `nix flake update`.
+    pub(super) fn is_immutable(path: &str) -> mx::Result<bool> {
+        Ok(Self::get_flags(path)? & Self::FS_IMMUTABLE_FL != 0)
+    }
+
+    pub(crate) fn make_immutable(path: &str) -> mx::Result<()> {
         if Self::is_owned_by_root(path)? {
             let file = OpenOptions::new()
                 .read(true)

@@ -105,3 +105,12 @@ impl fmt::Display for ErrorKind {
         )
     }
 }
+
+/// Wraps an I/O error with the path it occurred on.
+///
+/// A bare `Os { code: 13, kind: PermissionDenied }` is undiagnosable in a run
+/// that touches `/tmp` sentinels, the config repository and the Nix store in
+/// turn — the path is the whole diagnosis.
+pub(crate) fn io_error_at(path: &str, error: io::Error) -> ErrorKind {
+    ErrorKind::IOError(io::Error::new(error.kind(), format!("{path}: {error}")))
+}

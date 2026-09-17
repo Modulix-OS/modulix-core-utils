@@ -23,6 +23,7 @@ use std::{
     time::Duration,
 };
 
+use crate::error::io_error_at;
 use crate::mx;
 
 /// Root directory of the queue.
@@ -48,7 +49,7 @@ impl BuildQueue {
     /// protected by [`META_LOCK`], so no concurrent scan can observe an
     /// allocated number whose file does not exist yet.
     pub fn enqueue() -> mx::Result<Ticket> {
-        fs::create_dir_all(QUEUE_DIR).map_err(mx::ErrorKind::IOError)?;
+        fs::create_dir_all(QUEUE_DIR).map_err(|e| io_error_at(QUEUE_DIR, e))?;
         let _meta = lock_meta()?;
 
         let seq = next_seq()?;
@@ -58,7 +59,7 @@ impl BuildQueue {
             .create(true)
             .truncate(true)
             .open(&path)
-            .map_err(mx::ErrorKind::IOError)?;
+            .map_err(|e| io_error_at(&path.to_string_lossy(), e))?;
         file.lock().map_err(|_| mx::ErrorKind::FailToLock)?;
 
         Ok(Ticket { seq, file, path })
@@ -143,7 +144,7 @@ fn lock_meta() -> mx::Result<File> {
         .create(true)
         .truncate(false)
         .open(META_LOCK)
-        .map_err(mx::ErrorKind::IOError)?;
+        .map_err(|e| io_error_at(META_LOCK, e))?;
     file.lock().map_err(|_| mx::ErrorKind::FailToLock)?;
     Ok(file)
 }
@@ -157,7 +158,7 @@ fn next_seq() -> mx::Result<u64> {
         .create(true)
         .truncate(false)
         .open(SEQ_FILE)
-        .map_err(mx::ErrorKind::IOError)?;
+        .map_err(|e| io_error_at(SEQ_FILE, e))?;
 
     let mut content = String::new();
     file.read_to_string(&mut content)
