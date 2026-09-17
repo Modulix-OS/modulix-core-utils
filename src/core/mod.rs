@@ -16,11 +16,17 @@ pub mod param;
 #[cfg(feature = "core-nix-eval")]
 pub mod nix_eval;
 
+#[cfg(feature = "reqwest")]
+pub mod http_client;
+
 #[cfg(feature = "core-user-info")]
 pub mod user;
 
 #[cfg(feature = "core-app-info-trait")]
 pub mod app_info_trait;
+
+#[cfg(any(feature = "package-info", feature = "app-info-gui"))]
+pub mod license;
 
 #[cfg(any(feature = "module-info", feature = "app-info-gui"))]
 pub mod lang;
