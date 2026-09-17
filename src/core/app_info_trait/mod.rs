@@ -31,7 +31,22 @@ type Url = str;
 
 pub trait AppInfoMinimal: Sized {
     fn new(pkg_name: &str) -> impl Future<Output = mx::Result<Self>> + Send;
-    fn search(query: &str, number_app: u32) -> impl Future<Output = mx::Result<Vec<Self>>> + Send;
+    fn search_scored(
+        query: &str,
+        number_app: u32,
+    ) -> impl Future<Output = mx::Result<Vec<(u32, Self)>>> + Send;
+    fn search(query: &str, number_app: u32) -> impl Future<Output = mx::Result<Vec<Self>>> + Send
+    where
+        Self: Sized,
+    {
+        async move {
+            Ok(Self::search_scored(query, number_app)
+                .await?
+                .into_iter()
+                .map(|(_, item)| item)
+                .collect())
+        }
+    }
     fn package_name(&self) -> &str;
     fn display_name(&self) -> &str;
     fn summary(&self) -> &str;
@@ -42,6 +57,9 @@ pub trait AppInfoGui {
     fn id(&self) -> Option<&str>;
     fn app_name(&self) -> Option<&str>;
     fn icon(&self) -> Option<&Url>;
+    fn icon_name(&self) -> Option<&str> {
+        None
+    }
     fn keyword(&self) -> Vec<&str>;
     fn description(&self) -> impl Future<Output = Cow<'_, str>> + Send;
     fn screenshots(&self) -> impl Future<Output = Option<AppScreenshot<'_>>> + Send;

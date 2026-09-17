@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{LazyLock, Mutex};
 
 use serde::Deserialize;
 use tokio::sync::OnceCell;
@@ -58,6 +59,8 @@ struct ModuleMetadata {
     #[serde(default)]
     icon: Option<String>,
     #[serde(default)]
+    icon_name: Option<String>,
+    #[serde(default)]
     description: Option<String>,
     #[serde(default)]
     keyword: Option<Vec<String>>,
@@ -86,10 +89,36 @@ pub struct ModuleInfo {
 /// Process-wide cache of `modules/index.json` (fetched once).
 static INDEX: OnceCell<HashMap<String, IndexEntry>> = OnceCell::const_new();
 
+/// Directory an `index.json` copy is expected to live in (see
+/// [`read_local_index`]): the config repo's cache directory, shared with the
+/// package index. `$MX_MODULE_INDEX_DIR` still overrides it on its own, for
+/// tests and dev checkouts.
+fn local_module_index_dir() -> std::path::PathBuf {
+    std::env::var_os("MX_MODULE_INDEX_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(crate::cache_dir)
+}
+
+/// `modules/index.json` is only 20 entries / 5 KB and part of the system
+/// closure, so reading it locally is instant and works offline — unlike
+/// `REMOTE_MODULE_URL`, which hits `raw.githubusercontent.com` on every
+/// process's first search. `None` on any I/O/parse error (missing file,
+/// no such module deployed yet, …), so the caller's HTTP fallback still runs.
+async fn read_local_index() -> Option<HashMap<String, IndexEntry>> {
+    let path = local_module_index_dir().join("index.json");
+    let bytes = tokio::fs::read(path).await.ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
 async fn fetch_index() -> mx::Result<&'static HashMap<String, IndexEntry>> {
     INDEX
         .get_or_try_init(|| async {
-            reqwest::get(format!("{REMOTE_MODULE_URL}index.json"))
+            if let Some(index) = read_local_index().await {
+                return Ok(index);
+            }
+            crate::core::http_client::client()?
+                .get(format!("{REMOTE_MODULE_URL}index.json"))
+                .send()
                 .await
                 .map_err(mx::ErrorKind::HttpError)?
                 .error_for_status()
@@ -102,23 +131,33 @@ async fn fetch_index() -> mx::Result<&'static HashMap<String, IndexEntry>> {
 }
 
 static INDEX_OVERLAY: OnceCell<HashMap<String, IndexOverlayEntry>> = OnceCell::const_new();
+static EMPTY_INDEX_OVERLAY: LazyLock<HashMap<String, IndexOverlayEntry>> =
+    LazyLock::new(HashMap::new);
 
+/// Unlike [`fetch_index`], a failed overlay fetch must not be cached forever:
+/// `get_or_try_init` only ever populates the cell on success, so a transient
+/// network failure is retried on the next call instead of permanently hiding
+/// every localized name/summary for the process lifetime.
 async fn fetch_index_overlay() -> &'static HashMap<String, IndexOverlayEntry> {
+    let Some(lang) = current_lang() else {
+        return &EMPTY_INDEX_OVERLAY;
+    };
+    let Ok(client) = crate::core::http_client::client() else {
+        return &EMPTY_INDEX_OVERLAY;
+    };
+
     INDEX_OVERLAY
-        .get_or_init(|| async {
-            let Some(lang) = current_lang() else {
-                return HashMap::new();
-            };
-            let fetch = async {
-                reqwest::get(format!("{REMOTE_MODULE_URL}index.{lang}.json"))
-                    .await?
-                    .error_for_status()?
-                    .json::<HashMap<String, IndexOverlayEntry>>()
-                    .await
-            };
-            fetch.await.unwrap_or_default()
+        .get_or_try_init(|| async {
+            client
+                .get(format!("{REMOTE_MODULE_URL}index.{lang}.json"))
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<HashMap<String, IndexOverlayEntry>>()
+                .await
         })
         .await
+        .unwrap_or(&EMPTY_INDEX_OVERLAY)
 }
 
 fn expand_targets(index: &HashMap<String, IndexEntry>, name: &str) -> Vec<String> {
@@ -141,44 +180,88 @@ pub async fn resolve_with_children(name: &str) -> mx::Result<Vec<String>> {
     Ok(expand_targets(fetch_index().await?, name))
 }
 
+/// Modules whose `flathub_id` equals `app_id` (the index is already cached by
+/// [`fetch_index`]). Used to prepend the Modulix module row(s) to the
+/// `alternate-of` version-selector for an app that also has a module. Does
+/// **not** call [`ModuleInfo::resolve`] (a network round-trip per module): the
+/// version-selector row only needs `origin_ui` + the packaging format, not an
+/// icon or description.
+#[cfg(feature = "app-info-gui")]
+pub async fn modules_for_app_id(app_id: &str) -> mx::Result<Vec<ModuleInfo>> {
+    let index = fetch_index().await?;
+    let overlay = fetch_index_overlay().await;
+    Ok(index
+        .iter()
+        .filter(|(_, entry)| entry.flathub_id.as_deref() == Some(app_id))
+        .map(|(name, entry)| ModuleInfo::from_entry(name, entry, overlay.get(name)))
+        .collect())
+}
+
 #[cfg(feature = "app-info-gui")]
 async fn fetch_metadata(path: &str) -> mx::Result<ModuleMetadata> {
-    let mut metadata = reqwest::get(format!("{REMOTE_MODULE_URL}{path}/metadata.json"))
-        .await
-        .map_err(mx::ErrorKind::HttpError)?
-        .error_for_status()
-        .map_err(mx::ErrorKind::HttpError)?
-        .json::<ModuleMetadata>()
-        .await
-        .map_err(mx::ErrorKind::HttpError)?;
+    let primary = async {
+        crate::core::http_client::client()?
+            .get(format!("{REMOTE_MODULE_URL}{path}/metadata.json"))
+            .send()
+            .await
+            .map_err(mx::ErrorKind::HttpError)?
+            .error_for_status()
+            .map_err(mx::ErrorKind::HttpError)?
+            .json::<ModuleMetadata>()
+            .await
+            .map_err(mx::ErrorKind::HttpError)
+    };
 
-    if let Some(lang) = current_lang() {
-        let overlay = async {
-            reqwest::get(format!("{REMOTE_MODULE_URL}{path}/metadata.{lang}.json"))
+    // No overlay language: skip the second request entirely rather than
+    // firing it off just to discard the result.
+    let overlay = async {
+        let lang = current_lang()?;
+        let client = crate::core::http_client::client().ok()?;
+        let fetch = async {
+            client
+                .get(format!("{REMOTE_MODULE_URL}{path}/metadata.{lang}.json"))
+                .send()
                 .await?
                 .error_for_status()?
                 .json::<ModuleMetadata>()
                 .await
-        }
-        .await;
+        };
+        fetch.await.ok()
+    };
 
-        if let Ok(overlay) = overlay {
-            if overlay.description.is_some() {
-                metadata.description = overlay.description;
-            }
-            if overlay.keyword.is_some() {
-                metadata.keyword = overlay.keyword;
-            }
-            if overlay.icon.is_some() {
-                metadata.icon = overlay.icon;
-            }
+    let (metadata, overlay) = tokio::join!(primary, overlay);
+    let mut metadata = metadata?;
+
+    if let Some(overlay) = overlay {
+        if overlay.description.is_some() {
+            metadata.description = overlay.description;
+        }
+        if overlay.keyword.is_some() {
+            metadata.keyword = overlay.keyword;
+        }
+        if overlay.icon.is_some() {
+            metadata.icon = overlay.icon;
+        }
+        if overlay.icon_name.is_some() {
+            metadata.icon_name = overlay.icon_name;
         }
     }
 
     Ok(metadata)
 }
 
+/// Process-wide cache of [`list_plugins_in_namespace`] results, keyed by
+/// namespace: forcing `meta.description` across a whole nixpkgs namespace is
+/// expensive, and the details page re-requests the same module's plugins on
+/// every refine.
+static PLUGIN_NAMESPACE_CACHE: LazyLock<Mutex<HashMap<String, Vec<AppPlugin>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 async fn list_plugins_in_namespace(namespace: &str) -> mx::Result<Vec<AppPlugin>> {
+    if let Some(cached) = PLUGIN_NAMESPACE_CACHE.lock().unwrap().get(namespace) {
+        return Ok(cached.clone());
+    }
+
     let expr = format!(
         "nixpkgs#legacyPackages.{}.{}",
         env!("TARGET_NIX"),
@@ -201,7 +284,7 @@ async fn list_plugins_in_namespace(namespace: &str) -> mx::Result<Vec<AppPlugin>
     ])
     .await?;
 
-    Ok(raw
+    let plugins: Vec<AppPlugin> = raw
         .into_iter()
         .map(|(name, value)| {
             let description = value
@@ -211,7 +294,14 @@ async fn list_plugins_in_namespace(namespace: &str) -> mx::Result<Vec<AppPlugin>
                 .to_string();
             AppPlugin { name, description }
         })
-        .collect())
+        .collect();
+
+    PLUGIN_NAMESPACE_CACHE
+        .lock()
+        .unwrap()
+        .insert(namespace.to_string(), plugins.clone());
+
+    Ok(plugins)
 }
 
 impl ModuleInfo {
@@ -310,12 +400,14 @@ impl AppInfoMinimal for ModuleInfo {
         Ok(Self::from_entry(name, entry, overlay.get(name)))
     }
 
-    async fn search(query: &str, number_app: u32) -> mx::Result<Vec<Self>> {
+    async fn search_scored(query: &str, number_app: u32) -> mx::Result<Vec<(u32, Self)>> {
         let index = fetch_index().await?;
         let overlay = fetch_index_overlay().await;
+        // Score off borrowed data first — `Self::from_entry` clones several
+        // `String`s per module — so a non-match never pays that cost.
         let mut modules: Vec<(u32, Self)> = index
             .iter()
-            .map(|(name, entry)| {
+            .filter_map(|(name, entry)| {
                 let ov = overlay.get(name);
                 let keywords: Vec<&str> = ov
                     .and_then(|o| o.keyword.as_deref())
@@ -334,12 +426,12 @@ impl AppInfoMinimal for ModuleInfo {
                     .unwrap_or(name);
                 let relevance = score(name, summary, &keywords, query)
                     .max(score(display, summary, &keywords, query));
-                (relevance, Self::from_entry(name, entry, ov))
+                (relevance > 0).then(|| (relevance, Self::from_entry(name, entry, ov)))
             })
             .collect();
         modules.sort_unstable_by(|a, b| b.0.cmp(&a.0));
         modules.truncate(number_app as usize);
-        Ok(modules.into_iter().map(|(_, m)| m).collect())
+        Ok(modules)
     }
 
     fn package_name(&self) -> &str {
@@ -375,6 +467,17 @@ impl AppInfoGui for ModuleInfo {
             return metadata.icon.as_deref();
         }
         None
+    }
+
+    fn icon_name(&self) -> Option<&str> {
+        if let Some(Some(metadata)) = self.metadata.get()
+            && let Some(icon_name) = metadata.icon_name.as_deref()
+        {
+            return Some(icon_name);
+        }
+        crate::package_info::packages_for_app_id(self.flathub_id.as_deref()?)
+            .first()
+            .and_then(|attr| crate::package_info::icon_name_for_package(attr))
     }
 
     fn keyword(&self) -> Vec<&str> {

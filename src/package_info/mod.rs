@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 use crate::core::app_info_trait::AppInfoMinimal;
 use crate::core::app_info_trait::PLUGIN_NAMESPACE_PREFIXES;
 use crate::core::app_info_trait::score;
+use crate::core::license;
+use crate::core::nix_eval;
 use crate::mx;
+use crate::package_index;
 
 #[cfg(feature = "app-info-gui")]
 use crate::core::app_info_trait::AppInfoGui;
@@ -19,7 +22,7 @@ use crate::core::app_info_trait::AppScreenshot;
 use crate::core::app_info_trait::FlatpakInfo;
 
 #[cfg(feature = "app-info-gui")]
-mod package_basic_info;
+pub(crate) mod package_basic_info;
 
 #[cfg(feature = "app-info-gui")]
 use tokio::sync::OnceCell;
@@ -59,9 +62,55 @@ impl NixPackage {
 
     pub async fn get_outputs(&self) -> mx::Result<Vec<String>> {
         let expr = format!("nixpkgs#{}.outputs", self.pkg_name);
+        nix_eval::eval_json(&[&expr]).await
+    }
+}
 
+impl AppInfoMinimal for NixPackage {
+    async fn new(pkg_name: &str) -> mx::Result<Self> {
+        // `nixpkgs#<attr>` (a flake installable) instead of `import <nixpkgs>
+        // {}` — the latter needs `--impure` to resolve `<nixpkgs>` on any nix
+        // with flakes enabled and fails outright otherwise.
+        let installable = format!("nixpkgs#{pkg_name}");
+        let mut info: NixPackage = nix_eval::eval_json(&[
+            &installable,
+            "--apply",
+            r#"p: { pname = p.pname or (p.name or ""); version = p.version or ""; description = p.meta.description or ""; outputs = p.outputs or []; }"#,
+        ])
+        .await?;
+        info.pkg_name = pkg_name.to_string();
+        Ok(info)
+    }
+
+    async fn search_scored(query: &str, number_app: u32) -> mx::Result<Vec<(u32, Self)>> {
+        if let Some(index) = package_index::get().await {
+            let hits = package_index::search(&index, query, number_app as usize);
+            return Ok(hits
+                .into_iter()
+                .map(|(relevance, row)| {
+                    (
+                        relevance,
+                        Self {
+                            pkg_name: row.attr.to_string(),
+                            version: row.version.to_string(),
+                            description: row.description.to_string(),
+                            pname: row.pname.to_string(),
+                            outputs: vec![],
+                            #[cfg(feature = "app-info-gui")]
+                            flatpak: OnceCell::new(),
+                        },
+                    )
+                })
+                .collect());
+        }
+
+        // No fresh index yet (first run, or the background build hasn't
+        // caught up): fall back to a live `nix search`, exactly as before.
         let output = tokio::process::Command::new("nix")
-            .args(["eval", "--json", &expr])
+            .args(["search", "nixpkgs", "--json", query])
+            .env("NIXPKGS_ALLOW_UNFREE", "1")
+            // A cancelled search must not leave `nix` running in the background.
+            .kill_on_drop(true)
             .output()
             .await
             .map_err(mx::ErrorKind::IOError)?;
@@ -71,42 +120,6 @@ impl NixPackage {
                 String::from_utf8_lossy(&output.stderr).to_string(),
             ));
         }
-
-        let stdout = String::from_utf8(output.stdout).map_err(mx::ErrorKind::FromUtf8Error)?;
-        let outputs: Vec<String> = serde_json::from_str(&stdout).map_err(|_| {
-            mx::ErrorKind::NixCommandError(String::from("Impossible to grep output format"))
-        })?;
-
-        Ok(outputs)
-    }
-}
-
-impl AppInfoMinimal for NixPackage {
-    async fn new(pkg_name: &str) -> mx::Result<Self> {
-        let expr = format!(
-            r#"let p = (import <nixpkgs> {{}}).{}; in {{ name = p.meta.name or p.name; version = p.version; description = p.meta.description or ""; outputs = p.outputs or []; }}"#,
-            pkg_name
-        );
-
-        let output = tokio::process::Command::new("nix")
-            .args(["eval", "--json", "--expr", &expr])
-            .output()
-            .await
-            .map_err(mx::ErrorKind::IOError)?;
-
-        let mut info: NixPackage =
-            serde_json::from_slice(&output.stdout).map_err(mx::ErrorKind::ParseError)?;
-        info.pkg_name = pkg_name.to_string();
-        Ok(info)
-    }
-
-    async fn search(query: &str, number_app: u32) -> mx::Result<Vec<Self>> {
-        let output = tokio::process::Command::new("nix")
-            .args(["search", "nixpkgs", "--json", query])
-            .env("NIXPKGS_ALLOW_UNFREE", "1")
-            .output()
-            .await
-            .map_err(mx::ErrorKind::IOError)?;
 
         let raw: HashMap<String, NixPackage> =
             serde_json::from_slice(&output.stdout).map_err(mx::ErrorKind::ParseError)?;
@@ -131,7 +144,7 @@ impl AppInfoMinimal for NixPackage {
                 #[cfg(not(feature = "app-info-gui"))]
                 let keywords: Vec<&str> = Vec::new();
                 let relevance = score(name, &value.description, &keywords, query);
-                Some((
+                (relevance > 0).then_some((
                     relevance,
                     Self {
                         pkg_name: name.to_string(),
@@ -148,7 +161,7 @@ impl AppInfoMinimal for NixPackage {
 
         packages.sort_unstable_by(|a, b| b.0.cmp(&a.0));
         packages.truncate(number_app as usize);
-        Ok(packages.into_iter().map(|(_, pkg)| pkg).collect())
+        Ok(packages)
     }
 
     fn package_name(&self) -> &str {
@@ -181,8 +194,12 @@ impl AppInfoGui for NixPackage {
     }
 
     fn icon(&self) -> Option<&Url> {
-        package_basic_info::get_icon(&self.pkg_name)
-            .or_else(|| package_basic_info::get_icon(self.display_name()))
+        None
+    }
+
+    fn icon_name(&self) -> Option<&str> {
+        package_basic_info::get_icon_name(&self.pkg_name)
+            .or_else(|| package_basic_info::get_icon_name(self.display_name()))
     }
 
     fn keyword(&self) -> Vec<&str> {
@@ -205,20 +222,7 @@ impl AppInfoGui for NixPackage {
 
     async fn main_program(&self) -> mx::Result<Cow<'_, str>> {
         let expr = format!("nixpkgs#{}.meta.mainProgram", self.pkg_name);
-        let output = tokio::process::Command::new("nix")
-            .args(["eval", "--json", &expr])
-            .output()
-            .await
-            .map_err(mx::ErrorKind::IOError)?;
-        if !output.status.success() {
-            return Err(mx::ErrorKind::NixCommandError(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
-        }
-        let stdout = String::from_utf8(output.stdout).map_err(mx::ErrorKind::FromUtf8Error)?;
-        let main_program: String = serde_json::from_str(&stdout).map_err(|_| {
-            mx::ErrorKind::NixCommandError(String::from("Impossible to parse mainProgram"))
-        })?;
+        let main_program: String = nix_eval::eval_json(&[&expr]).await?;
         Ok(Cow::Owned(main_program))
     }
 }
@@ -249,7 +253,7 @@ pub fn is_flatpak_preferred(app_id: &str) -> bool {
 /// `["firefox", "firefox-esr", …]`). Used to populate the "other sources" of an
 /// app for GNOME Software's `alternate-of` query.
 #[cfg(feature = "app-info-gui")]
-pub fn packages_for_app_id(app_id: &str) -> Vec<&'static str> {
+pub fn packages_for_app_id(app_id: &str) -> &'static [&'static str] {
     package_basic_info::get_packages_by_app_id(app_id)
 }
 
@@ -258,4 +262,26 @@ pub fn packages_for_app_id(app_id: &str) -> Vec<&'static str> {
 #[cfg(feature = "app-info-gui")]
 pub fn name_for_package(pkg_name: &str) -> Option<&'static str> {
     package_basic_info::get_name(pkg_name)
+}
+
+/// Themed icon name (`meta.mainProgram`) for a nixpkgs attribute, when matched.
+#[cfg(feature = "app-info-gui")]
+pub fn icon_name_for_package(pkg_name: &str) -> Option<&'static str> {
+    package_basic_info::get_icon_name(pkg_name)
+}
+
+/// SPDX expression for a nixpkgs attribute's `meta.license`, or `None` when
+/// the attribute has no license metadata or cannot be evaluated (broken
+/// attribute, eval timeout — see [`nix_eval::run_json`]).
+///
+/// Costs one `nix eval` per attribute: this is the only source for the
+/// license of a nix package, since `nix search --json` (and therefore the
+/// on-disk index) does not carry `meta`.
+pub async fn license_for_package(pkg_name: &str) -> Option<String> {
+    let installable = format!("nixpkgs#{pkg_name}");
+    let raw: Option<license::RawLicense> =
+        nix_eval::eval_json(&[&installable, "--apply", "p: p.meta.license or null"])
+            .await
+            .ok()?;
+    license::normalize(&raw?)
 }

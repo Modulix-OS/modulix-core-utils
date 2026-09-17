@@ -7,19 +7,17 @@ use std::collections::HashMap;
 #[derive(Deserialize)]
 struct FlathubAppInfo {
     name: Option<String>,
-    icon: Option<String>,
     keywords: Option<Vec<String>>,
 }
 
 async fn get_flathub_app_info(
     client: &reqwest::Client,
     app_id: &str,
-) -> Option<(String, String, Vec<String>)> {
+) -> Option<(String, Vec<String>)> {
     let url = format!("https://flathub.org/api/v2/appstream/{app_id}");
     // A few immediate retries: the generator fans out many requests at once and
     // Flathub intermittently drops or rate-limits them. A transient failure must
-    // not silently discard an otherwise-valid match. A parsed body with no icon
-    // is definitive (the app simply has none), so we stop retrying then.
+    // not silently discard an otherwise-valid match.
     for _ in 0..4u32 {
         let Ok(resp) = client.get(url.as_str()).send().await else {
             continue;
@@ -30,10 +28,8 @@ async fn get_flathub_app_info(
         let Ok(info) = resp.json::<FlathubAppInfo>().await else {
             continue;
         };
-        let icon = info.icon?;
         return Some((
             info.name.unwrap_or_default(),
-            icon,
             info.keywords.unwrap_or_default(),
         ));
     }
@@ -217,7 +213,7 @@ async fn get_nix_packages() -> mx::Result<Vec<(String, String)>> {
 async fn resolve_flathub_info(
     flathub_ids: &[String],
     nix_packages: &[(String, String)],
-) -> HashMap<String, (String, String, String, Vec<String>)> {
+) -> HashMap<String, (String, String, Vec<String>)> {
     let matched: HashMap<String, String> = nix_packages
         .iter()
         .filter_map(|(_, exe)| {
@@ -242,8 +238,8 @@ async fn resolve_flathub_info(
     }))
     .buffer_unordered(CONCURRENCY)
     .filter_map(|(exe, app_id, result)| async move {
-        let (name, icon, keywords) = result?;
-        Some((exe, (name, app_id, icon, keywords)))
+        let (name, keywords) = result?;
+        Some((exe, (name, app_id, keywords)))
     })
     .collect()
     .await
@@ -253,32 +249,51 @@ fn escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-fn generate_file(
-    enriched: &[(
-        String,
-        String,
-        Option<(String, String, String, Vec<String>)>,
-    )],
-) {
+fn generate_file(enriched: &[(String, String, Option<(String, String, Vec<String>)>)]) {
     let mut out = String::new();
 
     out.push_str("static NIX_INFO: phf::Map<&'static str, NixInfo> = phf::phf_map! {\n");
-    for (pkg, _, info) in enriched {
-        if let Some((name, app_id, icon, keywords)) = info {
+    // app_id -> every nix attribute matched to it, for the reverse lookup
+    // emitted below (`APP_ID_TO_PACKAGES`) — avoids an O(n) scan of NIX_INFO
+    // per `packages_for_app_id` call.
+    let mut by_app_id: HashMap<String, Vec<String>> = HashMap::new();
+    for (pkg, exe, info) in enriched {
+        if let Some((name, app_id, keywords)) = info {
             let kw = keywords
                 .iter()
                 .map(|k| format!("\"{}\"", escape(k)))
                 .collect::<Vec<_>>()
                 .join(", ");
             out.push_str(&format!(
-                "    \"{}\" => NixInfo {{ name: \"{}\", app_id: \"{}\", icon: \"{}\", keywords: &[{}] }},\n",
+                "    \"{}\" => NixInfo {{ name: \"{}\", app_id: \"{}\", icon_name: \"{}\", keywords: &[{}] }},\n",
                 escape(pkg),
                 escape(name),
                 escape(app_id),
-                escape(icon),
+                escape(exe),
                 kw,
             ));
+            by_app_id
+                .entry(app_id.clone())
+                .or_default()
+                .push(pkg.clone());
         }
+    }
+    out.push_str("};\n\n");
+
+    out.push_str(
+        "static APP_ID_TO_PACKAGES: phf::Map<&'static str, &'static [&'static str]> = phf::phf_map! {\n",
+    );
+    let mut app_ids: Vec<&String> = by_app_id.keys().collect();
+    app_ids.sort();
+    for app_id in app_ids {
+        let mut pkgs = by_app_id[app_id].clone();
+        pkgs.sort();
+        let list = pkgs
+            .iter()
+            .map(|p| format!("\"{}\"", escape(p)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!("    \"{}\" => &[{}],\n", escape(app_id), list));
     }
     out.push_str("};\n");
 
@@ -334,11 +349,7 @@ mod tests {
 async fn main() {
     let (flathub, nix) = tokio::try_join!(get_flathub_id(), get_nix_packages()).unwrap();
     let flathub_info = resolve_flathub_info(&flathub, &nix).await;
-    let enriched: Vec<(
-        String,
-        String,
-        Option<(String, String, String, Vec<String>)>,
-    )> = nix
+    let enriched: Vec<(String, String, Option<(String, String, Vec<String>)>)> = nix
         .into_iter()
         .map(|(pkg, exe)| {
             let info = flathub_info.get(&exe).cloned();

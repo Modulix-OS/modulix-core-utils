@@ -1,22 +1,33 @@
+use std::time::Duration;
+
 use serde::de::DeserializeOwned;
 
 use crate::mx;
 
-/// Run `nix eval --json <args>` and deserialize its stdout into `T`.
+/// Ceiling on a single `nix eval` invocation. Bounds an otherwise-unbounded
+/// hang (e.g. a namespace enumeration that forces evaluation across a large
+/// nixpkgs subtree).
+const EVAL_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Run `nix <args>` (JSON output assumed) and deserialize its stdout into `T`,
+/// bounded by `timeout`. Shared by every `nix` subprocess call in this crate
+/// so none of them can hang indefinitely — see [`eval_json`] for the `nix
+/// eval` specialisation.
 ///
-/// `args` are appended verbatim after `eval --json`, so callers pass the
-/// installable and any extra flags themselves, e.g. `["nixpkgs#hello.meta.mainProgram"]`,
-/// `["--expr", "<expr>"]`, or `["<flakeref>", "--apply", "<lambda>"]`.
-///
-/// `NIXPKGS_ALLOW_UNFREE=1` is set so evaluating unfree attributes does not abort.
-/// A non-zero exit surfaces stderr as [`mx::ErrorKind::NixCommandError`].
-pub async fn eval_json<T: DeserializeOwned>(args: &[&str]) -> mx::Result<T> {
-    let output = tokio::process::Command::new("nix")
-        .args(["eval", "--json"])
+/// `NIXPKGS_ALLOW_UNFREE=1` is set so evaluating unfree attributes does not
+/// abort. A non-zero exit surfaces stderr as [`mx::ErrorKind::NixCommandError`];
+/// taking longer than `timeout` kills the process and does the same.
+pub async fn run_json<T: DeserializeOwned>(args: &[&str], timeout: Duration) -> mx::Result<T> {
+    let mut command = tokio::process::Command::new("nix");
+    command
         .args(args)
         .env("NIXPKGS_ALLOW_UNFREE", "1")
-        .output()
+        // A cancelled/timed-out caller must not leave `nix` running.
+        .kill_on_drop(true);
+
+    let output = tokio::time::timeout(timeout, command.output())
         .await
+        .map_err(|_| mx::ErrorKind::NixCommandError(format!("nix {} timed out", args.join(" "))))?
         .map_err(mx::ErrorKind::IOError)?;
 
     if !output.status.success() {
@@ -27,4 +38,17 @@ pub async fn eval_json<T: DeserializeOwned>(args: &[&str]) -> mx::Result<T> {
 
     let stdout = String::from_utf8(output.stdout).map_err(mx::ErrorKind::FromUtf8Error)?;
     serde_json::from_str(&stdout).map_err(|e| mx::ErrorKind::NixCommandError(e.to_string()))
+}
+
+/// Run `nix eval --json <args>` and deserialize its stdout into `T`.
+///
+/// `args` are appended verbatim after `eval --json`, so callers pass the
+/// installable and any extra flags themselves, e.g. `["nixpkgs#hello.meta.mainProgram"]`,
+/// `["--expr", "<expr>"]`, or `["<flakeref>", "--apply", "<lambda>"]`.
+pub async fn eval_json<T: DeserializeOwned>(args: &[&str]) -> mx::Result<T> {
+    let mut full = Vec::with_capacity(args.len() + 2);
+    full.push("eval");
+    full.push("--json");
+    full.extend_from_slice(args);
+    run_json(&full, EVAL_TIMEOUT).await
 }

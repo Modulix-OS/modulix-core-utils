@@ -3,29 +3,28 @@
 //! `score` combines exact/substring/Levenshtein matches over the item name, its
 //! description and its keywords so the different sources rank results the same way.
 
+/// Edit distance, computed with two rolling rows (`O(min(m, n))` space)
+/// instead of a full `m × n` matrix — `score` runs this per keyword per
+/// candidate, so the allocation adds up across a whole search.
 fn levenshtein(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
-    let m = a.len();
-    let n = b.len();
-    let mut dp = vec![vec![0usize; n + 1]; m + 1];
+    let (m, n) = (a.len(), b.len());
+    let mut prev: Vec<usize> = (0..=n).collect();
+    let mut curr = vec![0usize; n + 1];
 
-    for i in 0..=m {
-        dp[i][0] = i;
-    }
-    for j in 0..=n {
-        dp[0][j] = j;
-    }
     for i in 1..=m {
+        curr[0] = i;
         for j in 1..=n {
-            dp[i][j] = if a[i - 1] == b[j - 1] {
-                dp[i - 1][j - 1]
+            curr[j] = if a[i - 1] == b[j - 1] {
+                prev[j - 1]
             } else {
-                1 + dp[i - 1][j].min(dp[i][j - 1]).min(dp[i - 1][j - 1])
+                1 + prev[j].min(curr[j - 1]).min(prev[j - 1])
             };
         }
+        std::mem::swap(&mut prev, &mut curr);
     }
-    dp[m][n]
+    prev[n]
 }
 
 /// Relevance score of an item for `query`, higher is better.

@@ -75,7 +75,9 @@ impl FlatpakInfo {
             Some(lang) => format!("https://flathub.org/api/v2/appstream/{app_id}?locale={lang}"),
             None => format!("https://flathub.org/api/v2/appstream/{app_id}"),
         };
-        Ok(reqwest::get(url)
+        Ok(crate::core::http_client::client()?
+            .get(url)
+            .send()
             .await
             .map_err(mx::ErrorKind::HttpError)?
             .error_for_status()
@@ -83,6 +85,11 @@ impl FlatpakInfo {
             .json::<Self>()
             .await
             .map_err(mx::ErrorKind::HttpError)?)
+    }
+
+    /// SPDX expression for the app, from the Flathub AppStream payload.
+    pub fn license(&self) -> Option<String> {
+        crate::core::license::from_flathub(self.project_license.as_deref(), self.is_free_license)
     }
 
     pub fn icon(&self) -> &str {

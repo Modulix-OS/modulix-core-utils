@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path;
 
 #[cfg(feature = "app-info-gui")]
 use tokio::sync::OnceCell;
@@ -53,6 +54,22 @@ fn collect_entries(file: &NixFile) -> mx::Result<Vec<(String, String)>> {
     Ok(entries)
 }
 
+/// Where `build_nix_expr` looks for nixpkgs in the configuration flake.
+///
+/// A Modulix configuration consumes nixpkgs *through* `mxpkgs` — its own
+/// inputs are `mxpkgs` and `nixos-hardware` only — so the direct
+/// `inputs.nixpkgs` this used to assume fails outright there with
+/// `attribute 'nixpkgs' missing`, taking the whole installed listing with it.
+/// The direct input is still tried first so a configuration that does expose
+/// nixpkgs keeps working.
+///
+/// Deliberately not `nixosConfigurations.<name>.pkgs`, which would be more
+/// faithful (overlays included) but evaluates the entire system configuration
+/// on every listing; `legacyPackages` is a cheap lookup.
+const NIXPKGS_LOOKUP: &str = "flake.inputs.nixpkgs \
+     or flake.inputs.mxpkgs.inputs.nixpkgs \
+     or (throw \"no nixpkgs input in the Modulix configuration flake\")";
+
 fn build_nix_expr(config_dir: &str, entries: &[(String, String)]) -> String {
     let nix_list = entries
         .iter()
@@ -60,7 +77,10 @@ fn build_nix_expr(config_dir: &str, entries: &[(String, String)]) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     format!(
-        "let pkgs = (builtins.getFlake \"{}\").inputs.nixpkgs.legacyPackages.${{builtins.currentSystem}}; in \
+        "let \
+           flake = builtins.getFlake \"{}\"; \
+           nixpkgs = {}; \
+           pkgs = nixpkgs.legacyPackages.${{builtins.currentSystem}}; in \
          builtins.listToAttrs \
            (builtins.filter (x: x != null) \
              (map (name: \
@@ -72,7 +92,7 @@ fn build_nix_expr(config_dir: &str, entries: &[(String, String)]) -> String {
                  version = pkg.version or \"\"; \
                }}; }}) \
              [ {} ]))",
-        config_dir, nix_list
+        config_dir, NIXPKGS_LOOKUP, nix_list
     )
 }
 
@@ -152,6 +172,11 @@ pub fn uninstall(config_dir: &str, packages: &[&str]) -> mx::Result<()> {
 }
 
 pub fn list_installed_package(config_dir: &str) -> mx::Result<Vec<NixPackage>> {
+    // No `package.nix` → nothing was ever installed. See
+    // [`list_installed_package_names`] for why the check lives here.
+    if !path::Path::new(&format!("{config_dir}{FILE_PACKAGE_PATH}")).exists() {
+        return Ok(Vec::new());
+    }
     transaction::make_transaction_read_only(
         "List installed package",
         config_dir,
@@ -159,4 +184,50 @@ pub fn list_installed_package(config_dir: &str) -> mx::Result<Vec<NixPackage>> {
         BuildCommand::Boot,
         |file| list_installed_package_no_transaction(config_dir, file),
     )
+}
+
+/// nixpkgs attributes listed in `environment.systemPackages`, without the
+/// `nix eval` [`list_installed_package`] pays to resolve pname/version/
+/// description. Parsing `package.nix` is all it takes to answer "is this
+/// installed?", which callers ask on hot paths (every store search).
+///
+/// A configuration where nothing has ever been installed has no `package.nix`
+/// at all: that is "no package installed", not an error (a read-only
+/// transaction does not create the file, it returns `FileNotFound`). The check
+/// is done here rather than by catching `FileNotFound` from the transaction,
+/// which also opens `configuration.nix` and would make a genuinely broken
+/// configuration look like an empty one.
+pub fn list_installed_package_names(config_dir: &str) -> mx::Result<Vec<String>> {
+    // Same concatenation as `NixFile::new`, which the transaction uses.
+    if !path::Path::new(&format!("{config_dir}{FILE_PACKAGE_PATH}")).exists() {
+        return Ok(Vec::new());
+    }
+    transaction::make_transaction_read_only(
+        "List installed package names",
+        config_dir,
+        FILE_PACKAGE_PATH,
+        BuildCommand::Boot,
+        |file| {
+            Ok(collect_entries(file)?
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect())
+        },
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_nix_expr_resolves_nixpkgs_through_mxpkgs() {
+        let expr = build_nix_expr("/etc/modulix-os/", &[("htop".into(), "out".into())]);
+        // The direct input stays first; the `mxpkgs` hop is what a real
+        // Modulix configuration actually needs (see `NIXPKGS_LOOKUP`).
+        assert!(expr.contains("flake.inputs.nixpkgs"));
+        assert!(expr.contains("flake.inputs.mxpkgs.inputs.nixpkgs"));
+        assert!(expr.contains("builtins.getFlake \"/etc/modulix-os/\""));
+        assert!(expr.contains("[ \"htop\" ]"));
+    }
 }
