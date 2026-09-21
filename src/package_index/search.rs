@@ -35,6 +35,21 @@ fn keyword_can_score(query_lc: &str, query_len: usize, attr: &str) -> bool {
     })
 }
 
+/// Cheap pre-check deciding whether a row could score above 0 in `score()`,
+/// so [`search`] can skip the allocating full scoring for rows that can't.
+///
+/// # Parameters
+/// * `query_lc` - the query, already lowercased.
+/// * `query_len` - the query's length in characters.
+/// * `row` - the candidate row.
+///
+/// # Returns
+/// `true` when the row's attribute or description contains the query, its
+/// attribute length is close enough to the query's for a Levenshtein match, or
+/// a keyword hit alone could score - a keyword hit is worth up to 400 points,
+/// independently of the name and the description, which is what lets
+/// `photoshop` reach `gimp` even though its attribute and description say
+/// nothing about it. `false` otherwise, meaning `score()` would return 0.
 fn prefilter(query_lc: &str, query_len: usize, row: &RowView<'_>) -> bool {
     if row.attr_lc.contains(query_lc) || row.desc_lc.contains(query_lc) {
         return true;
@@ -42,9 +57,6 @@ fn prefilter(query_lc: &str, query_len: usize, row: &RowView<'_>) -> bool {
     if row.attr_lc.chars().count().abs_diff(query_len) <= MAX_NAME_LEVENSHTEIN {
         return true;
     }
-    // A keyword hit alone is worth up to 400 points, independently of the name
-    // and the description: `photoshop` has to reach `gimp`, whose attribute and
-    // description say nothing about it.
     keyword_can_score(query_lc, query_len, row.attr)
 }
 

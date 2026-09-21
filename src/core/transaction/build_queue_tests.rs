@@ -33,13 +33,13 @@ fn enqueue_assigns_monotonic_increasing_seq() {
     assert!(t2.seq < t3.seq);
 }
 
+/// Nothing in front of the head ticket → `wait_turn` returns at once.
 #[test]
 fn head_ticket_can_proceed_immediately() {
     let _g = test_guard();
     reset_queue();
 
     let head = BuildQueue::enqueue().unwrap();
-    // Nothing in front → wait_turn returns at once.
     head.wait_turn().unwrap();
 }
 
@@ -55,6 +55,8 @@ fn drop_dequeues_and_removes_file() {
     assert!(!path.exists(), "Drop must remove the ticket file");
 }
 
+/// While `head` is alive and locked, the waiter is not at the head; releasing
+/// the head lets the waiter reach the head of the queue.
 #[test]
 fn waiter_blocks_until_head_drops() {
     let _g = test_guard();
@@ -63,7 +65,6 @@ fn waiter_blocks_until_head_drops() {
     let head = BuildQueue::enqueue().unwrap();
     let waiter = BuildQueue::enqueue().unwrap();
 
-    // While `head` is alive and locked, the waiter is not at the head.
     {
         let _meta = lock_meta().unwrap();
         assert!(
@@ -72,24 +73,22 @@ fn waiter_blocks_until_head_drops() {
         );
     }
 
-    // Releasing the head lets the waiter reach the head of the queue.
     drop(head);
     waiter.wait_turn().unwrap();
 }
 
+/// A ticket file left behind with no held lock (a process that crashed while
+/// queued) is a dead orphan; a higher-numbered live waiter must detect it,
+/// remove it, and become the head.
 #[test]
 fn stale_orphan_ticket_is_cleaned_up() {
     let _g = test_guard();
     reset_queue();
     fs::create_dir_all(QUEUE_DIR).unwrap();
 
-    // Forge an orphan ticket file with a low number and NO held lock,
-    // simulating a process that crashed while queued.
     let orphan = std::path::Path::new(QUEUE_DIR).join("1");
     fs::write(&orphan, b"").unwrap();
 
-    // A higher-numbered live waiter must detect the orphan as dead, remove it,
-    // and become the head.
     let waiter = Ticket {
         seq: 5,
         file: fs::OpenOptions::new()

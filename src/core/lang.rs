@@ -13,6 +13,13 @@ pub const DEFAULT_LANG: &str = "en";
 /// (`fr_FR.UTF-8@euro` → `fr`). Returns `None` for an empty locale, the neutral
 /// `C`/`POSIX` locales, and for [`DEFAULT_LANG`] — every case where the caller
 /// should serve the base English text.
+///
+/// # Parameters
+/// * `raw` - a POSIX locale string, as read from the environment.
+///
+/// # Returns
+/// The lowercased language subtag, or `None` for an empty, neutral or English
+/// locale.
 fn lang_from_locale(raw: &str) -> Option<String> {
     let lang = raw
         .split(['_', '.', '@'])
@@ -32,6 +39,14 @@ fn lang_from_locale(raw: &str) -> Option<String> {
 /// Resolution follows POSIX precedence `LC_ALL` → `LC_MESSAGES` → `LANG`, taking
 /// the first non-empty value's language subtag. Computed once and cached. A `None`
 /// result tells callers to skip overlay/`?locale` handling and serve the base text.
+///
+/// # Returns
+/// The language subtag of the first non-empty locale variable, or `None` when
+/// none is set or the locale is neutral or English.
+///
+/// # Post-conditions
+/// Computed on the first call and cached for the lifetime of the process: a
+/// later change to the environment has no effect.
 pub fn current_lang() -> Option<&'static str> {
     static LANG: OnceLock<Option<String>> = OnceLock::new();
     LANG.get_or_init(|| {

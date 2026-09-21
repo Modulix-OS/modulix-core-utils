@@ -26,10 +26,6 @@ use crate::mx;
 use std::fs;
 use tempfile::TempDir;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
 fn repo_path(dir: &TempDir) -> String {
     format!("{}/", dir.path().to_str().unwrap())
 }
@@ -53,7 +49,6 @@ fn setup_repo() -> TempDir {
     )
     .unwrap();
 
-    // A dummy flake.lock prevents commit_impl from running `nix flake update`.
     fs::write(dir.path().join("flake.lock"), "{}").unwrap();
 
     commit_all(&repo, "init");
@@ -108,9 +103,6 @@ fn disable_rebuild() -> fs::File {
     f
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Unit tests – no real Git repo
-// ─────────────────────────────────────────────────────────────────────────────
 mod unit {
     use crate::core::transaction::transaction::UpdateInput;
 
@@ -141,7 +133,9 @@ mod unit {
         );
     }
 
-    /// An empty description is accepted without error (no validation performed).
+    /// An empty description is accepted without error (no validation
+    /// performed); the error comes from the missing Git repo, not the empty
+    /// description.
     #[test]
     fn empty_description_does_not_error_on_construction() {
         let result: mx::Result<()> = make_transaction(
@@ -152,20 +146,14 @@ mod unit {
             UpdateInput::Keep,
             |_| Ok(()),
         );
-        // Error comes from the missing Git repo, not the empty description
         assert!(result.is_err());
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Integration tests – real Git repository
-// ─────────────────────────────────────────────────────────────────────────────
 mod integration {
     use crate::core::transaction::transaction::UpdateInput;
 
     use super::*;
-
-    // ── Happy path ────────────────────────────────────────────────────────────
 
     /// A successful closure commits its changes and returns the value.
     #[test]
@@ -173,7 +161,6 @@ mod integration {
         let dir = setup_repo();
         let path = repo_path(&dir);
         create_and_commit(&dir, "test.nix", "");
-        // Hold the build-queue lock so commit_impl skips the NixOS rebuild.
         let _guard = disable_rebuild();
 
         let result = make_transaction(
@@ -235,8 +222,6 @@ mod integration {
         assert_eq!(result.unwrap(), vec!["line1", "line2"]);
     }
 
-    // ── Rollback on error ─────────────────────────────────────────────────────
-
     /// An error in the closure triggers a rollback; the file on disk is unchanged.
     #[test]
     fn err_closure_triggers_rollback_and_file_unchanged() {
@@ -279,9 +264,11 @@ mod integration {
         assert!(matches!(result, Err(mx::ErrorKind::InvalidFile)));
     }
 
-    // ── Missing file ──────────────────────────────────────────────────────────
-
     /// When the target file does not exist, the closure is never called.
+    ///
+    /// Note: a missing file is *created* by `begin()` with the Nix skeleton,
+    /// so to get an error here the test uses a path inside a non-existent
+    /// sub-directory instead of a plain missing file.
     #[test]
     fn missing_file_errors_before_closure() {
         let dir = setup_repo();
@@ -290,8 +277,6 @@ mod integration {
         let closure_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = closure_called.clone();
 
-        // Note: a missing file is *created* by begin() with the Nix skeleton.
-        // To get an error we use a path inside a non-existent sub-directory.
         let result: mx::Result<()> = make_transaction(
             "missing file",
             &path,
@@ -310,8 +295,6 @@ mod integration {
             "closure must not be called when the file path is unreachable"
         );
     }
-
-    // ── Content visible after commit ──────────────────────────────────────────
 
     /// After a successful commit, the modified content is on disk.
     #[test]
@@ -341,9 +324,6 @@ mod integration {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// No-regression tests
-// ─────────────────────────────────────────────────────────────────────────────
 mod no_regression {
     use crate::core::transaction::transaction::UpdateInput;
 
@@ -380,7 +360,8 @@ mod no_regression {
         .unwrap();
     }
 
-    /// After a failed transaction, the repo is clean enough for the next one.
+    /// After a failed transaction, the repo is clean enough for the next one:
+    /// the second transaction must not get `GitNotCommitted`.
     ///
     /// Regression: rollback did not always restore the immutable flag, leaving
     /// the repo dirty and blocking the next `begin`.
@@ -391,7 +372,6 @@ mod no_regression {
         create_and_commit(&dir, "f.nix", "original");
         let _guard = disable_rebuild();
 
-        // First transaction: deliberate failure
         let _ = make_transaction::<_, ()>(
             "fail",
             &path,
@@ -401,7 +381,6 @@ mod no_regression {
             |_| Err(mx::ErrorKind::PermissionDenied),
         );
 
-        // Second transaction must not get GitNotCommitted
         let result = make_transaction::<_, ()>(
             "success",
             &path,
@@ -490,9 +469,6 @@ mod no_regression {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Stash tests via make_transaction
-// ─────────────────────────────────────────────────────────────────────────────
 mod stash {
     use crate::core::transaction::transaction::UpdateInput;
 
@@ -507,7 +483,6 @@ mod stash {
         create_and_commit(&dir, "target.nix", "original");
         let _guard = disable_rebuild();
 
-        // untracked bystander — must NOT be committed, so make_transaction stashes it
         let bystander = dir.path().join("bystander.nix");
         fs::write(&bystander, "bystander content").unwrap();
 
@@ -521,7 +496,6 @@ mod stash {
         )
         .unwrap();
 
-        // bystander must be back after the transaction
         assert!(
             bystander.exists(),
             "untracked file must be restored after commit"
@@ -564,7 +538,6 @@ mod stash {
         let path = repo_path(&dir);
         create_and_commit(&dir, "target.nix", "original");
         let _guard = disable_rebuild();
-        // untracked bystander triggers the stash
         fs::write(dir.path().join("bystander.nix"), "bystander").unwrap();
 
         make_transaction::<_, ()>(

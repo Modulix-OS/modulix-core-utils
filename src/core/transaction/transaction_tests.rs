@@ -25,10 +25,6 @@ use crate::mx;
 use std::fs;
 use tempfile::TempDir;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
 /// Returns the temp-dir path **with a trailing `/`** (required by NixFile).
 fn repo_path(dir: &TempDir) -> String {
     format!("{}/", dir.path().to_str().unwrap())
@@ -70,9 +66,6 @@ fn commit_all(repo: &git2::Repository, message: &str) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Unit tests – no I/O
-// ─────────────────────────────────────────────────────────────────────────────
 mod unit {
     use crate::core::transaction::transaction::{TransactionPermission, UpdateInput};
 
@@ -222,15 +215,10 @@ mod unit {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Integration tests – real Git repository
-// ─────────────────────────────────────────────────────────────────────────────
 mod integration {
     use crate::core::transaction::transaction::{TransactionPermission, UpdateInput};
 
     use super::*;
-
-    // ── begin ─────────────────────────────────────────────────────────────────
 
     /// `begin` succeeds on a clean Git repo.
     #[test]
@@ -248,11 +236,12 @@ mod integration {
         t.rollback().unwrap();
     }
 
-    /// `begin` fails when the directory is not a Git repository.
+    /// `begin` fails when the directory is not a Git repository; the test
+    /// creates `configuration.nix` first so `NixFile::begin` does not fail
+    /// before the Git check runs.
     #[test]
     fn begin_not_a_git_repo_errors() {
         let dir = TempDir::new().unwrap();
-        // create configuration.nix so NixFile::begin does not fail first
         fs::write(dir.path().join("configuration.nix"), "").unwrap();
         let mut t = Transaction::new(
             &repo_path(&dir),
@@ -299,8 +288,6 @@ mod integration {
         t.rollback().unwrap();
     }
 
-    // ── get_file ──────────────────────────────────────────────────────────────
-
     /// `get_file` on an unregistered path returns `FileNotFound`.
     #[test]
     fn get_file_unknown_path_errors() {
@@ -319,8 +306,6 @@ mod integration {
         ));
         t.rollback().unwrap();
     }
-
-    // ── rollback ──────────────────────────────────────────────────────────────
 
     /// `rollback` after `begin` succeeds and ends the transaction.
     #[test]
@@ -381,8 +366,6 @@ mod integration {
         assert_eq!(fs::read_to_string(&config_path).unwrap(), original);
     }
 
-    // ── commit ────────────────────────────────────────────────────────────────
-
     /// A commit with no diff does not create a new Git commit.
     #[test]
     fn commit_no_diff_does_not_create_git_commit() {
@@ -421,14 +404,12 @@ mod integration {
         assert!(!t.as_begin());
     }
 
-    // ── Dynamically created files ─────────────────────────────────────────────
-
     /// A missing file is created during `begin` and removed by `rollback`.
+    /// The `NixFile` path is `repo_path + "new_module.nix"` (direct concat).
     #[test]
     fn begin_creates_missing_file_rollback_removes_it() {
         let (dir, _repo) = setup_repo();
         let path = repo_path(&dir);
-        // The NixFile path is repo_path + "new_module.nix" (direct concat)
         let new_file = std::path::Path::new(&path).join("new_module.nix");
 
         assert!(!new_file.exists());
@@ -485,9 +466,6 @@ mod integration {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Non-regression tests
-// ─────────────────────────────────────────────────────────────────────────────
 mod no_regression {
     use crate::core::transaction::transaction::{TransactionPermission, UpdateInput};
 
@@ -664,20 +642,20 @@ mod no_regression {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Stash tests
-// ─────────────────────────────────────────────────────────────────────────────
 mod stash {
     use crate::core::transaction::transaction::{TransactionPermission, UpdateInput};
 
     use super::*;
 
-    /// `begin` on a repo with untracked files stashes them instead of failing.
+    /// `begin` on a repo with untracked files stashes them instead of
+    /// failing; before the stash was implemented, an untracked file here
+    /// would have caused `GitNotCommitted`. During the transaction, only
+    /// `configuration.nix` (the file opened by the transaction) may appear
+    /// in the untracked-aware status list.
     #[test]
     fn begin_stashes_untracked_files() {
         let (dir, repo) = setup_repo();
 
-        // Create an untracked file — would have caused GitNotCommitted before
         fs::write(dir.path().join("untracked.nix"), "untracked content").unwrap();
 
         let mut t = Transaction::new(
@@ -689,11 +667,9 @@ mod stash {
         .unwrap();
         assert!(t.begin().is_ok(), "begin should stash untracked files");
 
-        // The untracked file should be invisible during the transaction
         let statuses = repo
             .statuses(Some(git2::StatusOptions::new().include_untracked(true)))
             .unwrap();
-        // Only files opened by the transaction (configuration.nix) may appear
         assert!(
             statuses
                 .iter()
@@ -772,7 +748,6 @@ mod stash {
     fn begin_stashes_staged_changes() {
         let (dir, repo) = setup_repo();
 
-        // Stage a change to configuration.nix without committing
         fs::write(
             dir.path().join("extra.nix"),
             "{config, lib, pkgs, ...}:\n{\n}\n",
@@ -796,7 +771,6 @@ mod stash {
 
         t.rollback().unwrap();
 
-        // After rollback, staged file is restored
         assert!(
             dir.path().join("extra.nix").exists(),
             "staged file should be restored after rollback"
@@ -820,7 +794,6 @@ mod stash {
         t1.begin().unwrap();
         t1.rollback().unwrap();
 
-        // Second transaction: if a phantom stash existed it would pop the wrong entry
         let mut t2 = Transaction::new(
             &path,
             "tx2",

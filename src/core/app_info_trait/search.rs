@@ -6,6 +6,13 @@
 /// Edit distance, computed with two rolling rows (`O(min(m, n))` space)
 /// instead of a full `m × n` matrix — `score` runs this per keyword per
 /// candidate, so the allocation adds up across a whole search.
+///
+/// # Parameters
+/// * `a` - first string, compared by characters rather than bytes.
+/// * `b` - second string.
+///
+/// # Returns
+/// The number of single-character edits between the two; 0 when they are equal.
 fn levenshtein(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
@@ -28,6 +35,18 @@ fn levenshtein(a: &str, b: &str) -> usize {
 }
 
 /// Relevance score of an item for `query`, higher is better.
+///
+/// # Parameters
+/// * `name` - the item's name, which carries the most weight: an exact match is
+///   worth 1000 points, a prefix match 500, and a near-match up to 200.
+/// * `description` - its description, worth at most 50 points.
+/// * `keywords` - extra terms, each worth up to 400 points; they are what lets
+///   `photoshop` reach `gimp`.
+/// * `query` - the search terms; comparisons are case-insensitive.
+///
+/// # Returns
+/// The total score, which sums the contributions and is therefore unbounded in
+/// the number of keywords. 0 means "no match at all", which callers filter out.
 pub fn score(name: &str, description: &str, keywords: &[&str], query: &str) -> u32 {
     let query_lower = query.to_lowercase();
     let name_lower = name.to_lowercase();

@@ -48,6 +48,19 @@ impl BuildQueue {
     /// The whole section (counter increment + ticket file creation/locking) is
     /// protected by [`META_LOCK`], so no concurrent scan can observe an
     /// allocated number whose file does not exist yet.
+    ///
+    /// # Returns
+    /// The caller's [`Ticket`], already locked; it does *not* mean the turn has
+    /// come, only that the place in line is held.
+    ///
+    /// # Post-conditions
+    /// [`QUEUE_DIR`] exists and holds the ticket file. The meta lock is
+    /// released before returning, so other processes can enqueue in turn.
+    ///
+    /// # Errors
+    /// [`mx::ErrorKind::IOError`] if the queue directory or the ticket file
+    /// cannot be created, and [`mx::ErrorKind::FailToLock`] if the ticket's own
+    /// lock cannot be taken.
     pub fn enqueue() -> mx::Result<Ticket> {
         fs::create_dir_all(QUEUE_DIR).map_err(|e| io_error_at(QUEUE_DIR, e))?;
         let _meta = lock_meta()?;
@@ -63,12 +76,16 @@ impl BuildQueue {
         file.lock().map_err(|_| mx::ErrorKind::FailToLock)?;
 
         Ok(Ticket { seq, file, path })
-        // `_meta` is dropped here → meta lock released.
     }
 }
 
 /// A process's slot in the queue. While it lives, its ticket file stays locked;
 /// its `Drop` leaves the queue (unlock + remove the file).
+///
+/// # Fields
+/// * `seq` - the ticket number, which is the position in the FIFO order.
+/// * `file` - the ticket file, whose held flock proves the owner is alive.
+/// * `path` - that file's path, removed on drop.
 pub struct Ticket {
     seq: u64,
     file: File,
@@ -82,6 +99,16 @@ impl Ticket {
     /// tickets: a ticket still locked is a live waiter ahead of us; a ticket
     /// whose flock is free belongs to a dead process and is cleaned up. Once no
     /// live waiter remains ahead, we are at the head.
+    ///
+    /// # Post-conditions
+    /// Returns only once the turn has come, so the wait is unbounded: it lasts
+    /// as long as the rebuilds queued ahead. Blocks the calling thread, sleeping
+    /// [`POLL_INTERVAL`] between two checks. The place in line is only released
+    /// when the [`Ticket`] is dropped, not here.
+    ///
+    /// # Errors
+    /// [`mx::ErrorKind::FailToLock`] or [`mx::ErrorKind::IOError`] if the meta
+    /// lock or the queue directory becomes unusable.
     pub fn wait_turn(&self) -> mx::Result<()> {
         loop {
             {
@@ -94,13 +121,26 @@ impl Ticket {
         }
     }
 
-    /// Returns `true` if no live waiter precedes this ticket.
-    /// Must be called while holding [`META_LOCK`].
+    /// Tells whether this ticket is at the head of the queue.
+    ///
+    /// # Pre-conditions
+    /// Must be called while holding [`META_LOCK`], otherwise a concurrent
+    /// allocation could be missed by the scan.
+    ///
+    /// # Returns
+    /// `true` when no live waiter has a lower number.
+    ///
+    /// # Post-conditions
+    /// Scans every entry of [`QUEUE_DIR`], skipping [`META_LOCK`], [`SEQ_FILE`]
+    /// and any other non-numeric name, since only ticket files use a plain
+    /// integer. Tickets whose owner died are deleted along the way (crash
+    /// recovery), so the call has a cleanup side effect. A ticket file that
+    /// vanishes mid-scan (removed concurrently by its own owner) is treated as
+    /// nothing to wait for, not as an error.
     fn is_head(&self) -> mx::Result<bool> {
         for entry in fs::read_dir(QUEUE_DIR).map_err(mx::ErrorKind::IOError)? {
             let entry = entry.map_err(mx::ErrorKind::IOError)?;
             let name = entry.file_name();
-            // Ignore `.meta.lock`, `.seq` and any non-numeric name.
             let Ok(n) = name.to_string_lossy().parse::<u64>() else {
                 continue;
             };
@@ -111,16 +151,13 @@ impl Ticket {
             let path = entry.path();
             match File::open(&path) {
                 Ok(f) => match f.try_lock() {
-                    // Lockable → owner is dead → stale ticket, clean it up.
                     Ok(()) => {
                         let _ = f.unlock();
                         drop(f);
                         let _ = fs::remove_file(&path);
                     }
-                    // Already locked → live waiter ahead of us.
                     Err(_) => return Ok(false),
                 },
-                // File vanished in the meantime → nothing to wait for.
                 Err(_) => {
                     let _ = fs::remove_file(&path);
                 }
@@ -131,13 +168,30 @@ impl Ticket {
 }
 
 impl Drop for Ticket {
+    /// Leaves the queue: releases the ticket's lock and deletes its file.
+    ///
+    /// # Post-conditions
+    /// The next waiter can become the head. Failures are ignored - a leftover
+    /// file is picked up as a stale ticket by the next scan anyway.
     fn drop(&mut self) {
         let _ = self.file.unlock();
         let _ = fs::remove_file(&self.path);
     }
 }
 
-/// Opens and locks [`META_LOCK`]. The lock is released when the `File` is dropped.
+/// Opens and locks [`META_LOCK`].
+///
+/// # Returns
+/// The locked file; the lock lasts exactly as long as the returned handle, so
+/// the caller keeps it alive for its critical section.
+///
+/// # Post-conditions
+/// Blocks until the lock is free, since another process may be allocating a
+/// ticket or scanning the queue.
+///
+/// # Errors
+/// [`mx::ErrorKind::IOError`] if the lock file cannot be opened, and
+/// [`mx::ErrorKind::FailToLock`] if locking fails.
 fn lock_meta() -> mx::Result<File> {
     let file = OpenOptions::new()
         .write(true)
@@ -149,8 +203,23 @@ fn lock_meta() -> mx::Result<File> {
     Ok(file)
 }
 
-/// Reads, increments and rewrites the monotonic counter. Must be called while
-/// holding [`META_LOCK`].
+/// Allocates the next ticket number.
+///
+/// # Pre-conditions
+/// Must be called while holding [`META_LOCK`], since the read-increment-write
+/// is not atomic on its own.
+///
+/// # Returns
+/// The new number, one above the stored one; 1 when [`SEQ_FILE`] is missing,
+/// empty or unparseable - a corrupted counter restarts the numbering instead of
+/// failing.
+///
+/// # Post-conditions
+/// [`SEQ_FILE`] holds the number just returned.
+///
+/// # Errors
+/// [`mx::ErrorKind::IOError`] if the counter cannot be opened, read or
+/// rewritten.
 fn next_seq() -> mx::Result<u64> {
     let mut file = OpenOptions::new()
         .read(true)

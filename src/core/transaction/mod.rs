@@ -1,3 +1,12 @@
+//! The transactional core: a configuration edit and the `nixos-rebuild` that
+//! applies it, as one revertible unit.
+//!
+//! Three layers stack up here: [`file_lock::NixFile`] makes a single file's
+//! rewrite atomic, [`Transaction`] turns a set of files plus a rebuild into one
+//! git-versioned step, and `build_queue` serialises the rebuilds of concurrent
+//! processes. Domain modules do not drive them by hand: they call
+//! [`make_transaction`] (or [`make_transaction_read_only`]) with a closure.
+
 mod build_queue;
 pub mod file_lock;
 pub mod transaction;
@@ -28,7 +37,18 @@ pub use transaction::Transaction;
 /// * `config_dir`      – Root directory of the NixOS configuration.
 /// * `file_path`       – Relative path of the Nix file to edit.
 /// * `build_command`   – Command to run after the commit (e.g. `nixos-rebuild switch`).
+/// * `updated_input`   – How `flake.lock` is refreshed by the commit: keep every
+///   input pinned, update them all, or update the named ones only.
 /// * `f`               – Closure receiving the open [`NixFile`]; must return `mx::Result<R>`.
+///
+/// # Type parameters
+/// * `F` – the closure type.
+/// * `R` – value the closure produces, handed back on success.
+///
+/// # Post-conditions
+/// Blocks for the whole rebuild, which can take minutes and is serialised
+/// against the other processes' rebuilds. On any error the configuration is
+/// back to its previous commit, and no file lock is left held.
 ///
 /// # Returns
 /// Returns `Ok(R)` if the transaction completed successfully, or an
@@ -87,6 +107,29 @@ where
     }
 }
 
+/// Read-only counterpart of [`make_transaction`]: opens the file without the
+/// right to modify it, for a caller that only needs to read the configuration
+/// under the transaction's locks.
+///
+/// # Arguments
+/// * `description` – Human-readable label of the transaction.
+/// * `config_dir` – Root directory of the NixOS configuration.
+/// * `file_path` – Relative path of the Nix file to read.
+/// * `build_command` – Command the transaction is built with; no rebuild
+///   actually runs, since a read-only transaction produces no change to commit.
+/// * `f` – Closure receiving the open [`NixFile`] by shared reference.
+///
+/// # Type parameters
+/// * `F` – the closure type.
+/// * `R` – value the closure produces, handed back on success.
+///
+/// # Returns
+/// `Ok(R)` with the closure's value, or the first error met.
+///
+/// # Post-conditions
+/// The file is left untouched: an attempt to edit it through
+/// `get_mut_file_content` fails with [`mx::ErrorKind::PermissionDenied`]. The
+/// file lock is released either way.
 pub fn make_transaction_read_only<F, R>(
     description: &str,
     config_dir: &str,

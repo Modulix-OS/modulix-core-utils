@@ -1,3 +1,7 @@
+//! Building blocks the public modules are written against: Nix file editing
+//! (options, lists, parameters, transactions), `nix` evaluation, the shared
+//! HTTP client, and the app-metadata traits.
+
 #[cfg(feature = "core-nix-file")]
 pub mod list;
 
@@ -31,6 +35,7 @@ pub mod license;
 #[cfg(any(feature = "module-info", feature = "app-info-gui"))]
 pub mod lang;
 
-//pub mod utils;
+/// Indentation width, in spaces, of every configuration snippet this crate
+/// writes.
 #[cfg(feature = "core-nix-file")]
 pub const TABULATION_SIZE: usize = 2;

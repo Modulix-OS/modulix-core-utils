@@ -1,3 +1,6 @@
+//! [`Transaction`]: a set of configuration files plus the rebuild that applies
+//! them, committed to git or rolled back as one unit.
+
 use std::{collections::HashMap, fs, io, path, process};
 
 use super::build_queue::BuildQueue;
@@ -9,6 +12,11 @@ use crate::{
     mx,
 };
 
+/// Sentinel whose presence-and-lockability tells a commit to skip the rebuild.
+///
+/// A test holds the lock on this file for as long as it wants commits to stay
+/// purely textual; a commit that finds the lock taken edits and commits, but
+/// runs no `nixos-rebuild`.
 pub(crate) const LOCK_SKIP_REBUILD_FILE: &str = "/tmp/mx-skip-rebuild.lock";
 
 /// `nixos-rebuild` (or `nixos-install`) command to run after a successful commit.
@@ -30,24 +38,52 @@ pub enum BuildCommand {
     BuildVm,
 }
 
+/// How the commit refreshes `flake.lock`.
+///
+/// # Variants
+/// * `Keep` - leave every input pinned where it is.
+/// * `UpdateAll` - `nix flake update`, refreshing every input.
+/// * `UpdateSelected` - refresh only the named inputs, which is what an
+///   operation touching one input uses.
 pub enum UpdateInput {
     Keep,
     UpdateAll,
     UpdateSelected(Vec<String>),
 }
 
+/// What a transaction is allowed to do with the configuration.
+///
+/// # Variants
+/// * `ReadOnly` - files can be read under the transaction's locks, but not
+///   edited, and there is nothing to commit.
+/// * `Writtable` - files can be edited, committed and rebuilt.
 pub enum TransactionPermission {
     ReadOnly,
     Writtable,
 }
 
 impl From<&TransactionPermission> for bool {
+    /// Reduces a permission to its writability bit.
+    ///
+    /// # Parameters
+    /// * `p` - the permission to convert.
+    ///
+    /// # Returns
+    /// `true` for `Writtable`, `false` for `ReadOnly`.
     fn from(p: &TransactionPermission) -> bool {
         matches!(p, TransactionPermission::Writtable)
     }
 }
 
 impl From<&TransactionPermission> for NixFilePermission {
+    /// Propagates a transaction's permission to the files it opens.
+    ///
+    /// # Parameters
+    /// * `p` - the transaction's permission.
+    ///
+    /// # Returns
+    /// The matching [`NixFilePermission`], so no file can be more permissive
+    /// than its transaction.
     fn from(p: &TransactionPermission) -> NixFilePermission {
         match p {
             TransactionPermission::ReadOnly => NixFilePermission::ReadOnly,
@@ -55,10 +91,6 @@ impl From<&TransactionPermission> for NixFilePermission {
         }
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// LockFile – lightweight POSIX file lock
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// File lock used to serialize NixOS builds.
 ///
@@ -80,10 +112,17 @@ impl LockFile {
     /// another user (a root run, then a user run, or the reverse) — a
     /// create-always open would then fail with `EACCES` for no good reason.
     ///
+    /// # Arguments
+    /// * `path` – Sentinel file to lock; it is created if missing.
+    ///
     /// # Returns
     /// * `Ok(Some(lock))` – Lock acquired.
     /// * `Ok(None)`       – The file is already locked by another process.
     /// * `Err(_)`         – Unexpected I/O error.
+    ///
+    /// # Post-conditions
+    /// Never blocks. The lock lives until [`LockFile::unlock`] or, failing
+    /// that, until the process exits.
     pub fn try_lock(path: &str) -> mx::Result<Option<Self>> {
         let opened = match fs::OpenOptions::new().read(true).open(path) {
             Ok(f) => Ok(f),
@@ -103,6 +142,10 @@ impl LockFile {
     }
 
     /// Releases the lock and closes the handle. No-op if already unlocked.
+    ///
+    /// # Post-conditions
+    /// The sentinel file is left on disk, only unlocked. A failure to unlock is
+    /// swallowed: the kernel releases it at process exit anyway.
     pub fn unlock(&mut self) {
         if self.file.is_some() {
             self.file.as_mut().unwrap().unlock().unwrap_or_default();
@@ -110,10 +153,6 @@ impl LockFile {
         self.file = None;
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// BuildCommand – rebuild command selection
-// ─────────────────────────────────────────────────────────────────────────────
 
 impl BuildCommand {
     /// Returns the argument passed to `nixos-rebuild` for this command.
@@ -125,6 +164,10 @@ impl BuildCommand {
     ///
     /// In debug mode: all variants return `"build-vm"` so as not to modify the
     /// host system.
+    ///
+    /// # Returns
+    /// The subcommand to hand `nixos-rebuild`; the empty string for `Install`,
+    /// which uses `nixos-install` instead and ignores this value.
     #[cfg(not(debug_assertions))]
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -135,6 +178,11 @@ impl BuildCommand {
         }
     }
 
+    /// Debug-build counterpart of the release `as_str`.
+    ///
+    /// # Returns
+    /// Always `"build-vm"`, so a development run builds a VM image instead of
+    /// touching the host system, whatever the variant asked for.
     #[cfg(debug_assertions)]
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -145,10 +193,6 @@ impl BuildCommand {
         }
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Transaction
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Atomic unit of work on a NixOS configuration Git repository.
 ///
@@ -199,6 +243,7 @@ pub struct Transaction<'a> {
     /// Restored automatically by [`commit`] and [`rollback`].
     stash_oid: Option<git2::Oid>,
 
+    /// Whether this transaction may edit and commit, or only read.
     permission_transaction: TransactionPermission,
 }
 
@@ -211,6 +256,15 @@ impl<'a> Transaction<'a> {
     /// * `config_dir`               – Path to the NixOS Git repository.
     /// * `transaction_description`  – Git commit message.
     /// * `build_type`               – Command to run after the commit.
+    /// * `permission`               – Whether the files may be edited or only read.
+    ///
+    /// # Returns
+    /// A transaction that is not open yet: [`Transaction::add_file`] then
+    /// [`Transaction::begin`] are what touch the repository.
+    ///
+    /// # Post-conditions
+    /// The author and committer identity of the future commit is fixed to
+    /// `Modulix-OS <modulix.os@ik-mail.com>`, not the caller's git identity.
     pub fn new(
         config_dir: &str,
         transaction_description: &str,
@@ -236,13 +290,32 @@ impl<'a> Transaction<'a> {
     /// * [`BuildCommand::Install`] → `nixos-install --root /mnt --no-root-password --flake …`
     /// * [`BuildCommand::Switch`] / [`BuildCommand::Boot`] / [`BuildCommand::BuildVm`] →
     ///   `nixos-rebuild <cmd> --flake …`. `build-vm` drops its `result` symlink in
-    ///   the calling process's working directory.
+    ///   the calling process's working directory (no `--out-link` is passed), so
+    ///   the caller picks where it lands by setting its own cwd - deliberately
+    ///   not the config repo, which git watches.
     ///
     /// Standard output is inherited (visible in the parent terminal); standard
     /// error is captured into `stderr` if provided.
     ///
+    /// # Arguments
+    /// * `path_config`   – Repository holding the flake to build.
+    /// * `config_name`   – `nixosConfigurations` attribute to build.
+    /// * `build_command` – Which rebuild to run.
+    /// * `stderr`        – Buffer the child's stderr is appended to, for the
+    ///   caller to put in a [`mx::ErrorKind::BuildError`]; pass `None` to
+    ///   discard it.
+    ///
     /// # Returns
     /// `Ok(true)` if the process exited successfully (code 0), `Ok(false)` otherwise.
+    ///
+    /// # Post-conditions
+    /// Blocks for the whole rebuild. On success with `Switch` the running system
+    /// has already changed - this is the point of no return the rollback cannot
+    /// undo by itself.
+    ///
+    /// # Errors
+    /// [`mx::ErrorKind::IOError`] if the process cannot be spawned or waited
+    /// for; a non-zero exit is reported as `Ok(false)`, not as an error.
     fn rebuild_config(
         path_config: &str,
         config_name: &str,
@@ -260,9 +333,6 @@ impl<'a> Transaction<'a> {
                 .stderr(process::Stdio::piped())
                 .spawn()
                 .map_err(mx::ErrorKind::IOError)?,
-            // `build-vm` writes `./result` in the process's cwd (no `--out-link`),
-            // so the caller picks where it lands by setting its own working
-            // directory — deliberately not the config repo, which git watches.
             BuildCommand::Switch | BuildCommand::Boot | BuildCommand::BuildVm => {
                 process::Command::new("nixos-rebuild")
                     .arg(build_command.as_str())
@@ -316,14 +386,19 @@ impl<'a> Transaction<'a> {
         }))
     }
 
-    /// Returns `true` if `flake.lock` physically exists in the repository directory.
+    /// Path of the repository's `flake.lock`.
     ///
-    /// If the file is absent, a `nix flake update` will be run before the commit
-    /// to generate the initial lockfile.
+    /// # Returns
+    /// `<git_repo_path>/flake.lock`, whether the file exists or not.
     fn flake_lock_path(&self) -> path::PathBuf {
         path::Path::new(&self.git_repo_path).join("flake.lock")
     }
 
+    /// Whether `flake.lock` physically exists in the repository directory.
+    ///
+    /// # Returns
+    /// `true` when the file is there. If it is absent, a `nix flake update` is
+    /// run before the commit to generate the initial lockfile.
     fn flake_lock_exists(&self) -> bool {
         self.flake_lock_path().exists()
     }
@@ -340,6 +415,18 @@ impl<'a> Transaction<'a> {
     /// * `author`      – Author signature.
     /// * `committer`   – Committer signature.
     /// * `message`     – Commit message.
+    ///
+    /// # Pre-conditions
+    /// The transaction must be open, and the files to record must already be in
+    /// the index (see [`Transaction::git_add`]).
+    ///
+    /// # Post-conditions
+    /// The commit becomes the new tip of `update_ref`, and its OID is what a
+    /// rollback moves away from.
+    ///
+    /// # Errors
+    /// [`mx::ErrorKind::GitError`] on any libgit2 failure, and
+    /// [`mx::ErrorKind::TransactionNotBegin`] outside an open transaction.
     fn git_commit(
         &self,
         update_ref: Option<&str>,
@@ -354,7 +441,6 @@ impl<'a> Transaction<'a> {
             .index()
             .map_err(mx::ErrorKind::GitError)?;
 
-        // Include flake.lock if modified
         if self.flake_lock_modified()? {
             index
                 .add_path(std::path::Path::new("flake.lock"))
@@ -370,7 +456,6 @@ impl<'a> Transaction<'a> {
             .find_tree(tree_oid)
             .map_err(mx::ErrorKind::GitError)?;
 
-        // Get the parent commit if it exists (None for the first commit)
         let parent = self
             .git_repo
             .as_ref()
@@ -395,6 +480,19 @@ impl<'a> Transaction<'a> {
     /// Git commit, avoiding empty commits.
     ///
     /// If `oid` is zero (empty repository), the file is always considered new.
+    ///
+    /// # Arguments
+    /// * `repo`      – Repository to inspect.
+    /// * `oid`       – Commit to compare against, usually the transaction's
+    ///   `old_commit`.
+    /// * `file_path` – Path of the file, relative to the repository root.
+    ///
+    /// # Returns
+    /// `true` when the working tree or the index differs from `oid` for that
+    /// file, or when the file is new.
+    ///
+    /// # Errors
+    /// [`mx::ErrorKind::GitError`] if the file's status cannot be read.
     fn has_diff_with_commit(
         repo: &git2::Repository,
         oid: git2::Oid,
@@ -410,7 +508,6 @@ impl<'a> Transaction<'a> {
             .status_file(path::Path::new(file_path))
             .map_err(mx::ErrorKind::GitError)?;
 
-        // New file: necessarily different
         if status.contains(git2::Status::WT_NEW) || status.contains(git2::Status::INDEX_NEW) {
             return Ok(true);
         }
@@ -424,6 +521,21 @@ impl<'a> Transaction<'a> {
     }
 
     /// Adds a file to the Git index (equivalent to `git add <path>`).
+    ///
+    /// # Arguments
+    /// * `path` – Path of the file, relative to the repository root.
+    ///
+    /// # Pre-conditions
+    /// The transaction must be open; this panics otherwise, as it is only
+    /// called from the commit path.
+    ///
+    /// # Post-conditions
+    /// The index is written to disk, so the staged state survives a crash before
+    /// the commit.
+    ///
+    /// # Errors
+    /// [`mx::ErrorKind::GitError`] if the path cannot be staged or the index
+    /// cannot be written.
     fn git_add(&self, path: &str) -> Result<(), mx::ErrorKind> {
         let repo = self.git_repo.as_ref().unwrap();
         let mut index = repo.index().map_err(mx::ErrorKind::GitError)?;
@@ -454,6 +566,10 @@ impl<'a> Transaction<'a> {
     }
 
     /// Reports whether a transaction is currently active.
+    ///
+    /// # Returns
+    /// `true` between [`Transaction::begin`] and the commit or rollback that
+    /// closes it.
     #[allow(dead_code)]
     pub fn as_begin(&self) -> bool {
         self.git_repo.is_some()
@@ -461,8 +577,15 @@ impl<'a> Transaction<'a> {
 
     /// Returns a mutable reference to the [`NixFile`] associated with `path`.
     ///
+    /// # Arguments
+    /// * `path` – Path the file was registered under, as given to `add_file`.
+    ///
+    /// # Returns
+    /// The open file, ready to be edited in memory.
+    ///
     /// # Errors
     /// * `mx::ErrorKind::TransactionNotBegin` – `begin` has not been called yet.
+    /// * `mx::ErrorKind::PermissionDenied`    – the transaction is read-only.
     /// * `mx::ErrorKind::FileNotFound`        – `path` was not added via `add_file`.
     pub fn get_file_mut(&mut self, path: &str) -> mx::Result<&mut NixFile> {
         if self.git_repo.is_none() {
@@ -476,6 +599,18 @@ impl<'a> Transaction<'a> {
             .ok_or(mx::ErrorKind::FileNotFound)
     }
 
+    /// Returns a shared reference to the [`NixFile`] associated with `path`.
+    ///
+    /// # Arguments
+    /// * `path` – Path the file was registered under.
+    ///
+    /// # Returns
+    /// The open file, for reading only; allowed whatever the transaction's
+    /// permission.
+    ///
+    /// # Errors
+    /// * `mx::ErrorKind::TransactionNotBegin` – `begin` has not been called yet.
+    /// * `mx::ErrorKind::FileNotFound`        – `path` was not added via `add_file`.
     pub fn get_file(&mut self, path: &str) -> mx::Result<&NixFile> {
         if self.git_repo.is_none() {
             return Err(mx::ErrorKind::TransactionNotBegin);
@@ -495,6 +630,16 @@ impl<'a> Transaction<'a> {
     ///    them to the `imports` list of `configuration.nix`.
     /// 5. Captures the OID of the current HEAD commit for a possible rollback.
     ///
+    /// # Pre-conditions
+    /// `git_repo_path` must be a git repository; a plain directory is refused.
+    ///
+    /// # Post-conditions
+    /// Every registered file is locked until the commit or the rollback, so this
+    /// blocks on a file another transaction holds. The caller's uncommitted work
+    /// is stashed away and restored at the end. From here on, one of
+    /// [`Transaction::commit`] or [`Transaction::rollback`] must be reached,
+    /// otherwise the locks leak for the lifetime of the process.
+    ///
     /// # Errors
     /// * `mx::ErrorKind::GitError`                – Repository not found or Git error.
     /// * `mx::ErrorKind::TransactionAlreadyBegin` – `begin` already called.
@@ -512,8 +657,6 @@ impl<'a> Transaction<'a> {
                 .is_empty()
                 .map_err(mx::ErrorKind::GitError)?;
 
-            // If the repository contains uncommitted changes, stash them to work
-            // on a clean tree and restore them afterwards.
             if !is_empty {
                 let is_dirty = {
                     let mut opts = git2::StatusOptions::new();
@@ -525,7 +668,7 @@ impl<'a> Transaction<'a> {
                         .statuses(Some(&mut opts))
                         .map_err(mx::ErrorKind::GitError)?;
                     !statuses.is_empty()
-                }; // `statuses` is dropped here, releasing the immutable borrow
+                };
 
                 if is_dirty {
                     let stash_oid = self
@@ -548,8 +691,6 @@ impl<'a> Transaction<'a> {
                     Err(mx::ErrorKind::FileNotFound)
                         if let TransactionPermission::Writtable = self.permission_transaction =>
                     {
-                        // The file does not exist yet: create it and note that it
-                        // must be declared in configuration.nix
                         file.create_file()?;
                         file.begin(NixFilePermission::Writtable)?;
                         new_file.push(path_file.clone());
@@ -558,7 +699,6 @@ impl<'a> Transaction<'a> {
                 }
             }
 
-            // Capture the current commit for rollback
             self.old_commit = match self.git_repo.as_ref().unwrap().head() {
                 Ok(head) => head.peel_to_commit().map_err(mx::ErrorKind::GitError)?.id(),
                 Err(e)
@@ -571,7 +711,6 @@ impl<'a> Transaction<'a> {
             };
         }
         if let TransactionPermission::Writtable = self.permission_transaction {
-            // Add the new files to the imports list of configuration.nix
             let config_file = self.get_file_mut("configuration.nix")?;
             let import_file = mxList::new("imports", true);
             for path in new_file {
@@ -588,6 +727,15 @@ impl<'a> Transaction<'a> {
     ///
     /// If `stash_pop` fails (conflict), the stash entry is dropped instead; either
     /// way `stash_oid` is reset to avoid a double attempt.
+    ///
+    /// # Post-conditions
+    /// No stash entry of this transaction is left behind, and a conflicting
+    /// stash is discarded rather than reported - the caller's uncommitted work
+    /// is then lost, which is the price of keeping the repository usable. A
+    /// no-op when `begin` had nothing to stash.
+    ///
+    /// # Errors
+    /// [`mx::ErrorKind::TransactionNotBegin`] outside an open transaction.
     fn stash_restore(&mut self) -> mx::Result<()> {
         if self.stash_oid.take().is_some() {
             match self.git_repo.as_mut().unwrap().stash_pop(0, None) {
@@ -615,6 +763,34 @@ impl<'a> Transaction<'a> {
     ///    b. Create the Git commit.
     ///    c. Enter the FIFO build queue and, once at the head, run `nixos-rebuild`.
     /// 4. Close all [`NixFile`]s and release the Git repository.
+    ///
+    /// # Arguments
+    /// * `update_input` – How `flake.lock` is refreshed before the commit.
+    ///
+    /// # Post-conditions
+    /// A commit is only created when a file genuinely changed, so an operation
+    /// that changes nothing leaves no empty commit and runs no rebuild. The
+    /// rebuild is serialised against the other processes' rebuilds, so the call
+    /// can block well beyond its own build time. The transaction is closed on
+    /// success: the files are unlocked and the repository handle is dropped.
+    ///
+    /// # `flake.lock` immutability
+    /// When `update_input` requires running `nix flake update` on an existing
+    /// lockfile, the file's immutable flag (set by `init` like every other base
+    /// file) is cleared first, since `nix flake update` rewrites it in place,
+    /// and restored right after - but only if it *was* set: on a config repo
+    /// not produced by `init` the file is writable on purpose, and sealing it
+    /// here would permanently break the admin's own `nix flake update`. This is
+    /// a no-op on a file that is not root-owned (dev checkouts). The `nix`
+    /// command's own result is checked before the re-seal's, so a failure to
+    /// re-seal never masks the actual `nix flake update` error.
+    ///
+    /// # Errors
+    /// [`mx::ErrorKind::BuildError`] with the rebuild's stderr,
+    /// [`mx::ErrorKind::GitError`], [`mx::ErrorKind::IOError`], or
+    /// [`mx::ErrorKind::TransactionNotBegin`] outside an open transaction. On
+    /// error the files may already have been written to disk - it is
+    /// [`Transaction::commit`] that turns that into a rollback.
     fn commit_impl(&mut self, update_input: UpdateInput) -> mx::Result<()> {
         if self.git_repo.is_none() {
             return Err(mx::ErrorKind::TransactionNotBegin);
@@ -638,7 +814,6 @@ impl<'a> Transaction<'a> {
         }
 
         if need_modif {
-            // Generate flake.lock if it does not exist yet
             if !self.flake_lock_exists() {
                 process::Command::new("nix")
                     .args(["flake", "update"])
@@ -656,13 +831,6 @@ impl<'a> Transaction<'a> {
                     UpdateInput::Keep => vec![],
                 };
                 if !command.is_empty() {
-                    // `init` seals flake.lock immutable like every other base
-                    // file, and `nix flake update` rewrites it in place — clear
-                    // the flag for the call, restore it right after. Only restore
-                    // it if it *was* set: on a config repo not produced by `init`
-                    // the file is writable on purpose, and sealing it here would
-                    // permanently break the admin's own `nix flake update`.
-                    // No-op when the file is not root-owned (dev checkouts).
                     let lock_path = self.flake_lock_path();
                     let lock_path = lock_path.to_str().ok_or(mx::ErrorKind::InvalidFile)?;
                     let was_immutable = NixFile::is_immutable(lock_path)?;
@@ -677,23 +845,16 @@ impl<'a> Transaction<'a> {
                     } else {
                         Ok(())
                     };
-                    // `result` first: a failure to re-seal must not mask the
-                    // actual `nix flake update` error.
                     result?;
                     resealed?;
                 }
             }
             self.git_commit(Some("HEAD"), &self.git_user, &self.git_user, &self.info)?;
 
-            // Test/maintenance hook: if the sentinel is already held, skip the
-            // rebuild (tests hold it to avoid nixos-rebuild and to serialize
-            // access to the shared fixture repo).
             let skip = LockFile::try_lock(LOCK_SKIP_REBUILD_FILE)?;
             if let Some(mut sentinel) = skip {
-                sentinel.unlock(); // sentinel free → real run
+                sentinel.unlock();
 
-                // Strict FIFO queue: a single operation is rebuilt at a time, in
-                // arrival order. Blocks until at the head of the queue.
                 let ticket = BuildQueue::enqueue()?;
                 ticket.wait_turn()?;
 
@@ -704,7 +865,6 @@ impl<'a> Transaction<'a> {
                     self.build_type.clone(),
                     Some(&mut stderr),
                 )?;
-                // `ticket` is dropped at the end of the block (or on early-return) → dequeue.
                 if !success {
                     return Err(mx::ErrorKind::BuildError(stderr));
                 }
@@ -714,7 +874,6 @@ impl<'a> Transaction<'a> {
         for (_, nix_file) in self.list_file.iter_mut() {
             nix_file.close()?;
         }
-        // Restore the changes stashed before the transaction
         self.stash_restore()?;
         self.git_repo = None;
         Ok(())
@@ -723,6 +882,24 @@ impl<'a> Transaction<'a> {
     ///
     /// On internal failure, an automatic [`rollback`] is attempted before
     /// propagating the error.
+    ///
+    /// # Arguments
+    /// * `update_input` – How `flake.lock` is refreshed before the commit.
+    ///
+    /// # Pre-conditions
+    /// The transaction must be open and writable.
+    ///
+    /// # Post-conditions
+    /// On success the change is committed to git and, unless nothing changed,
+    /// applied by the rebuild. On failure the configuration is back to
+    /// `old_commit` and the files are unlocked. A `Switch` rebuild that fails
+    /// midway is the one case the rollback cannot fully undo: the configuration
+    /// is restored, but whatever the rebuild already did to the running system
+    /// is not. Blocks for the whole rebuild.
+    ///
+    /// # Errors
+    /// As in [`Transaction::commit_impl`]; the rollback's own error, if any, is
+    /// swallowed so the original cause is the one reported.
     pub fn commit(&mut self, update_input: UpdateInput) -> mx::Result<()> {
         self.commit_impl(update_input).map_err(|e| {
             let _ = self.rollback();
@@ -734,25 +911,39 @@ impl<'a> Transaction<'a> {
     ///
     /// Steps:
     /// 1. If the repository was empty at `begin` (`old_commit` zero): close the
-    ///    files and return without touching Git.
+    ///    files and return without touching Git. There is nothing to check out,
+    ///    but the files `begin` created still have to go - otherwise a failed
+    ///    first transaction (typically `init`, whose repo is unborn by
+    ///    construction) leaves the empty `{ }` skeletons behind and the next run
+    ///    sees a half-populated config directory.
     /// 2. Otherwise: repoint the current branch to `old_commit` and perform a
     ///    `checkout --force` to restore the working tree.
     /// 3. Remove the files created during the transaction; re-apply the immutable
     ///    flag on the restored pre-existing files.
     ///
+    /// # Immutable flag vs. `checkout_head`
+    /// `flake.lock` is rewritten and re-sealed during `commit_impl` but no
+    /// `NixFile` owns it, so it is made mutable separately before the checkout;
+    /// every tracked file is made mutable for the same reason. Left immutable,
+    /// `checkout_head` fails with `EPERM` while restoring the previous file and
+    /// the rollback aborts with HEAD already moved.
+    ///
+    /// # Post-conditions
+    /// Every [`NixFile`] is closed - which is mandatory, since a leaked flock
+    /// would block every later `begin` - the immutable flags are back, and the
+    /// stash `begin` took is restored. The repository handle is dropped, so the
+    /// transaction cannot be reused.
+    ///
     /// # Errors
-    /// `mx::ErrorKind::TransactionNotBegin` if no transaction is active.
+    /// `mx::ErrorKind::TransactionNotBegin` if no transaction is active, plus
+    /// [`mx::ErrorKind::GitError`] or [`mx::ErrorKind::IOError`] if the previous
+    /// state cannot be restored.
     pub fn rollback(&mut self) -> mx::Result<()> {
         if self.git_repo.is_none() {
             return Err(mx::ErrorKind::TransactionNotBegin);
         }
 
         {
-            // Special case: empty repository, no commit to restore. There is
-            // nothing to check out, but the files `begin` created still have to
-            // go: otherwise a failed first transaction (typically `init`, whose
-            // repo is unborn by construction) leaves the empty `{ }` skeletons
-            // behind and the next run sees a half-populated config directory.
             if self.old_commit.is_zero() {
                 for (_, nix_file) in self.list_file.iter_mut() {
                     let _ = nix_file.close();
@@ -765,10 +956,6 @@ impl<'a> Transaction<'a> {
                 return Ok(());
             }
 
-            // `flake.lock` is rewritten and re-sealed during `commit_impl` but no
-            // NixFile owns it, so the make_mutable loop below never reaches it.
-            // Left immutable, `checkout_head` fails with EPERM while restoring the
-            // previous lock file and the rollback aborts with HEAD already moved.
             let flake_lock = self.flake_lock_path();
             let flake_lock = flake_lock.to_str().unwrap_or_default().to_owned();
             let flake_lock_sealed =
@@ -784,7 +971,6 @@ impl<'a> Transaction<'a> {
                 mx::ErrorKind::GitError(git2::Error::from_str("HEAD is not a symbolic ref"))
             })?;
 
-            // Repoint the HEAD reference to the old commit
             repo.find_reference(refname)
                 .map_err(mx::ErrorKind::GitError)?
                 .set_target(self.old_commit, "reset to previous commit")
@@ -792,20 +978,15 @@ impl<'a> Transaction<'a> {
 
             repo.set_head(refname).map_err(mx::ErrorKind::GitError)?;
 
-            // Make the files mutable so checkout can overwrite them
             for (_, nix_file) in self.list_file.iter_mut() {
                 NixFile::make_mutable(nix_file.get_file_path()).ok();
             }
 
-            // Force the working tree restoration
             let mut checkout = git2::build::CheckoutBuilder::new();
             checkout.force();
             repo.checkout_head(Some(&mut checkout))
                 .map_err(mx::ErrorKind::GitError)?;
 
-            // Post-checkout cleanup:
-            // - Files created during the transaction → removed
-            // - Pre-existing files → immutable flag re-applied
             for (_, nix_file) in self.list_file.iter_mut() {
                 if nix_file.was_created() {
                     NixFile::make_mutable(nix_file.get_file_path()).ok();
@@ -818,14 +999,10 @@ impl<'a> Transaction<'a> {
                 NixFile::make_immutable(&flake_lock).ok();
             }
 
-            // Release the locks and reset the state of each NixFile.
-            // Without this close(), the file lock would stay active after rollback,
-            // blocking any later begin() on the same file indefinitely.
             for (_, nix_file) in self.list_file.iter_mut() {
                 let _ = nix_file.close();
             }
         }
-        // Restore the changes stashed before the transaction
         self.stash_restore()?;
         self.git_repo = None;
         Ok(())

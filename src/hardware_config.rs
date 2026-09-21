@@ -1,3 +1,7 @@
+//! Generates the configuration's `hardware-configuration.nix` from what the
+//! machine actually is: the `nixos-generate-config` output plus the
+//! `nixos-hardware` modules [`crate::detect_hardware`] selects.
+
 use std::process;
 
 use crate::{
@@ -14,8 +18,35 @@ use crate::{
     mx,
 };
 
+/// Configuration file, relative to the config directory, holding the generated
+/// hardware configuration.
 const HARDWARE_CONFIG_PATH: &str = "hardware-configuration.nix";
 
+/// Regenerates `hardware-configuration.nix` in an already-open file.
+///
+/// # Parameters
+/// * `root_path` - root the detection runs against; anything other than `/` is
+///   passed as `--root`, which is how the installer targets the system being
+///   installed rather than the live one.
+/// * `hardware_file` - the open configuration file, whose whole content is
+///   replaced.
+///
+/// # Post-conditions
+/// The file becomes `nixos-generate-config --show-hardware-config
+/// --no-filesystems` (mount points stay in `fstab.nix`, see
+/// [`crate::filesystem`]), takes `nixos-hardware` as a module parameter, and
+/// imports one `nixos-hardware.nixosModules.*` per driver module detected.
+/// Anything the file held before is discarded.
+///
+/// # Pre-conditions
+/// `nixos-generate-config` must be on `PATH`, and the hardware probes
+/// [`crate::detect_hardware`] runs need `pciutils`/`usbutils`/`cpuid`.
+///
+/// # Errors
+/// [`mx::ErrorKind::IOError`] if the generator cannot be spawned,
+/// [`mx::ErrorKind::InvalidFile`] if its output is not UTF-8, plus any error
+/// from hardware detection. A non-zero exit status of the generator is not
+/// reported on its own.
 pub fn write_hardware_config_no_transaction(
     root_path: &str,
     hardware_file: &mut NixFile,
@@ -51,6 +82,17 @@ pub fn write_hardware_config_no_transaction(
     Ok(())
 }
 
+/// Regenerates `hardware-configuration.nix` and rebuilds the system.
+///
+/// # Parameters
+/// * `root_path` - root the detection runs against, as in
+///   [`write_hardware_config_no_transaction`].
+/// * `config_dir` - configuration repository to edit.
+///
+/// # Post-conditions
+/// On success the regenerated hardware configuration is part of the active
+/// generation; on error the previous file is restored by the rollback. Blocks
+/// for the whole `nixos-rebuild switch`.
 pub fn write_hardware(root_path: &str, config_dir: &str) -> mx::Result<()> {
     transaction::make_transaction(
         "Reset hardware config",

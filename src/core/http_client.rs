@@ -1,3 +1,5 @@
+//! The crate's shared `reqwest` client and its timeout policy.
+
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -13,6 +15,8 @@ const READ_TIMEOUT: Duration = Duration::from_secs(15);
 /// — it only exists so a request cannot hang a caller's task indefinitely.
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Budget for establishing the connection alone, so an unreachable host fails
+/// fast instead of eating the whole [`TOTAL_TIMEOUT`].
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Process-wide HTTP client shared by every Flathub / module-index request.
@@ -27,6 +31,16 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// over, and which will fail identically on every later call anyway.
 static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
 
+/// Returns the process-wide HTTP client, building it on first call.
+///
+/// # Returns
+/// The shared [`CLIENT`], with the crate's connect/read/total timeouts applied
+/// and connection pooling across calls.
+///
+/// # Errors
+/// [`mx::ErrorKind::RequestSenderError`] if the client could not be built (TLS
+/// backend initialisation). The failure is cached, so every later call returns
+/// the same error rather than retrying.
 pub fn client() -> mx::Result<&'static reqwest::Client> {
     CLIENT
         .get_or_init(|| {

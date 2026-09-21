@@ -1,3 +1,6 @@
+//! Reading side of the package index: validating a file's header and borrowing
+//! its rows straight out of the mapping.
+
 use std::fs::File;
 use std::path::Path;
 
@@ -7,9 +10,19 @@ use super::{FORMAT_VERSION, MAGIC};
 
 /// `off, len` pairs per row: attr, pname, version, description, attr_lc, desc_lc.
 const ROW_FIELDS: usize = 6;
+
+/// Size of one row in the table, in bytes: [`ROW_FIELDS`] pairs of `u32`.
 const ROW_SIZE: usize = ROW_FIELDS * 8;
 
 /// One package row, borrowed straight out of the mmap — no allocation.
+///
+/// # Fields
+/// * `attr` - the nixpkgs attribute path.
+/// * `pname` - the package's `pname`.
+/// * `version` - its version string.
+/// * `description` - its `meta.description`.
+/// * `attr_lc` - `attr` lowercased, precomputed so a search need not allocate.
+/// * `desc_lc` - `description` lowercased, likewise.
 #[derive(Clone, Copy)]
 pub(crate) struct RowView<'a> {
     pub attr: &'a str,
@@ -21,6 +34,12 @@ pub(crate) struct RowView<'a> {
 }
 
 /// A validated, mmap'd package index. See `mod.rs` for the on-disk layout.
+///
+/// # Fields
+/// * `mmap` - the whole file, mapped read-only.
+/// * `rows_start` - byte offset of the row table.
+/// * `arena_start` - byte offset of the string arena the rows point into.
+/// * `count` - number of rows.
 pub(crate) struct Index {
     mmap: Mmap,
     rows_start: usize,
@@ -32,6 +51,18 @@ impl Index {
     /// Opens `path` and validates it against `expected_fingerprint` and the
     /// build's target system. Returns `None` on any mismatch, I/O error or
     /// truncated/corrupt file — never partially-trusts a bad file.
+    ///
+    /// # Parameters
+    /// * `path` - the index file to map.
+    /// * `expected_fingerprint` - nixpkgs fingerprint the file must carry for it
+    ///   to be considered fresh.
+    ///
+    /// # Returns
+    /// The validated index, or `None` on any mismatch or error.
+    ///
+    /// # Post-conditions
+    /// The mapping stays valid for the lifetime of the value even if the file is
+    /// replaced afterwards, the writer always renaming a new inode into place.
     pub(crate) fn open(path: &Path, expected_fingerprint: &[u8; 32]) -> Option<Self> {
         let file = File::open(path).ok()?;
         // SAFETY: the writer (`build::build`) never mutates a published index
@@ -42,6 +73,16 @@ impl Index {
         Self::parse(mmap, expected_fingerprint)
     }
 
+    /// Validates a mapping's header and locates its sections.
+    ///
+    /// # Parameters
+    /// * `mmap` - the mapped file.
+    /// * `expected_fingerprint` - fingerprint the header must carry.
+    ///
+    /// # Returns
+    /// The index, or `None` when the magic, the format version, the fingerprint
+    /// or the target system does not match, or when the file is too short for the
+    /// row count it declares.
     fn parse(mmap: Mmap, expected_fingerprint: &[u8; 32]) -> Option<Self> {
         let buf: &[u8] = &mmap;
         let magic = u32::from_le_bytes(buf.get(0..4)?.try_into().ok()?);
@@ -83,6 +124,11 @@ impl Index {
         })
     }
 
+    /// Number of packages in the index.
+    ///
+    /// # Returns
+    /// The row count from the header, i.e. the exclusive upper bound on the
+    /// indices [`Index::row`] accepts.
     pub(crate) fn len(&self) -> usize {
         self.count as usize
     }
@@ -90,6 +136,13 @@ impl Index {
     /// Row `i`, or `None` if the offsets it stores fall outside the arena —
     /// treated as "skip this row" by the caller rather than a hard error,
     /// since the header/count were already validated at open time.
+    ///
+    /// # Parameters
+    /// * `i` - row index, below [`Index::len`].
+    ///
+    /// # Returns
+    /// The row's fields, borrowed from the mapping without allocating, or `None`
+    /// when `i` is out of range or the row's offsets or bytes are unusable.
     pub(crate) fn row(&self, i: usize) -> Option<RowView<'_>> {
         if i >= self.count as usize {
             return None;

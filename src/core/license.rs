@@ -4,13 +4,20 @@
 
 use serde::Deserialize;
 
-/// AppStream license refs recognised by `as_license_is_free_license()`: used
-/// whenever the real SPDX id is unknown but the free/unfree bit is not.
+/// AppStream license ref standing for "unfree, exact license unknown",
+/// recognised by `as_license_is_free_license()`.
 pub const LICENSE_PROPRIETARY: &str = "LicenseRef-proprietary";
+
+/// AppStream license ref standing for "free, exact license unknown".
 pub const LICENSE_FREE: &str = "LicenseRef-free";
 
 /// The three shapes `meta.license` takes in nixpkgs: a bare string (legacy
 /// attributes), one `lib.licenses.*` attrset, or a list of either.
+///
+/// # Variants
+/// * `Str` - the legacy spelling, an SPDX id or `"unfree"`/`"unfree-…"`.
+/// * `One` - a single `lib.licenses.*` entry.
+/// * `Many` - several licenses, each itself any of these shapes.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub enum RawLicense {
@@ -21,6 +28,11 @@ pub enum RawLicense {
 
 /// A `lib.licenses.*` entry. Every field is optional — `free` is only spelled
 /// out for unfree licenses, and a handful of entries carry no `spdxId`.
+///
+/// # Fields
+/// * `spdx_id` - the SPDX id (`spdxId`), absent for a few nixpkgs entries.
+/// * `free` - whether the license is free; `None` means free, since nixpkgs
+///   only spells the field out to mark an unfree license.
 #[derive(Debug, Deserialize)]
 pub struct LicenseObj {
     #[serde(rename = "spdxId")]
@@ -28,13 +40,31 @@ pub struct LicenseObj {
     free: Option<bool>,
 }
 
+/// One license of an expression, after the nixpkgs shapes have been flattened.
+///
+/// # Variants
+/// * `Proprietary` - an unfree license, whatever its id.
+/// * `Spdx` - a license with a usable SPDX id, carried as payload.
+/// * `FreeUnknown` - known free (or unmarked, which nixpkgs means as free) but
+///   no SPDX id.
 enum Term {
     Proprietary,
     Spdx(String),
-    /// Known free (or unmarked, which nixpkgs means as free) but no SPDX id.
     FreeUnknown,
 }
 
+/// Flattens a `meta.license` value into individual terms.
+///
+/// # Parameters
+/// * `raw` - the license metadata, of any of the three nixpkgs shapes.
+/// * `out` - accumulator the terms are appended to, in traversal order;
+///   pre-existing entries are kept.
+///
+/// # Post-conditions
+/// Nothing is appended for an empty string or an empty list, so `out` can come
+/// back unchanged. A legacy `RawLicense::Str` value (`license = "unfree";` /
+/// `"unfree-redistributable"`) becomes [`Term::Proprietary`] when it starts with
+/// `"unfree"` (case-insensitive), and [`Term::Spdx`] otherwise.
 fn terms(raw: &RawLicense, out: &mut Vec<Term>) {
     match raw {
         RawLicense::Str(s) => {
@@ -42,7 +72,6 @@ fn terms(raw: &RawLicense, out: &mut Vec<Term>) {
             if s.is_empty() {
                 return;
             }
-            // Legacy `license = "unfree";` / `"unfree-redistributable"`.
             out.push(if s.to_ascii_lowercase().starts_with("unfree") {
                 Term::Proprietary
             } else {
@@ -78,6 +107,14 @@ fn terms(raw: &RawLicense, out: &mut Vec<Term>) {
 /// Software's free/proprietary badge means for the user), and a term without
 /// an SPDX id degrades the *whole* expression to [`LICENSE_FREE`] rather than
 /// emitting a partial, misleading `AND` chain.
+///
+/// # Parameters
+/// * `raw` - the `meta.license` value as deserialised from `nix eval`.
+///
+/// # Returns
+/// [`LICENSE_PROPRIETARY`] if any term is unfree; the terms joined with ` AND `
+/// when every one of them has an SPDX id; [`LICENSE_FREE`] when at least one is
+/// free without an id; `None` when `raw` yields no term at all.
 pub fn normalize(raw: &RawLicense) -> Option<String> {
     let mut parsed = Vec::new();
     terms(raw, &mut parsed);
@@ -104,6 +141,15 @@ pub fn normalize(raw: &RawLicense) -> Option<String> {
 /// Same, for the Flathub AppStream payload: `project_license` is already an
 /// SPDX expression when present; `is_free_license` is the only signal left
 /// otherwise.
+///
+/// # Parameters
+/// * `project_license` - the component's `project_license`, if the payload
+///   carried one.
+/// * `is_free` - the payload's `is_free_license` flag, used only as a fallback.
+///
+/// # Returns
+/// `project_license` trimmed when it is non-empty; else [`LICENSE_FREE`] or
+/// [`LICENSE_PROPRIETARY`] according to `is_free`; else `None`.
 pub fn from_flathub(project_license: Option<&str>, is_free: Option<bool>) -> Option<String> {
     if let Some(license) = project_license.map(str::trim).filter(|s| !s.is_empty()) {
         return Some(license.to_string());

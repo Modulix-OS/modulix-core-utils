@@ -34,7 +34,8 @@ fn flat_module_path_is_returned_whole() {
     assert_eq!(enable_paths(src, "mx"), vec!["programs.studio.obs-studio"]);
 }
 
-/// Mixed spellings in one file, and a single-segment module alongside.
+/// Mixed spellings in one file, and a single-segment module alongside. The
+/// value is not read here — `enable = false` still declares a module.
 #[test]
 fn mixed_spellings_and_depths_are_merged() {
     let src = r#"{
@@ -49,7 +50,6 @@ fn mixed_spellings_and_depths_are_merged() {
   };
 }
 "#;
-    // The value is not read here — `enable = false` still declares a module.
     assert_eq!(
         enable_paths(src, "mx"),
         vec!["fonts", "programs.games.umu", "programs.studio.obs-studio"]

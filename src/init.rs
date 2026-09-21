@@ -1,3 +1,25 @@
+//! Bootstraps the NixOS configuration repository for a brand-new Modulix
+//! system: `init_repo` is used by the installer to seed a minimal repo
+//! ahead of hardware detection, and `init` is the installer's actual
+//! engine, writing every base file (flake, configuration, hardware,
+//! fstab, locale, user) in a single transaction and sealing them
+//! immutable.
+//!
+//! Everything here is local-only: no network fetch happens (in particular
+//! `crate::REMOTE_CONFIG_URL` is declared in `lib.rs` but never used by
+//! this module — `flake.nix`/`configuration.nix` are rendered from the
+//! `FLAKE_FILE`/`CONFIG_FILE` templates and `nixos-generate-config`,
+//! not downloaded). [`init`] lists [`crate::CACHE_DIRECTORY_NAME`] in the
+//! repo's `.git/info/exclude` so the generated-index cache is never
+//! stashed or committed. Whether a call targets the live system (`/`) or
+//! an installation root (e.g. `/mnt`) is entirely up to the `root_path`/
+//! `params.root` argument passed in; this module does not choose it.
+//! Root privileges are required in release builds only where the target
+//! paths (`/etc/modulix-os/` via [`crate::CONFIG_DIRECTORY`]) are
+//! root-owned and where `nixos-install`/`nixos-generate-config` need them;
+//! in debug builds every rebuild is forced to `build-vm`
+//! (`BuildCommand::as_str`), so a debug run never touches the host system.
+
 use crate::core::transaction::Transaction;
 use crate::core::transaction::file_lock::NixFile;
 use crate::core::transaction::transaction::LOCK_SKIP_REBUILD_FILE;
@@ -7,8 +29,16 @@ use crate::{CONFIG_DIRECTORY, filesystem, hardware_config, locale, mx, user};
 use std::path::{Component, Path};
 use std::{fs, process};
 
+/// Login shell assigned to the user created by [`init`].
 const DEFAULT_SHELL: &str = "/run/current-system/sw/bin/bash";
 
+/// Template written to `flake.nix` by both [`init_repo`] and [`init`].
+///
+/// Declares the `mxpkgs`/`nixos-hardware` flake inputs and one
+/// `nixosConfigurations.default` output (see [`crate::CONFIG_NAME`])
+/// built with `mxpkgs.lib.modulixosSystem`, importing `./configuration.nix`.
+/// The Nix `system` string is baked in at compile time from the
+/// `TARGET_NIX` build-time env var (set by `build.rs`).
 const FLAKE_FILE: &str = concat!(
     r#"{
   description = "Modulix OS";
@@ -35,6 +65,13 @@ const FLAKE_FILE: &str = concat!(
 "#
 );
 
+/// Minimal `configuration.nix` written by [`init_repo`] only.
+///
+/// Imports `hardware-configuration.nix` and `fstab.nix`; unlike the
+/// version [`init`] renders (see [`configuration_nix`]), it sets no
+/// `networking.hostName` or `mx.desktop` and does not import
+/// `locale.nix`/`users.nix`, since [`init_repo`] does not create those
+/// files.
 const CONFIG_FILE: &str = r#"{ config, lib, pkgs, ... }:
 {
   imports = [
@@ -52,7 +89,31 @@ const CONFIG_FILE: &str = r#"{ config, lib, pkgs, ... }:
 /// `build-vm`); following them would make [`NixFile::delete`] clear the
 /// immutable flag on the *target*, which fails with `EPERM` on the store and
 /// aborts the whole init. Only regular files go through `NixFile::delete`,
-/// which is the sole case where an immutable flag can be in the way.
+/// which is the sole case where an immutable flag can be in the way. Symlinks
+/// and other non-regular, non-directory entries are removed directly with
+/// `fs::remove_file`, without touching the immutable flag.
+///
+/// # Parameters
+/// * `path` - directory to empty and remove. Must exist and be readable.
+///
+/// # Pre-conditions
+/// `path` exists and is a directory the caller has permission to list and
+/// modify.
+///
+/// # Post-conditions
+/// On success, `path` and everything under it no longer exist on disk.
+/// Regular files that were immutable (root-owned) have their immutable flag
+/// cleared before deletion via [`NixFile::delete`].
+///
+/// # Returns
+/// `Ok(())` once `path` itself has been removed.
+///
+/// # Errors
+/// * `mx::ErrorKind::IOError` - reading a directory entry, its file type, or
+///   removing a non-regular entry/the now-empty directory failed.
+/// * Any error [`NixFile::delete`] returns (e.g. `mx::ErrorKind::InvalidFile`
+///   if an entry's path is not valid UTF-8, or an I/O error clearing the
+///   immutable flag / unlinking) for regular files.
 fn remove_dir_recursive(path: &Path) -> mx::Result<()> {
     for entry in fs::read_dir(path).map_err(mx::ErrorKind::IOError)? {
         let entry = entry.map_err(mx::ErrorKind::IOError)?;
@@ -77,6 +138,16 @@ fn remove_dir_recursive(path: &Path) -> mx::Result<()> {
 /// is relative to the install root there), or `CONFIG_DIRECTORY` alone in debug
 /// (it is already an absolute fixed test path there, so prefixing `root_path`
 /// produces a nonexistent nested path).
+///
+/// # Parameters
+/// * `root_path` - installation root the config repo is nested under in
+///   release builds (`/` for the live system, or an install root such as
+///   `/mnt`). Ignored in debug builds.
+/// * `config_dir` - explicit override for the config repo path, bypassing
+///   both `root_path` and [`crate::CONFIG_DIRECTORY`] when given.
+///
+/// # Returns
+/// The resolved config repo directory path, always ending in `/`.
 fn resolve_config_path(root_path: &str, config_dir: Option<&str>) -> String {
     if let Some(dir) = config_dir {
         let mut d = dir.to_string();
@@ -96,6 +167,65 @@ fn resolve_config_path(root_path: &str, config_dir: Option<&str>) -> String {
     }
 }
 
+/// Seeds a minimal NixOS config repo ahead of the full [`init`] flow (or
+/// re-adopts one that already exists as a git repo).
+///
+/// Resolves the repo path with `resolve_config_path` (no `config_dir`
+/// override — always driven by `root_path`/[`crate::CONFIG_DIRECTORY`]). If
+/// the directory already exists it is wiped with `remove_dir_recursive`
+/// first, then recreated. If it is already a git repository, the function
+/// returns immediately without touching its contents. Otherwise it
+/// `git init`s the directory (initial branch `main`), runs
+/// `nixos-generate-config --show-hardware-config --no-filesystems`
+/// (with `--root root_path` unless `root_path` is `/`) to capture the
+/// hardware config without a filesystem section, builds `fstab.nix` from
+/// `filesystem::get_filesystem_from_fstab`, and commits `flake.nix`
+/// (`FLAKE_FILE`), `configuration.nix` (`CONFIG_FILE`),
+/// `hardware-configuration.nix` and `fstab.nix` in one `Transaction`
+/// (`BuildCommand::Install` in release, `BuildCommand::Boot` in debug —
+/// both resolve to `build-vm` in debug builds) with
+/// `UpdateInput::UpdateAll`, so `flake.lock` is generated fresh.
+///
+/// Unlike [`init`], this does not create the `.cache` directory, does not
+/// hold the skip-rebuild lock, and does not call `seal_base_files`
+/// afterwards (files are sealed immutable by `Transaction::commit`/
+/// `NixFile::commit` for the files it owns, but `flake.lock` is left as
+/// written by `nix flake update`).
+///
+/// # Parameters
+/// * `root_path` - installation root (`/` for the live system, or an
+///   install root such as `/mnt`) forwarded to `resolve_config_path` and
+///   to `nixos-generate-config --root`.
+///
+/// # Pre-conditions
+/// Caller has permission to create/wipe the resolved config directory, and
+/// (in release builds, for a non-`/` `root_path`) `nixos-generate-config`
+/// can read that root. Requires root in release builds against `/etc/`
+/// paths.
+///
+/// # Post-conditions
+/// On success, the resolved config directory is a git repository on branch
+/// `main` containing at least `flake.nix`, `configuration.nix`,
+/// `hardware-configuration.nix`, `fstab.nix` and a generated `flake.lock`,
+/// committed as "initial commit" (or is left untouched if it was already a
+/// git repo). On failure partway through the transaction, the transaction
+/// is rolled back (files it created are removed, pre-existing ones restored)
+/// per `Transaction::rollback`; the directory itself is not removed again.
+///
+/// # Returns
+/// `Ok(())` once the repo exists and, when freshly created, the initial
+/// commit has been made.
+///
+/// # Errors
+/// * `mx::ErrorKind::IOError` - removing/creating the directory, running
+///   `nixos-generate-config`, or other I/O failed.
+/// * `mx::ErrorKind::InvalidFile` - `nixos-generate-config`'s stdout is not
+///   valid UTF-8, or a path could not be converted (via
+///   `remove_dir_recursive`).
+/// * `mx::ErrorKind::GitError` - `git2` failed to open or init the repo.
+/// * Any error from `filesystem::get_filesystem_from_fstab`,
+///   `Transaction::new`, `Transaction::add_file`, `Transaction::begin`,
+///   `Transaction::get_file_mut`, or `Transaction::commit`.
 pub fn init_repo(root_path: &str) -> mx::Result<()> {
     let path_config = resolve_config_path(root_path, None);
     let repo_path = Path::new(path_config.as_str());
@@ -156,8 +286,6 @@ pub fn init_repo(root_path: &str) -> mx::Result<()> {
 
     initial_transaction.begin()?;
 
-    // Associate each file with its content
-
     for (filename, content) in files {
         let file_content = match initial_transaction.get_file_mut(filename) {
             Ok(file) => match file.get_mut_file_content() {
@@ -184,6 +312,12 @@ pub fn init_repo(root_path: &str) -> mx::Result<()> {
 /// declared by mxpkgs (`modulixos/desktop/default.nix`). Selecting a desktop is the
 /// only thing the generated config has to say about the graphical stack: mxpkgs
 /// derives `services.xserver`, the video drivers and the display manager from it.
+///
+/// # Variants
+/// * `Gnome` - GNOME desktop (`mx.desktop = "gnome"`).
+/// * `Plasma` - KDE Plasma desktop (`mx.desktop = "plasma"`).
+/// * `Lxqt` - LXQt desktop (`mx.desktop = "lxqt"`).
+/// * `Cli` - no graphical stack, headless system (`mx.desktop = "cli"`).
 pub enum Desktop {
     Gnome,
     Plasma,
@@ -192,6 +326,10 @@ pub enum Desktop {
 }
 
 impl Desktop {
+    /// Renders the variant as the Nix string literal's inner value.
+    ///
+    /// # Returns
+    /// `"gnome"`, `"plasma"`, `"lxqt"` or `"cli"`, matching the variant.
     pub fn as_str(&self) -> &str {
         match self {
             Desktop::Gnome => "gnome",
@@ -203,6 +341,17 @@ impl Desktop {
 
     /// Rejects anything the Nix enum would reject, rather than letting an unknown
     /// name through and silently producing a headless system.
+    ///
+    /// # Parameters
+    /// * `name` - candidate desktop name, expected to be one of `"gnome"`,
+    ///   `"plasma"`, `"lxqt"`, `"cli"`.
+    ///
+    /// # Returns
+    /// The matching [`Desktop`] variant.
+    ///
+    /// # Errors
+    /// * `mx::ErrorKind::InvalidArgument` - `name` is none of the four known
+    ///   desktop names.
     pub fn parse(name: &str) -> mx::Result<Self> {
         match name {
             "gnome" => Ok(Desktop::Gnome),
@@ -216,6 +365,32 @@ impl Desktop {
     }
 }
 
+/// Every user-facing parameter [`init`] needs to seed a first-boot config.
+///
+/// # Fields
+/// * `root` - installation root passed to `resolve_config_path`,
+///   `filesystem::get_filesystem_from_fstab` and
+///   `hardware_config::write_hardware_config_no_transaction` (`/` for the
+///   live system, or an install root such as `/mnt`).
+/// * `hostname` - value written to `networking.hostName` in
+///   `configuration.nix` (see `configuration_nix`).
+/// * `username` - login name of the user created via
+///   `user::add_no_transaction`.
+/// * `full_name` - `description` (GECOS full name) of that user.
+/// * `desktop` - selected desktop, written to `mx.desktop` (see [`Desktop`]).
+/// * `locale` - default locale passed to `locale::set_locale_no_transaction`.
+/// * `timezone` - timezone passed to `locale::set_locale_no_transaction`.
+/// * `kb_layout` - X11 keyboard layout passed to
+///   `locale::set_keyboard_no_transaction`.
+/// * `kb_variant` - X11 keyboard variant passed to
+///   `locale::set_keyboard_no_transaction`.
+/// * `console_keymap` - console keymap passed to
+///   `locale::set_locale_no_transaction`.
+/// * `config_dir` - overrides where the config repo is written (see
+///   `resolve_config_path`).
+/// * `debug` - debug/test mode: seeds the repo with `nixos-rebuild build-vm`
+///   instead of `nixos-install`/`switch`, and skips the skip-rebuild lock so
+///   the build actually runs.
 pub struct InitParams {
     pub root: String,
     pub hostname: String,
@@ -227,7 +402,7 @@ pub struct InitParams {
     pub kb_layout: String,
     pub kb_variant: String,
     pub console_keymap: String,
-    /// Overrides where the config repo is written (see [`resolve_config_path`]).
+    /// Overrides where the config repo is written (see `resolve_config_path`).
     pub config_dir: Option<String>,
     /// Debug/test mode: seeds the repo with `nixos-rebuild build-vm` instead of
     /// `nixos-install`/`switch`, and skips the skip-rebuild lock so the build
@@ -235,6 +410,16 @@ pub struct InitParams {
     pub debug: bool,
 }
 
+/// Resolves the config repo path for an [`init`] call.
+///
+/// Thin wrapper over [`resolve_config_path`] extracting `root`/`config_dir`
+/// from `params`.
+///
+/// # Parameters
+/// * `params` - init parameters; only `root` and `config_dir` are used.
+///
+/// # Returns
+/// The resolved config repo directory path, always ending in `/`.
 fn config_path(params: &InitParams) -> String {
     resolve_config_path(&params.root, params.config_dir.as_deref())
 }
@@ -246,6 +431,15 @@ fn config_path(params: &InitParams) -> String {
 /// of `configuration.nix`, but [`init`] then overwrites that file's whole
 /// buffer with this template, which would drop the injection. [`init`] always
 /// creates `locale.nix` and `users.nix`, so listing them is exact.
+///
+/// # Parameters
+/// * `p` - init parameters; `hostname` and `desktop` are interpolated into
+///   the template.
+///
+/// # Returns
+/// The full `configuration.nix` source, importing
+/// `hardware-configuration.nix`, `fstab.nix`, `locale.nix` and `users.nix`,
+/// and setting `networking.hostName` and `mx.desktop`.
 fn configuration_nix(p: &InitParams) -> String {
     format!(
         r#"{{ config, lib, pkgs, ... }}:
@@ -291,6 +485,26 @@ const BASE_FILES: &[&str] = &[
 /// would stash the whole directory away for the duration of every build —
 /// ignored paths are left alone, untracked ones are not. `result` gets the
 /// same treatment: `nixos-rebuild build-vm` may drop it here.
+///
+/// # Parameters
+/// * `repo_path` - root of the config git repo; the cache directory
+///   ([`crate::CACHE_DIRECTORY_NAME`]) and `.git/info/exclude` are created
+///   under it.
+///
+/// # Pre-conditions
+/// `repo_path` is an existing, initialized git repository.
+///
+/// # Post-conditions
+/// `repo_path/CACHE_DIRECTORY_NAME` exists. `repo_path/.git/info/exclude`
+/// exists and contains `CACHE_DIRECTORY_NAME/` and `result`, one per line,
+/// overwriting any previous content of that file.
+///
+/// # Returns
+/// `Ok(())` once both the cache directory and the exclude file are written.
+///
+/// # Errors
+/// * `mx::ErrorKind::IOError` - creating either directory, or writing the
+///   exclude file, failed.
 fn init_cache_dir(repo_path: &Path) -> mx::Result<()> {
     fs::create_dir_all(repo_path.join(crate::CACHE_DIRECTORY_NAME))
         .map_err(mx::ErrorKind::IOError)?;
@@ -310,6 +524,23 @@ fn init_cache_dir(repo_path: &Path) -> mx::Result<()> {
 /// this catches `flake.lock` and any file a future step adds outside a
 /// transaction. Missing files are skipped — the set is a superset of what a
 /// given run writes. No-op on files not owned by root (dev checkouts).
+///
+/// # Parameters
+/// * `path_config` - config repo directory the files in [`BASE_FILES`] are
+///   resolved against.
+///
+/// # Post-conditions
+/// Every file in [`BASE_FILES`] that exists under `path_config` has the ext2
+/// immutable flag set (a no-op for files not owned by root). Files absent
+/// from `path_config` are left untouched.
+///
+/// # Returns
+/// `Ok(())` once every existing file in [`BASE_FILES`] has been sealed.
+///
+/// # Errors
+/// * Any error [`NixFile::make_immutable`] returns, e.g.
+///   `mx::ErrorKind::InvalidFile` if a resolved path is not valid UTF-8, or
+///   an I/O error from the underlying `ioctl`.
 fn seal_base_files(path_config: &str) -> mx::Result<()> {
     for name in BASE_FILES {
         let path = Path::new(path_config).join(name);
@@ -320,6 +551,31 @@ fn seal_base_files(path_config: &str) -> mx::Result<()> {
     Ok(())
 }
 
+/// Takes an exclusive lock on `LOCK_SKIP_REBUILD_FILE`, telling every commit
+/// made while the returned handle is alive to skip its `nixos-rebuild` (see
+/// `Transaction::commit_impl`'s build-serialization step).
+///
+/// Used by [`init`] outside of debug/test mode: the real installer
+/// (Calamares / modulixos-installer) holds this lock for the whole install,
+/// so the seed transaction here only writes files and commits — no rebuild
+/// runs until the installer releases the lock and drives its own rebuild.
+///
+/// # Pre-conditions
+/// No other process holds the lock (a concurrent [`init`]/install run, or a
+/// test relying on the same sentinel file).
+///
+/// # Post-conditions
+/// `LOCK_SKIP_REBUILD_FILE` exists and is exclusively locked by the returned
+/// `File` handle; the lock is released when that handle is dropped.
+///
+/// # Returns
+/// The open, locked `File` handle. Callers must keep it alive for as long as
+/// commits should skip their rebuild.
+///
+/// # Errors
+/// * `mx::ErrorKind::IOError` - `LOCK_SKIP_REBUILD_FILE` could not be
+///   created/opened.
+/// * `mx::ErrorKind::FailToLock` - the lock is already held elsewhere.
 fn hold_skip_rebuild_lock() -> mx::Result<fs::File> {
     let file = fs::File::create(LOCK_SKIP_REBUILD_FILE)
         .map_err(|e| crate::error::io_error_at(LOCK_SKIP_REBUILD_FILE, e))?;
@@ -336,6 +592,18 @@ fn hold_skip_rebuild_lock() -> mx::Result<fs::File> {
 /// into `"/"`, so the raw argument says nothing. `..` components are refused
 /// too — they make the deleted directory something other than what the string
 /// reads as (`/etc/nixos/..` is `/etc`).
+///
+/// # Parameters
+/// * `path_config` - resolved config path (output of [`resolve_config_path`]
+///   / [`config_path`]), about to be handed to [`remove_dir_recursive`].
+///
+/// # Returns
+/// `Ok(())` if `path_config` contains at least one normal (named) path
+/// component and no `..` component.
+///
+/// # Errors
+/// * `mx::ErrorKind::InvalidFile` - `path_config` normalizes to a root-only
+///   path (no named component, e.g. `"/"`), or contains a `..` component.
 fn validate_config_path(path_config: &str) -> mx::Result<()> {
     let mut has_name = false;
     for component in Path::new(path_config).components() {
@@ -352,6 +620,108 @@ fn validate_config_path(path_config: &str) -> mx::Result<()> {
     }
 }
 
+/// The installer's engine: creates the NixOS config repo for a brand-new
+/// Modulix system from scratch and seeds it with everything a first boot
+/// needs (flake, base configuration, detected hardware, filesystem table,
+/// locale/keyboard, and one user).
+///
+/// Resolves the repo path with `config_path` and rejects it with
+/// `validate_config_path` before anything is deleted. Unlike
+/// [`init_repo`], any pre-existing directory at that path — git repo or
+/// not — is always wiped with `remove_dir_recursive` and replaced by a
+/// fresh `git init` (branch `main`); there is no re-adoption path. Then, in
+/// order:
+/// 1. `init_cache_dir` creates `.cache` and excludes it (and `result`) via
+///    `.git/info/exclude`.
+/// 2. `fstab.nix` is rendered from `filesystem::get_filesystem_from_fstab`
+///    and `configuration.nix` from `configuration_nix`.
+/// 3. Outside debug mode, `hold_skip_rebuild_lock` is taken and held for
+///    the rest of the call (assigned to `_skip_rebuild`, dropped — and thus
+///    released — when `init` returns), so the transaction below only writes
+///    and commits; the real installer (Calamares / modulixos-installer)
+///    keeps its own lock held and drives the actual rebuild itself. In debug
+///    mode no lock is taken and the build genuinely runs, as `BuildVm` (see
+///    next point).
+/// 4. The build command passed to the `Transaction` is `BuildCommand::Boot`
+///    in release and `BuildCommand::BuildVm` in debug (which, per
+///    `BuildCommand::as_str`, resolves to `build-vm` either way in debug
+///    builds — so a debug run never touches the host system regardless of
+///    which variant is named here).
+/// 5. A single `Transaction` (`TransactionPermission::Writtable`) is opened
+///    over `flake.nix`, `hardware-configuration.nix`, `fstab.nix`,
+///    `locale::LOCALE_FILE_PATH` and `user::USER_FILE_PATH`
+///    (`configuration.nix` is auto-added by `Transaction::begin`); within it,
+///    `flake.nix`/`configuration.nix`/`fstab.nix` get their rendered content,
+///    the hardware file is filled by
+///    `hardware_config::write_hardware_config_no_transaction`, the locale
+///    file by `locale::set_locale_no_transaction` then
+///    `locale::set_keyboard_no_transaction`, and the user file by
+///    `user::add_no_transaction` (`params.username`, empty initial password,
+///    `params.full_name`, `DEFAULT_SHELL`, groups `["wheel",
+///    "networkmanager"]`, `is_normal_user = true`). Locale and keyboard are
+///    folded into this same transaction, rather than a separate one, so the
+///    seed repo carries them from the first commit instead of needing a
+///    second transaction and rebuild; the X11 keyboard layout is set here —
+///    not in `configuration.nix` — so it is written whatever `params.desktop`
+///    is, and stays editable afterwards through `locale::set_keyboard`. The
+///    user file is filled for the same reason: one seed transaction, not one
+///    per file. Any failure at this stage calls `tx.rollback()` and returns
+///    the original error.
+/// 6. `tx.commit(UpdateInput::UpdateAll)` commits and refreshes `flake.lock`.
+/// 7. `seal_base_files` re-applies the immutable flag to every file in
+///    `BASE_FILES` that exists.
+///
+/// # Parameters
+/// * `params` - see [`InitParams`] for the meaning of every field.
+///
+/// # Pre-conditions
+/// Caller has permission to wipe/create the resolved config directory. In
+/// release builds this normally requires root (target paths live under
+/// [`crate::CONFIG_DIRECTORY`] / `params.root`); `nixos-generate-config`
+/// (invoked indirectly through
+/// `hardware_config::write_hardware_config_no_transaction`) must be able to
+/// read `params.root`. No other process holds the skip-rebuild lock
+/// (relevant outside debug mode).
+///
+/// # Post-conditions
+/// On success: the resolved config directory is a freshly initialized git
+/// repo on branch `main`, containing `flake.nix`, `configuration.nix`,
+/// `hardware-configuration.nix`, `fstab.nix`, the locale and user files, and
+/// `flake.lock`, all committed as `"modulix init"`; every file in
+/// `BASE_FILES` present on disk is immutable; `.cache` exists and is
+/// listed in `.git/info/exclude` together with `result`. Outside debug mode,
+/// no `nixos-rebuild`/`nixos-install` has actually run (the skip-rebuild
+/// lock suppresses it) — the caller is expected to drive that separately. In
+/// debug mode, `nixos-rebuild build-vm` has run as part of the commit.
+///
+/// On failure: if the failure happens before `tx.begin()` succeeds, the
+/// directory may already have been wiped and recreated (and, if reached,
+/// `.cache`/the exclude file already written) with no commit made. If the
+/// failure happens after `begin()` while filling file contents, the
+/// transaction is explicitly rolled back (`tx.rollback()`) before the error
+/// is returned. If `tx.commit` itself fails, `Transaction::commit_impl`
+/// rolls back internally. In every rollback case the held skip-rebuild lock
+/// (if any) is still released when `_skip_rebuild` drops at function return.
+/// `seal_base_files` is only reached after a successful commit.
+///
+/// # Returns
+/// `Ok(())` once the repo has been created, seeded, committed and sealed.
+///
+/// # Errors
+/// * `mx::ErrorKind::InvalidFile` - `validate_config_path` rejected the
+///   resolved path, or a later path-to-`str` conversion failed.
+/// * `mx::ErrorKind::IOError` - directory removal/creation, or any file I/O
+///   in `init_cache_dir`/`seal_base_files`, failed.
+/// * `mx::ErrorKind::GitError` - `git2` failed to init the repo.
+/// * `mx::ErrorKind::FailToLock` - `hold_skip_rebuild_lock` could not
+///   acquire its lock (non-debug builds only).
+/// * Any error from `filesystem::get_filesystem_from_fstab`,
+///   `hardware_config::write_hardware_config_no_transaction`,
+///   `locale::set_locale_no_transaction`,
+///   `locale::set_keyboard_no_transaction`, `user::add_no_transaction`,
+///   `Transaction::new`, `Transaction::add_file`, `Transaction::begin`,
+///   `Transaction::get_file_mut`, `NixFile::get_mut_file_content`, or
+///   `Transaction::commit`.
 pub fn init(params: &InitParams) -> mx::Result<()> {
     let path_config = config_path(params);
     validate_config_path(&path_config)?;
@@ -373,9 +743,6 @@ pub fn init(params: &InitParams) -> mx::Result<()> {
     );
     let config = configuration_nix(params);
 
-    // In debug mode the build actually runs (nixos-rebuild build-vm): don't
-    // skip it. The real installer path (Calamares / modulixos-installer)
-    // keeps holding the lock so the rebuild queue is skipped there.
     let _skip_rebuild = if params.debug {
         None
     } else {
@@ -395,6 +762,9 @@ pub fn init(params: &InitParams) -> mx::Result<()> {
         TransactionPermission::Writtable,
     )?;
 
+    /// Name of the hardware config file registered in the transaction below,
+    /// factored out so [`Transaction::add_file`] and
+    /// [`Transaction::get_file_mut`] stay in sync.
     const HARDWARE_FILE: &str = "hardware-configuration.nix";
     for f in [
         "flake.nix",
@@ -428,7 +798,6 @@ pub fn init(params: &InitParams) -> mx::Result<()> {
         }
     }
 
-    // Hardware config: detected system + matching nixos-hardware modules.
     match tx.get_file_mut(HARDWARE_FILE) {
         Ok(file) => {
             if let Err(e) =
@@ -444,11 +813,6 @@ pub fn init(params: &InitParams) -> mx::Result<()> {
         }
     }
 
-    // Locale and keyboard: folded into the init transaction so the seed repo carries
-    // them from the first commit, instead of a separate transaction + rebuild. The
-    // X11 layout goes here rather than in `configuration.nix` so it is written
-    // whatever `mx.desktop` is, and so it stays editable afterwards through
-    // `locale::set_keyboard`.
     match tx.get_file_mut(locale::LOCALE_FILE_PATH) {
         Ok(file) => {
             let written = locale::set_locale_no_transaction(
@@ -471,7 +835,6 @@ pub fn init(params: &InitParams) -> mx::Result<()> {
         }
     }
 
-    // User: same reasoning as locale above.
     match tx.get_file_mut(user::USER_FILE_PATH) {
         Ok(file) => {
             if let Err(e) = user::add_no_transaction(

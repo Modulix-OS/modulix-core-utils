@@ -18,15 +18,10 @@
 use super::NixFile;
 use crate::mx;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Unit tests – no real I/O
-// ─────────────────────────────────────────────────────────────────────────────
 mod unit {
     use super::super::NixFilePermission;
 
     use super::*;
-
-    // ── new() ─────────────────────────────────────────────────────────────────
 
     /// `new` correctly concatenates `repo_path` and `relative_path`.
     #[test]
@@ -56,8 +51,6 @@ mod unit {
         assert_eq!(f.get_file_path(), "/repofile.nix");
     }
 
-    // ── get_file_content / get_mut_file_content ───────────────────────────────
-
     /// Reading content without an active transaction returns `TransactionNotBegin`.
     #[test]
     fn get_file_content_without_transaction_errors() {
@@ -78,8 +71,6 @@ mod unit {
         ));
     }
 
-    // ── begin() with no file ──────────────────────────────────────────────────
-
     /// `begin` on a non-existent path returns `FileNotFound`.
     #[test]
     fn begin_nonexistent_file_returns_file_not_found() {
@@ -92,8 +83,6 @@ mod unit {
             "expected FileNotFound"
         );
     }
-
-    // ── commit() / close() without a transaction ──────────────────────────────
 
     /// `commit` without a prior transaction returns `InvalidFile`.
     #[test]
@@ -110,9 +99,6 @@ mod unit {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Integration tests – real temporary files
-// ─────────────────────────────────────────────────────────────────────────────
 mod integration {
     use super::super::NixFilePermission;
     use super::*;
@@ -122,8 +108,6 @@ mod integration {
     fn tmp_dir() -> TempDir {
         tempfile::tempdir().expect("failed to create temporary directory")
     }
-
-    // ── create_file ───────────────────────────────────────────────────────────
 
     /// `create_file` creates the file with the expected NixOS skeleton.
     #[test]
@@ -151,19 +135,18 @@ mod integration {
         assert!(matches!(f.create_file(), Err(mx::ErrorKind::IOError(_))));
     }
 
-    /// Calling `create_file` twice on the same path succeeds (overwrites).
+    /// Calling `create_file` twice on the same path succeeds (overwrites):
+    /// `make_mutable` is needed because `create_file` sets the immutable flag
+    /// (root only); on tmpfs/non-root, `make_mutable` is a no-op so the
+    /// overwrite happens directly.
     #[test]
     fn create_file_twice_overwrites() {
         let dir = tmp_dir();
         let mut f = NixFile::new(dir.path().to_str().unwrap(), "/module.nix");
         f.create_file().unwrap();
-        // make_mutable is needed because create_file sets the immutable flag (root only).
-        // On tmpfs/non-root, make_mutable is a no-op so we can overwrite directly.
         let result = f.create_file();
         assert!(result.is_ok());
     }
-
-    // ── begin → get_file_content → close ─────────────────────────────────────
 
     /// After `begin`, `get_file_content` returns the exact content of the file.
     #[test]
@@ -214,8 +197,6 @@ mod integration {
         assert_eq!(f.get_file_content().unwrap(), "");
         f.close().unwrap();
     }
-
-    // ── begin → modification → commit ─────────────────────────────────────────
 
     /// In-memory modifications are persisted by `commit`.
     #[test]
@@ -329,8 +310,6 @@ mod integration {
         ));
     }
 
-    // ── begin → close (discard) ───────────────────────────────────────────────
-
     /// After `close`, in-memory modifications are not persisted.
     #[test]
     fn close_does_not_persist_modifications() {
@@ -365,8 +344,6 @@ mod integration {
             Err(mx::ErrorKind::TransactionNotBegin)
         ));
     }
-
-    // ── Full lifecycle ────────────────────────────────────────────────────────
 
     /// Full lifecycle: creation followed by two successive transactions.
     #[test]
@@ -412,9 +389,6 @@ mod integration {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Non-regression tests
-// ─────────────────────────────────────────────────────────────────────────────
 mod no_regression {
     use super::super::NixFilePermission;
     use super::*;
@@ -441,7 +415,6 @@ mod no_regression {
         assert_eq!(f.get_file_content().unwrap(), "v1");
         f.close().unwrap();
 
-        // Modify the file on disk between transactions
         fs::write(format!("{}/f.nix", path), "v2").unwrap();
 
         f.begin(NixFilePermission::ReadOnly).unwrap();
@@ -523,7 +496,6 @@ mod no_regression {
         f.begin(NixFilePermission::ReadOnly).unwrap();
         f.close().unwrap();
 
-        // External modification between two transactions
         fs::write(format!("{}/f.nix", path), "after").unwrap();
 
         f.begin(NixFilePermission::ReadOnly).unwrap();

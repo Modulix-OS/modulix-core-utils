@@ -1,3 +1,6 @@
+//! Sets the system's timezone, locales and keyboard layouts in the
+//! configuration's `locale.nix`.
+
 use crate::core::{
     option::Option as mxOption,
     transaction::{
@@ -8,10 +11,35 @@ use crate::core::{
 };
 use crate::mx;
 
+/// Configuration file, relative to the config directory, holding the timezone,
+/// the locales and both keyboard layouts.
 pub(crate) const LOCALE_FILE_PATH: &str = "locale.nix";
 
-// --- no_transaction ---
-
+/// Sets the timezone, the default locale, every `LC_*` category and the
+/// console keymap, in an already-open `locale.nix`.
+///
+/// # Parameters
+/// * `file` - the open configuration file to edit.
+/// * `timezone` - tz database name for `time.timeZone` (e.g. `Europe/Paris`).
+/// * `default_locale` - locale for `i18n.defaultLocale` (e.g. `fr_FR.UTF-8`).
+/// * `lc_ctype` - value of `LC_CTYPE` (character classification).
+/// * `lc_address` - value of `LC_ADDRESS` (postal address format).
+/// * `lc_measurement` - value of `LC_MEASUREMENT` (unit system).
+/// * `lc_message` - value of `LC_MESSAGES` (interface language).
+/// * `lc_monetary` - value of `LC_MONETARY` (currency format).
+/// * `lc_name` - value of `LC_NAME` (personal name format).
+/// * `lc_numeric` - value of `LC_NUMERIC` (number format).
+/// * `lc_paper` - value of `LC_PAPER` (paper size).
+/// * `lc_telephone` - value of `LC_TELEPHONE` (phone number format).
+/// * `lc_time` - value of `LC_TIME` (date and time format).
+/// * `lc_collate` - value of `LC_COLLATE` (sort order).
+/// * `console_keymap` - keymap for `console.keyMap` (e.g. `fr`), which is the
+///   TTY layout; the graphical one is set by [`set_keyboard_no_transaction`].
+///
+/// # Post-conditions
+/// Each option is assigned unconditionally, overwriting what the file held.
+/// Values are quoted here, so pass them unquoted; none is validated against
+/// the locales the system actually generates.
 pub fn set_locale_extra_settings_no_transaction(
     file: &mut NixFile,
     timezone: &str,
@@ -86,6 +114,19 @@ pub fn set_locale_extra_settings_no_transaction(
     Ok(())
 }
 
+/// Sets the timezone, the locale and the console keymap in an already-open
+/// `locale.nix`, the simple case where one locale covers every category.
+///
+/// # Parameters
+/// * `file` - the open configuration file to edit.
+/// * `timezone` - tz database name for `time.timeZone`.
+/// * `default_locale` - locale used both for `i18n.defaultLocale` and for
+///   every `LC_*` category.
+/// * `console_keymap` - keymap for `console.keyMap`.
+///
+/// # Post-conditions
+/// As in [`set_locale_extra_settings_no_transaction`], which this delegates to
+/// with `default_locale` repeated for all categories.
 pub fn set_locale_no_transaction(
     file: &mut NixFile,
     timezone: &str,
@@ -117,6 +158,16 @@ pub fn set_locale_no_transaction(
 /// one place. mxpkgs sets these two options with `lib.mkMxDefault` (priority 900) in
 /// `modulixos/desktop/default.nix`; a plain definition here is priority 100, so it
 /// wins.
+///
+/// # Parameters
+/// * `file` - the open configuration file to edit.
+/// * `kb_layout` - value of `services.xserver.xkb.layout` (e.g. `fr`).
+/// * `kb_variant` - value of `services.xserver.xkb.variant` (e.g. `azerty`);
+///   pass an empty string for the layout's default variant.
+///
+/// # Post-conditions
+/// Both options are assigned unconditionally. The console keymap is a separate
+/// setting, handled by [`set_locale_no_transaction`].
 pub fn set_keyboard_no_transaction(
     file: &mut NixFile,
     kb_layout: &str,
@@ -137,8 +188,17 @@ pub fn set_keyboard_no_transaction(
     Ok(())
 }
 
-// --- transaction ---
-
+/// Sets the timezone, every locale category and the console keymap, then
+/// rebuilds the system.
+///
+/// # Parameters
+/// * `config_dir` - configuration repository to edit.
+/// * `timezone`, `default_locale`, `lc_*`, `console_keymap` - as in
+///   [`set_locale_extra_settings_no_transaction`].
+///
+/// # Post-conditions
+/// On success the settings are part of the active generation; on error the
+/// configuration is rolled back. Blocks for the whole `nixos-rebuild switch`.
 pub fn set_locale_extra_settings(
     config_dir: &str,
     timezone: &str,
@@ -184,6 +244,16 @@ pub fn set_locale_extra_settings(
     )
 }
 
+/// Sets the timezone, the locale and the console keymap, then rebuilds the
+/// system.
+///
+/// # Parameters
+/// * `config_dir` - configuration repository to edit.
+/// * `timezone`, `default_locale`, `console_keymap` - as in
+///   [`set_locale_no_transaction`].
+///
+/// # Post-conditions
+/// As in [`set_locale_extra_settings`].
 pub fn set_locale(
     config_dir: &str,
     timezone: &str,
@@ -200,6 +270,14 @@ pub fn set_locale(
     )
 }
 
+/// Sets the graphical keyboard layout and rebuilds the system.
+///
+/// # Parameters
+/// * `config_dir` - configuration repository to edit.
+/// * `kb_layout`, `kb_variant` - as in [`set_keyboard_no_transaction`].
+///
+/// # Post-conditions
+/// As in [`set_locale_extra_settings`].
 pub fn set_keyboard(config_dir: &str, kb_layout: &str, kb_variant: &str) -> mx::Result<()> {
     transaction::make_transaction(
         "Set keyboard layout",

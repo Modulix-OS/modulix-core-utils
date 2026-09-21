@@ -17,12 +17,36 @@ const EVAL_TIMEOUT: Duration = Duration::from_secs(20);
 /// `NIXPKGS_ALLOW_UNFREE=1` is set so evaluating unfree attributes does not
 /// abort. A non-zero exit surfaces stderr as [`mx::ErrorKind::NixCommandError`];
 /// taking longer than `timeout` kills the process and does the same.
+///
+/// # Type parameters
+/// * `T` - type the JSON output is deserialised into.
+///
+/// # Parameters
+/// * `args` - arguments passed to `nix`, verbatim and in order; they must make
+///   it print JSON on stdout.
+/// * `timeout` - ceiling on the whole invocation.
+///
+/// # Pre-conditions
+/// `nix` must be on `PATH`, with flakes enabled for the installables the caller
+/// passes.
+///
+/// # Returns
+/// The deserialised output.
+///
+/// # Errors
+/// [`mx::ErrorKind::NixCommandError`] on timeout, on a non-zero exit (payload
+/// is stderr), or when the output does not deserialise into `T`;
+/// [`mx::ErrorKind::IOError`] when the process cannot be spawned; and
+/// [`mx::ErrorKind::FromUtf8Error`] when stdout is not UTF-8.
+///
+/// # Post-conditions
+/// Dropping the future kills the child, so a cancelled caller leaves no `nix`
+/// process behind.
 pub async fn run_json<T: DeserializeOwned>(args: &[&str], timeout: Duration) -> mx::Result<T> {
     let mut command = tokio::process::Command::new("nix");
     command
         .args(args)
         .env("NIXPKGS_ALLOW_UNFREE", "1")
-        // A cancelled/timed-out caller must not leave `nix` running.
         .kill_on_drop(true);
 
     let output = tokio::time::timeout(timeout, command.output())
@@ -45,6 +69,19 @@ pub async fn run_json<T: DeserializeOwned>(args: &[&str], timeout: Duration) -> 
 /// `args` are appended verbatim after `eval --json`, so callers pass the
 /// installable and any extra flags themselves, e.g. `["nixpkgs#hello.meta.mainProgram"]`,
 /// `["--expr", "<expr>"]`, or `["<flakeref>", "--apply", "<lambda>"]`.
+///
+/// # Type parameters
+/// * `T` - type the JSON output is deserialised into.
+///
+/// # Parameters
+/// * `args` - what follows `eval --json`: the installable, plus any flag.
+///
+/// # Returns
+/// The deserialised value.
+///
+/// # Errors
+/// As in [`run_json`], with the invocation bounded by the module's own
+/// evaluation timeout rather than a caller-supplied one.
 pub async fn eval_json<T: DeserializeOwned>(args: &[&str]) -> mx::Result<T> {
     let mut full = Vec::with_capacity(args.len() + 2);
     full.push("eval");

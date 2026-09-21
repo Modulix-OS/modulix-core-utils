@@ -1,16 +1,27 @@
+//! GPU detection from `lspci`: which vendors are present, whether the NVIDIA
+//! card is a mobile one, and which generation each vendor's most recent card
+//! belongs to.
+
 use regex::Regex;
 use std::process::Command;
 
 use crate::mx;
 
+/// The graphics devices `lspci` reported, as `(PCI address, description)` pairs.
 type VgaDevices = Vec<(String, String)>;
 
+/// The machine's graphics devices.
+///
+/// # Fields
+/// * `vga_device` - one entry per VGA or 3D controller, in `lspci` order.
 #[derive(Debug)]
 pub struct VgaInfo {
     vga_device: VgaDevices,
 }
 
 impl VgaInfo {
+    /// NVIDIA chipset prefixes mapped to their architecture name, oldest first -
+    /// the order is what makes "most recent card wins" work.
     const NVIDIA_GEN_CHIPSET: [(&'static str, &'static str); 8] = [
         ("GF", "fermi"),
         ("GK", "kepler"),
@@ -22,6 +33,8 @@ impl VgaInfo {
         ("GB", "blackwell"),
     ];
 
+    /// AMD chipset family names mapped to their architecture name, oldest
+    /// first, same ordering convention as [`VgaInfo::NVIDIA_GEN_CHIPSET`].
     const AMD_GEN_CHIPSET: [(&'static str, &'static str); 10] = [
         ("Southern Islands", "gcn-1-gen"),
         ("Sea Islands", "gcn-2-gen"),
@@ -35,6 +48,24 @@ impl VgaInfo {
         ("Navi 4", "rdna4"),
     ];
 
+    /// Rewrites an `lspci` address into the `PCI:bus:device:function` form the
+    /// X and NVIDIA configurations expect.
+    ///
+    /// # Parameters
+    /// * `address` - the address as `lspci` prints it (`00:02.0`), possibly with
+    ///   a domain prefix, which is dropped.
+    ///
+    /// # Returns
+    /// `PCI:<bus>:<device>:<function>`, with bus and device converted from
+    /// hexadecimal to decimal.
+    ///
+    /// # Errors
+    /// [`mx::ErrorKind::GetVGAInfoError`] when the address has fewer than three
+    /// components.
+    ///
+    /// # Panics
+    /// If a component is not the number base expected - bus and device
+    /// hexadecimal, function decimal.
     fn convert_to_pci_format(address: &str) -> mx::Result<String> {
         let re = Regex::new(r"[:\\.]").map_err(|_| {
             mx::ErrorKind::GetVGAInfoError("An error has occurred while convert to pci format")
@@ -50,6 +81,20 @@ impl VgaInfo {
         Ok(format!("PCI:{}:{}:{}", bus, device, function))
     }
 
+    /// Lists the machine's graphics devices through `lspci`.
+    ///
+    /// # Returns
+    /// One `(PCI address, description)` pair per line describing a
+    /// `VGA compatible controller` or a `3D controller` - the latter being how a
+    /// laptop's discrete GPU usually shows up.
+    ///
+    /// # Pre-conditions
+    /// `lspci` must be on `PATH`.
+    ///
+    /// # Errors
+    /// [`mx::ErrorKind::GetVGAInfoError`] if `lspci` cannot be run or one of its
+    /// addresses does not parse. Its exit status is not checked: a failed run
+    /// yields an empty list.
     fn get_vga_devices() -> mx::Result<VgaDevices> {
         let output = Command::new("lspci")
             .output()
@@ -77,12 +122,23 @@ impl VgaInfo {
         Ok(vga_devices)
     }
 
+    /// Detects the machine's graphics devices.
+    ///
+    /// # Returns
+    /// The device list, which can legitimately be empty on a headless machine.
+    ///
+    /// # Errors
+    /// As in [`VgaInfo::get_vga_devices`].
     pub fn new() -> mx::Result<VgaInfo> {
         Ok(VgaInfo {
             vga_device: Self::get_vga_devices()?,
         })
     }
 
+    /// Whether the machine has an NVIDIA GPU.
+    ///
+    /// # Returns
+    /// `true` when a device description mentions `nvidia`, case-insensitively.
     pub fn has_nvidia_device(&self) -> bool {
         for (_, description) in &self.vga_device {
             if description.to_lowercase().contains("nvidia") {
@@ -92,6 +148,14 @@ impl VgaInfo {
         return false;
     }
 
+    /// Whether the NVIDIA GPU is a mobile one, which is what decides the
+    /// hybrid-graphics (Optimus) modules.
+    ///
+    /// # Returns
+    /// `true` when an NVIDIA description says `laptop` or `mobile`, or carries a
+    /// three-digit model number suffixed with `M` (the older mobile naming).
+    /// `false` otherwise, including when the detection regex fails to build - in
+    /// which case the reason is printed on stdout.
     pub fn has_nvidia_laptop(&self) -> bool {
         for (_, description) in &self.vga_device {
             let desc_lower = description.to_lowercase();
@@ -120,7 +184,18 @@ impl VgaInfo {
         return false;
     }
 
-    /// Get generation codename for most recent card
+    /// Architecture of the most recent NVIDIA card in the machine.
+    ///
+    /// # Returns
+    /// `Ok` with the architecture name (`turing`, `ampere`, …) taken from the
+    /// chipset prefix of the newest card, per
+    /// [`VgaInfo::NVIDIA_GEN_CHIPSET`]'s ordering. `Err` with a static message
+    /// when no NVIDIA card is found, when its description carries no recognisable
+    /// chipset code, or when the matching regex cannot be built.
+    ///
+    /// # Panics
+    /// If `lspci` reports a chipset prefix made of two letters that the table
+    /// does not list.
     pub fn get_nvidia_generation(&self) -> Result<&'static str, &'static str> {
         let list_codename = Self::NVIDIA_GEN_CHIPSET
             .map(|(code, _)| code.to_string())
@@ -140,7 +215,6 @@ impl VgaInfo {
                 if arch.is_empty() {
                     arch = &match_chipset[0..2];
                 }
-                // Prefere most recent card
                 else if Self::NVIDIA_GEN_CHIPSET
                     .iter()
                     .position(|(code, _)| code.eq(&arch))
@@ -165,6 +239,14 @@ impl VgaInfo {
         }
     }
 
+    /// Architecture of the most recent AMD card in the machine.
+    ///
+    /// # Returns
+    /// `Ok` with the architecture name (`rdna3`, `gcn-5-gen`, …) of the newest
+    /// card, matched by family name against [`VgaInfo::AMD_GEN_CHIPSET`] and
+    /// compared case-sensitively. `Err` with a static message when no AMD or
+    /// Radeon device is found, or when none of their descriptions names a known
+    /// family.
     pub fn get_amd_generation(&self) -> Result<&'static str, &'static str> {
         let mut best_gen: Option<usize> = None;
 
@@ -191,6 +273,15 @@ impl VgaInfo {
         }
     }
 
+    /// Whether any graphics device's description mentions a given codename.
+    ///
+    /// # Parameters
+    /// * `codename` - the text to look for; the comparison is
+    ///   case-insensitive and on substrings, so a short codename can match by
+    ///   accident.
+    ///
+    /// # Returns
+    /// `true` at the first device whose description contains it.
     pub fn match_archtecture_codename(&self, codename: &str) -> bool {
         for device in &self.vga_device {
             if device.1.to_lowercase().contains(&codename.to_lowercase()) {

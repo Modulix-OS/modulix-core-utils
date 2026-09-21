@@ -7,7 +7,7 @@
 /// ```
 /// cargo test --features install-module install_module
 /// ```
-use super::list_enabled_module_names;
+use super::{list_enabled_module_names, list_installed_plugin_attrs};
 use std::fs;
 use tempfile::TempDir;
 
@@ -101,6 +101,34 @@ fn plugins_alone_do_not_enable_a_module() {
         list_enabled_module_names(&repo_path(&dir))
             .unwrap()
             .is_empty()
+    );
+}
+
+/// No `plugins` attribute at all → empty list, not an error.
+#[test]
+fn no_plugins_attr_yields_empty_list() {
+    let dir = setup_repo(Some(
+        "{config, lib, pkgs, ...}:\n{\n  mx.programs.studio.obs-studio.enable = true;\n}\n",
+    ));
+    assert!(
+        list_installed_plugin_attrs(&repo_path(&dir), "programs.studio.obs-studio")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Every attribute listed under `mx.<module>.plugins` comes back as-is.
+#[test]
+fn lists_installed_plugin_attrs() {
+    let dir = setup_repo(Some(
+        "{config, lib, pkgs, ...}:\n{\n  mx.programs.studio.obs-studio.plugins = [ pkgs.obs-studio-plugins.wlrobs pkgs.obs-studio-plugins.obs-vaapi ];\n}\n",
+    ));
+    assert_eq!(
+        list_installed_plugin_attrs(&repo_path(&dir), "programs.studio.obs-studio").unwrap(),
+        vec![
+            "pkgs.obs-studio-plugins.wlrobs",
+            "pkgs.obs-studio-plugins.obs-vaapi"
+        ]
     );
 }
 
