@@ -245,6 +245,17 @@ pub struct Transaction<'a> {
 
     /// Whether this transaction may edit and commit, or only read.
     permission_transaction: TransactionPermission,
+
+    /// When `true`, [`commit_impl`] runs `run_flake_update` even if no file in
+    /// `list_file` changed, so an operation that edits nothing (a system
+    /// update) can still refresh `flake.lock`. The commit and the rebuild
+    /// still only happen if that refresh actually moved `flake.lock`.
+    force_commit: bool,
+
+    /// `--cores` passed to `nixos-rebuild`/`nixos-install`, capping how many
+    /// CPU cores a single derivation build may use. `None` leaves the Nix
+    /// default (`nix.conf`'s `cores`, itself defaulting to all of them).
+    rebuild_cores: Option<u32>,
 }
 
 impl<'a> Transaction<'a> {
@@ -281,7 +292,68 @@ impl<'a> Transaction<'a> {
             old_commit: git2::Oid::ZERO_SHA1,
             stash_oid: None,
             permission_transaction: permission,
+            force_commit: false,
+            rebuild_cores: None,
         })
+    }
+
+    /// Forces [`commit_impl`] to run `run_flake_update` even when no tracked
+    /// file changed.
+    ///
+    /// # Arguments
+    /// * `force` - when `true`, an update-only transaction (no file edit)
+    ///   still refreshes `flake.lock`; the commit and rebuild still only
+    ///   happen if that refresh actually moved the lockfile.
+    pub fn set_force_commit(&mut self, force: bool) {
+        self.force_commit = force;
+    }
+
+    /// Caps the number of CPU cores the rebuild's `nix` build may use.
+    ///
+    /// # Arguments
+    /// * `cores` - forwarded as `nixos-rebuild --cores <cores>` /
+    ///   `nixos-install --cores <cores>`; `None` leaves the Nix default.
+    pub fn set_cores(&mut self, cores: Option<u32>) {
+        self.rebuild_cores = cores;
+    }
+
+    /// Builds the (unspawned) `nixos-install`/`nixos-rebuild` command for
+    /// [`rebuild_config`], split out so the argument list can be asserted on
+    /// in tests without spawning a real process.
+    ///
+    /// # Arguments
+    /// * `path_config`, `config_name`, `build_command` – as in
+    ///   [`rebuild_config`].
+    /// * `cores` – when `Some`, appends `--cores <cores>`.
+    ///
+    /// # Returns
+    /// The command, with its arguments set and stdio left at the
+    /// `process::Command` default (the caller wires stdio and spawns it).
+    fn build_rebuild_command(
+        path_config: &str,
+        config_name: &str,
+        build_command: &BuildCommand,
+        cores: Option<u32>,
+    ) -> process::Command {
+        let mut command = match build_command {
+            BuildCommand::Install => {
+                let mut c = process::Command::new("nixos-install");
+                c.arg("--root").arg("/mnt").arg("--no-root-password");
+                c
+            }
+            BuildCommand::Switch | BuildCommand::Boot | BuildCommand::BuildVm => {
+                let mut c = process::Command::new("nixos-rebuild");
+                c.arg(build_command.as_str());
+                c
+            }
+        };
+        command
+            .arg("--flake")
+            .arg(format!("{}#{}", path_config, config_name));
+        if let Some(cores) = cores {
+            command.arg("--cores").arg(cores.to_string());
+        }
+        command
     }
 
     /// Runs the NixOS rebuild in a subprocess and waits for it to finish.
@@ -304,6 +376,8 @@ impl<'a> Transaction<'a> {
     /// * `stderr`        – Buffer the child's stderr is appended to, for the
     ///   caller to put in a [`mx::ErrorKind::BuildError`]; pass `None` to
     ///   discard it.
+    /// * `cores`         – forwarded as `--cores <cores>`; `None` leaves the
+    ///   Nix default.
     ///
     /// # Returns
     /// `Ok(true)` if the process exited successfully (code 0), `Ok(false)` otherwise.
@@ -321,29 +395,15 @@ impl<'a> Transaction<'a> {
         config_name: &str,
         build_command: BuildCommand,
         stderr: Option<&mut String>,
+        cores: Option<u32>,
     ) -> mx::Result<bool> {
-        let mut child = match build_command {
-            BuildCommand::Install => process::Command::new("nixos-install")
-                .arg("--root")
-                .arg("/mnt")
-                .arg("--no-root-password")
-                .arg("--flake")
-                .arg(format!("{}#{}", path_config, config_name))
-                .stdout(process::Stdio::inherit())
-                .stderr(process::Stdio::piped())
-                .spawn()
-                .map_err(mx::ErrorKind::IOError)?,
-            BuildCommand::Switch | BuildCommand::Boot | BuildCommand::BuildVm => {
-                process::Command::new("nixos-rebuild")
-                    .arg(build_command.as_str())
-                    .arg("--flake")
-                    .arg(format!("{}#{}", path_config, config_name))
-                    .stdout(process::Stdio::inherit())
-                    .stderr(process::Stdio::piped())
-                    .spawn()
-                    .map_err(mx::ErrorKind::IOError)?
-            }
-        };
+        let mut command =
+            Self::build_rebuild_command(path_config, config_name, &build_command, cores);
+        let mut child = command
+            .stdout(process::Stdio::inherit())
+            .stderr(process::Stdio::piped())
+            .spawn()
+            .map_err(mx::ErrorKind::IOError)?;
 
         let stderr_output = {
             let mut s = String::new();
@@ -752,38 +812,94 @@ impl<'a> Transaction<'a> {
         Ok(())
     }
 
+    /// Refreshes `flake.lock`, per `update_input`.
+    ///
+    /// Generates the lockfile from scratch with a plain `nix flake update` if
+    /// it does not exist yet; otherwise runs `nix flake update [inputs…]`
+    /// (`UpdateInput::Keep` runs nothing).
+    ///
+    /// # Arguments
+    /// * `update_input` – how `flake.lock` is refreshed.
+    ///
+    /// # `flake.lock` immutability
+    /// When updating an existing lockfile, its immutable flag (set by `init`
+    /// like every other base file) is cleared first, since `nix flake update`
+    /// rewrites it in place, and restored right after - but only if it *was*
+    /// set: on a config repo not produced by `init` the file is writable on
+    /// purpose, and sealing it here would permanently break the admin's own
+    /// `nix flake update`. This is a no-op on a file that is not root-owned
+    /// (dev checkouts). The `nix` command's own result is checked before the
+    /// re-seal's, so a failure to re-seal never masks the actual `nix flake
+    /// update` error.
+    ///
+    /// # Errors
+    /// [`mx::ErrorKind::IOError`] if `nix` cannot be spawned or waited for,
+    /// [`mx::ErrorKind::InvalidFile`] if the lockfile path is not UTF-8.
+    fn run_flake_update(&self, update_input: UpdateInput) -> mx::Result<()> {
+        if !self.flake_lock_exists() {
+            process::Command::new("nix")
+                .args(["flake", "update"])
+                .current_dir(&self.git_repo_path)
+                .output()
+                .map_err(mx::ErrorKind::IOError)?;
+            return Ok(());
+        }
+
+        let mut args = vec!["flake".to_string(), "update".to_string()];
+        let command = match update_input {
+            UpdateInput::UpdateAll => args,
+            UpdateInput::UpdateSelected(s) => {
+                args.extend(s);
+                args
+            }
+            UpdateInput::Keep => vec![],
+        };
+        if command.is_empty() {
+            return Ok(());
+        }
+
+        let lock_path = self.flake_lock_path();
+        let lock_path = lock_path.to_str().ok_or(mx::ErrorKind::InvalidFile)?;
+        let was_immutable = NixFile::is_immutable(lock_path)?;
+        NixFile::make_mutable(lock_path)?;
+        let result = process::Command::new("nix")
+            .args(command)
+            .current_dir(&self.git_repo_path)
+            .output()
+            .map_err(mx::ErrorKind::IOError);
+        let resealed = if was_immutable {
+            NixFile::make_immutable(lock_path)
+        } else {
+            Ok(())
+        };
+        result?;
+        resealed
+    }
+
     /// Internal commit implementation, split out so the [`commit`] wrapper can
     /// trigger an automatic rollback on failure.
     ///
     /// Steps:
     /// 1. Commit each [`NixFile`] to disk.
     /// 2. Detect the actually modified files (selective `git add`).
-    /// 3. If at least one file changed:
-    ///    a. Generate `flake.lock` if absent (`nix flake update`).
-    ///    b. Create the Git commit.
-    ///    c. Enter the FIFO build queue and, once at the head, run `nixos-rebuild`.
-    /// 4. Close all [`NixFile`]s and release the Git repository.
+    /// 3. If at least one file changed, or [`force_commit`](Self::set_force_commit)
+    ///    is set: refresh `flake.lock` via [`run_flake_update`]; a forced
+    ///    refresh that touched no file only proceeds to the commit if that
+    ///    refresh actually moved `flake.lock`.
+    /// 4. If a commit is warranted: create the Git commit, then enter the FIFO
+    ///    build queue and, once at the head, run `nixos-rebuild`.
+    /// 5. Close all [`NixFile`]s and release the Git repository.
     ///
     /// # Arguments
     /// * `update_input` – How `flake.lock` is refreshed before the commit.
     ///
     /// # Post-conditions
-    /// A commit is only created when a file genuinely changed, so an operation
-    /// that changes nothing leaves no empty commit and runs no rebuild. The
-    /// rebuild is serialised against the other processes' rebuilds, so the call
-    /// can block well beyond its own build time. The transaction is closed on
-    /// success: the files are unlocked and the repository handle is dropped.
-    ///
-    /// # `flake.lock` immutability
-    /// When `update_input` requires running `nix flake update` on an existing
-    /// lockfile, the file's immutable flag (set by `init` like every other base
-    /// file) is cleared first, since `nix flake update` rewrites it in place,
-    /// and restored right after - but only if it *was* set: on a config repo
-    /// not produced by `init` the file is writable on purpose, and sealing it
-    /// here would permanently break the admin's own `nix flake update`. This is
-    /// a no-op on a file that is not root-owned (dev checkouts). The `nix`
-    /// command's own result is checked before the re-seal's, so a failure to
-    /// re-seal never masks the actual `nix flake update` error.
+    /// A commit is only created when a file genuinely changed (or a forced
+    /// refresh moved `flake.lock`), so an operation that changes nothing
+    /// leaves no empty commit and runs no rebuild. The rebuild is serialised
+    /// against the other processes' rebuilds, so the call can block well
+    /// beyond its own build time. The transaction is closed on success: the
+    /// files are unlocked and the repository handle is dropped.
     ///
     /// # Errors
     /// [`mx::ErrorKind::BuildError`] with the rebuild's stderr,
@@ -813,42 +929,14 @@ impl<'a> Transaction<'a> {
             }
         }
 
-        if need_modif {
-            if !self.flake_lock_exists() {
-                process::Command::new("nix")
-                    .args(["flake", "update"])
-                    .current_dir(&self.git_repo_path)
-                    .output()
-                    .map_err(mx::ErrorKind::IOError)?;
-            } else {
-                let mut args = vec!["flake".to_string(), "update".to_string()];
-                let command = match update_input {
-                    UpdateInput::UpdateAll => args,
-                    UpdateInput::UpdateSelected(s) => {
-                        args.extend(s);
-                        args
-                    }
-                    UpdateInput::Keep => vec![],
-                };
-                if !command.is_empty() {
-                    let lock_path = self.flake_lock_path();
-                    let lock_path = lock_path.to_str().ok_or(mx::ErrorKind::InvalidFile)?;
-                    let was_immutable = NixFile::is_immutable(lock_path)?;
-                    NixFile::make_mutable(lock_path)?;
-                    let result = process::Command::new("nix")
-                        .args(command)
-                        .current_dir(&self.git_repo_path)
-                        .output()
-                        .map_err(mx::ErrorKind::IOError);
-                    let resealed = if was_immutable {
-                        NixFile::make_immutable(lock_path)
-                    } else {
-                        Ok(())
-                    };
-                    result?;
-                    resealed?;
-                }
+        if need_modif || self.force_commit {
+            self.run_flake_update(update_input)?;
+            if !need_modif {
+                need_modif = self.flake_lock_modified()?;
             }
+        }
+
+        if need_modif {
             self.git_commit(Some("HEAD"), &self.git_user, &self.git_user, &self.info)?;
 
             let skip = LockFile::try_lock(LOCK_SKIP_REBUILD_FILE)?;
@@ -864,6 +952,7 @@ impl<'a> Transaction<'a> {
                     CONFIG_NAME,
                     self.build_type.clone(),
                     Some(&mut stderr),
+                    self.rebuild_cores,
                 )?;
                 if !success {
                     return Err(mx::ErrorKind::BuildError(stderr));

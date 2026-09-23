@@ -107,6 +107,67 @@ where
     }
 }
 
+/// Variant of [`make_transaction`] for operations that refresh `flake.lock`
+/// without necessarily editing `file_path` (a system update): the
+/// transaction forces `run_flake_update` to run even if `f` leaves the file
+/// untouched. The commit (and rebuild) still only happen if that refresh, or
+/// `f`'s own edit, actually changed something - see
+/// [`Transaction::set_force_commit`].
+///
+/// # Arguments
+/// * `cores` – caps the rebuild's `nix` build to this many CPU cores
+///   (`--cores`); `None` leaves the Nix default. See
+///   [`Transaction::set_cores`].
+/// * the rest as in [`make_transaction`].
+///
+/// # Type parameters
+/// * `F` – the closure type.
+/// * `R` – value the closure produces, handed back on success.
+///
+/// # Returns
+/// As in [`make_transaction`].
+pub fn make_transaction_update<F, R>(
+    description: &str,
+    config_dir: &str,
+    file_path: &str,
+    build_command: BuildCommand,
+    updated_input: UpdateInput,
+    cores: Option<u32>,
+    f: F,
+) -> mx::Result<R>
+where
+    F: FnOnce(&mut NixFile) -> mx::Result<R>,
+{
+    let mut transaction = Transaction::new(
+        config_dir,
+        description,
+        build_command,
+        TransactionPermission::Writtable,
+    )?;
+    transaction.set_force_commit(true);
+    transaction.set_cores(cores);
+    transaction.add_file(file_path)?;
+    transaction.begin()?;
+
+    let file = match transaction.get_file_mut(file_path) {
+        Ok(file) => file,
+        Err(e) => {
+            transaction.rollback()?;
+            return Err(e);
+        }
+    };
+    match f(file) {
+        Ok(ret) => {
+            transaction.commit(updated_input)?;
+            Ok(ret)
+        }
+        Err(e) => {
+            transaction.rollback()?;
+            Err(e)
+        }
+    }
+}
+
 /// Read-only counterpart of [`make_transaction`]: opens the file without the
 /// right to modify it, for a caller that only needs to read the configuration
 /// under the transaction's locks.

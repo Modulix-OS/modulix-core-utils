@@ -77,6 +77,9 @@ pub mod install_package;
 #[cfg(feature = "user")]
 pub mod user;
 
+#[cfg(feature = "system-update")]
+pub mod update;
+
 mod error;
 
 /// Git repository holding the system's NixOS configuration, and the default

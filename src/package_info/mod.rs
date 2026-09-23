@@ -353,8 +353,7 @@ impl AppInfoGui for NixPackage {
 /// recommended one on Modulix-OS. Keyed by the same id returned by
 /// [`AppInfoGui::id`] (see [`packages_for_app_id`]).
 #[cfg(feature = "app-info-gui")]
-pub static FLATPAK_PREFERRED_APP_IDS: &[&str] = &[
-];
+pub static FLATPAK_PREFERRED_APP_IDS: &[&str] = &[];
 
 /// Whether the Flatpak source is preferred over nixpkgs for the given canonical
 /// app-id (see [`FLATPAK_PREFERRED_APP_IDS`]).

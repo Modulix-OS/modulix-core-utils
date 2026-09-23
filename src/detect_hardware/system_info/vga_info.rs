@@ -214,8 +214,7 @@ impl VgaInfo {
                 };
                 if arch.is_empty() {
                     arch = &match_chipset[0..2];
-                }
-                else if Self::NVIDIA_GEN_CHIPSET
+                } else if Self::NVIDIA_GEN_CHIPSET
                     .iter()
                     .position(|(code, _)| code.eq(&arch))
                     .unwrap()

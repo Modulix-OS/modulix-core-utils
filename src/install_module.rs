@@ -509,12 +509,67 @@ pub fn list_installed_plugin_attrs(config_dir: &str, module_name: &str) -> mx::R
         config_dir,
         FILE_MODULE_PATH,
         BuildCommand::Boot,
-        move |file| {
-            match mxList::new(&plugins_path(&module_name), true).get_element_in_list(file) {
-                Ok(elems) => Ok(elems.map(str::to_string).collect()),
-                Err(mx::ErrorKind::OptionNotFound) => Ok(Vec::new()),
-                Err(e) => Err(e),
+        move |file| match mxList::new(&plugins_path(&module_name), true).get_element_in_list(file) {
+            Ok(elems) => Ok(elems.map(str::to_string).collect()),
+            Err(mx::ErrorKind::OptionNotFound) => Ok(Vec::new()),
+            Err(e) => Err(e),
+        },
+    )
+}
+
+/// Every plugin currently installed, across every enabled module, in one
+/// `module.nix` read.
+///
+/// Same rationale as [`list_installed_package_names`] one level up: the
+/// caller wants "what is installed" without knowing the module set ahead of
+/// time, so this walks [`enabled_module_names`] and
+/// `mx.<module>.plugins` together inside a single read-only transaction
+/// instead of making the caller open one per module.
+///
+/// [`list_installed_package_names`]: crate::install_package::list_installed_package_names
+///
+/// # Parameters
+/// * `config_dir` - root directory of the NixOS configuration.
+///
+/// # Post-conditions
+/// A single read-only transaction is opened and closed on `module.nix`;
+/// nothing is written, no rebuild runs.
+///
+/// # Returns
+/// `(module_name, bare_plugin_name)` pairs — the bare name is the last
+/// dotted component of each raw `pkgs.<namespace>.<plugin>` token, matching
+/// what [`list_installed_plugin_attrs`] callers derive themselves today.
+/// `Vec::new()` if `module.nix` does not exist, or if no enabled module
+/// declares any plugin.
+///
+/// # Errors
+/// Whatever `transaction::make_transaction_read_only` returns, or
+/// [`mx::ErrorKind::OptionIsNotList`] if a module's `plugins` option is
+/// declared but holds something other than a list.
+pub fn list_installed_plugins(config_dir: &str) -> mx::Result<Vec<(String, String)>> {
+    if !path::Path::new(&format!("{config_dir}{FILE_MODULE_PATH}")).exists() {
+        return Ok(Vec::new());
+    }
+    transaction::make_transaction_read_only(
+        "List installed plugins",
+        config_dir,
+        FILE_MODULE_PATH,
+        BuildCommand::Boot,
+        |file| {
+            let mut plugins = Vec::new();
+            for module in enabled_module_names(file)? {
+                let attrs =
+                    match mxList::new(&plugins_path(&module), true).get_element_in_list(file) {
+                        Ok(elems) => elems.map(str::to_string).collect::<Vec<_>>(),
+                        Err(mx::ErrorKind::OptionNotFound) => Vec::new(),
+                        Err(e) => return Err(e),
+                    };
+                for attr in attrs {
+                    let bare = attr.rsplit('.').next().unwrap_or(&attr).to_string();
+                    plugins.push((module.clone(), bare));
+                }
             }
+            Ok(plugins)
         },
     )
 }

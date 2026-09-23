@@ -213,6 +213,80 @@ mod unit {
         let _ = BuildCommand::Install.clone();
         let _ = BuildCommand::BuildVm.clone();
     }
+
+    /// `--cores` is absent when `cores` is `None`.
+    #[test]
+    fn build_rebuild_command_no_cores_flag_when_none() {
+        let command = Transaction::build_rebuild_command(
+            "/etc/modulix-os",
+            "default",
+            &BuildCommand::Switch,
+            None,
+        );
+        let args: Vec<&str> = command.get_args().map(|a| a.to_str().unwrap()).collect();
+        assert!(!args.contains(&"--cores"));
+    }
+
+    /// `--cores <n>` is appended, after `--flake`, when `cores` is `Some`.
+    #[test]
+    fn build_rebuild_command_appends_cores_flag() {
+        let command = Transaction::build_rebuild_command(
+            "/etc/modulix-os",
+            "default",
+            &BuildCommand::Switch,
+            Some(4),
+        );
+        let args: Vec<&str> = command.get_args().map(|a| a.to_str().unwrap()).collect();
+        let cores_pos = args
+            .iter()
+            .position(|a| *a == "--cores")
+            .expect("--cores missing");
+        assert_eq!(args[cores_pos + 1], "4");
+    }
+
+    /// `nixos-rebuild <subcommand> --flake <path>#<name>` for a non-`Install` variant.
+    #[test]
+    fn build_rebuild_command_nixos_rebuild_shape() {
+        let command = Transaction::build_rebuild_command(
+            "/etc/modulix-os",
+            "default",
+            &BuildCommand::Boot,
+            None,
+        );
+        assert_eq!(command.get_program().to_str().unwrap(), "nixos-rebuild");
+        let args: Vec<&str> = command.get_args().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(
+            args,
+            vec![
+                BuildCommand::Boot.as_str(),
+                "--flake",
+                "/etc/modulix-os#default"
+            ]
+        );
+    }
+
+    /// `nixos-install --root /mnt --no-root-password --flake <path>#<name>` for `Install`.
+    #[test]
+    fn build_rebuild_command_nixos_install_shape() {
+        let command = Transaction::build_rebuild_command(
+            "/etc/modulix-os",
+            "default",
+            &BuildCommand::Install,
+            None,
+        );
+        assert_eq!(command.get_program().to_str().unwrap(), "nixos-install");
+        let args: Vec<&str> = command.get_args().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(
+            args,
+            vec![
+                "--root",
+                "/mnt",
+                "--no-root-password",
+                "--flake",
+                "/etc/modulix-os#default"
+            ]
+        );
+    }
 }
 
 mod integration {

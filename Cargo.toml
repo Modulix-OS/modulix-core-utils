@@ -80,6 +80,7 @@ install-package = [
     "core-app-info-trait"
 ]
 user = ["core-nix-file"]
+system-update = ["core-nix-file", "core-nix-eval", "dep:serde", "serde-json", "dep:tokio"]
 
 # wrapped dependencies
 serde-json = ["dep:serde_json"]
