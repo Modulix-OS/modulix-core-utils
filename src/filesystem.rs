@@ -17,6 +17,7 @@ use crate::{
             transaction::{BuildCommand, UpdateInput},
         },
     },
+    error::io_message,
     mx,
 };
 
@@ -236,6 +237,98 @@ pub fn remove_swap(config_dir: &str, device: &str) -> mx::Result<()> {
     )
 }
 
+/// Runs `nixos-generate-config` and returns its stdout.
+///
+/// # Parameters
+/// * `extra_args` - flags placed before `--root`, e.g.
+///   `["--show-hardware-config"]`.
+/// * `root_dir` - root the detection runs against; anything other than `/` is
+///   passed as `--root`, which is what lets the installer probe the target
+///   system instead of the live one.
+///
+/// # Returns
+/// The generator's stdout.
+///
+/// # Errors
+/// [`mx::ErrorKind::NixCommandError`] if the binary cannot be spawned or exits
+/// non-zero (the message carries its exit status and stderr), and
+/// [`mx::ErrorKind::InvalidFile`] if its stdout is not valid UTF-8.
+fn generate_config(extra_args: &[&str], root_dir: &str) -> mx::Result<String> {
+    let mut cmd = process::Command::new("nixos-generate-config");
+    cmd.args(extra_args);
+    if root_dir != "/" {
+        cmd.args(["--root", root_dir]);
+    }
+    let output = cmd.output().map_err(|e| {
+        mx::ErrorKind::NixCommandError(format!("nixos-generate-config: {}", io_message(&e)))
+    })?;
+    if !output.status.success() {
+        return Err(mx::ErrorKind::NixCommandError(format!(
+            "nixos-generate-config exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    String::from_utf8(output.stdout).map_err(|_| mx::ErrorKind::InvalidFile)
+}
+
+/// Isolates the block `nixos-generate-config` adds when it is allowed to look
+/// at filesystems.
+///
+/// The generator renders one single template, in which the `fileSystems`,
+/// LUKS and `swapDevices` declarations form one contiguous chunk that
+/// `--no-filesystems` simply leaves out. The chunk is therefore recovered by
+/// trimming the longest common prefix and the longest common suffix of the two
+/// outputs, which keeps every line of the block even when it also occurs
+/// elsewhere. Comparing the two line *sets* instead would drop such lines: a
+/// non-empty `swapDevices` closes on `    ];`, exactly like the `imports` list
+/// present in both outputs, and losing that line leaves an unbalanced `[`.
+///
+/// # Parameters
+/// * `full` - output of `nixos-generate-config --show-hardware-config`.
+/// * `no_fs` - output of the same command plus `--no-filesystems`.
+///
+/// # Returns
+/// The lines of `full` between the two common ends, joined by newlines and
+/// stripped of the blank lines at either end; empty when both outputs are
+/// identical.
+///
+/// # Post-conditions
+/// The result is a sub-slice of `full`'s lines in their original order, so a
+/// block that was balanced in `full` stays balanced.
+fn extract_fs_block(full: &str, no_fs: &str) -> String {
+    let full_lines: Vec<&str> = full.lines().collect();
+    let no_fs_lines: Vec<&str> = no_fs.lines().collect();
+
+    let mut start = 0;
+    while start < full_lines.len()
+        && start < no_fs_lines.len()
+        && full_lines[start] == no_fs_lines[start]
+    {
+        start += 1;
+    }
+
+    let mut end_full = full_lines.len();
+    let mut end_no_fs = no_fs_lines.len();
+    while end_full > start
+        && end_no_fs > start
+        && full_lines[end_full - 1] == no_fs_lines[end_no_fs - 1]
+    {
+        end_full -= 1;
+        end_no_fs -= 1;
+    }
+
+    let mut block = &full_lines[start..end_full];
+    while block.first().is_some_and(|line| line.trim().is_empty()) {
+        block = &block[1..];
+    }
+    while block.last().is_some_and(|line| line.trim().is_empty()) {
+        block = &block[..block.len() - 1];
+    }
+
+    block.join("\n")
+}
+
 /// Extracts the filesystem part of the hardware configuration
 /// `nixos-generate-config` would emit.
 ///
@@ -245,44 +338,54 @@ pub fn remove_swap(config_dir: &str, device: &str) -> mx::Result<()> {
 ///   system instead of the live one.
 ///
 /// # Returns
-/// The lines present in `--show-hardware-config` but absent from
-/// `--show-hardware-config --no-filesystems`, i.e. the `fileSystems` and
-/// `swapDevices` declarations only, joined by newlines and without the
-/// surrounding module braces.
+/// The `fileSystems`, LUKS and `swapDevices` declarations only, as the
+/// generator rendered them and without the surrounding module braces (see
+/// [`extract_fs_block`]).
 ///
 /// # Pre-conditions
 /// `nixos-generate-config` must be on `PATH`, and detecting a root other than
 /// the live one usually requires privileges.
 ///
 /// # Errors
-/// [`mx::ErrorKind::IOError`] if either invocation cannot be spawned, and
-/// [`mx::ErrorKind::InvalidFile`] if its output is not valid UTF-8. A non-zero
-/// exit status is not reported: it surfaces as an empty or partial result.
+/// [`mx::ErrorKind::NixCommandError`] if either invocation cannot be spawned
+/// or exits non-zero (the message carries its stderr), and
+/// [`mx::ErrorKind::InvalidFile`] if its output is not valid UTF-8.
 pub(super) fn get_filesystem_from_fstab(root_dir: &str) -> mx::Result<String> {
-    let mut cmd_full = process::Command::new("nixos-generate-config");
-    cmd_full.args(["--show-hardware-config"]);
-    if root_dir != "/" {
-        cmd_full.args(["--root", root_dir]);
+    let full_str = generate_config(&["--show-hardware-config"], root_dir)?;
+    let no_fs_str = generate_config(&["--show-hardware-config", "--no-filesystems"], root_dir)?;
+
+    Ok(extract_fs_block(&full_str, &no_fs_str))
+}
+
+/// Renders the whole `fstab.nix` module for `root_dir`.
+///
+/// Single source of the file's skeleton, shared by the reset operation and by
+/// the installer, so the three call sites cannot drift apart.
+///
+/// # Parameters
+/// * `root_dir` - root the detection runs against, as in
+///   [`get_filesystem_from_fstab`].
+///
+/// # Returns
+/// A complete NixOS module wrapping the declarations
+/// [`get_filesystem_from_fstab`] found.
+///
+/// # Post-conditions
+/// The returned text parses as Nix; a generator output that would produce a
+/// broken file is reported instead of being written.
+///
+/// # Errors
+/// Any error from [`get_filesystem_from_fstab`], plus
+/// [`mx::ErrorKind::InvalidFile`] if the rendered module does not parse.
+pub(crate) fn fstab_module(root_dir: &str) -> mx::Result<String> {
+    let module = format!(
+        "{{config, lib, pkgs, ...}}:\n{{\n{}\n}}\n",
+        get_filesystem_from_fstab(root_dir)?
+    );
+    if !rnix::Root::parse(&module).errors().is_empty() {
+        return Err(mx::ErrorKind::InvalidFile);
     }
-    let full = cmd_full.output().map_err(mx::ErrorKind::IOError)?;
-
-    let mut cmd_no_fs = process::Command::new("nixos-generate-config");
-    cmd_no_fs.args(["--show-hardware-config", "--no-filesystems"]);
-    if root_dir != "/" {
-        cmd_no_fs.args(["--root", root_dir]);
-    }
-    let no_fs = cmd_no_fs.output().map_err(mx::ErrorKind::IOError)?;
-
-    let full_str = String::from_utf8(full.stdout).map_err(|_| mx::ErrorKind::InvalidFile)?;
-    let no_fs_str = String::from_utf8(no_fs.stdout).map_err(|_| mx::ErrorKind::InvalidFile)?;
-
-    let no_fs_lines: std::collections::HashSet<&str> = no_fs_str.lines().collect();
-    let diff: Vec<&str> = full_str
-        .lines()
-        .filter(|line| !no_fs_lines.contains(line))
-        .collect();
-
-    Ok(diff.join("\n"))
+    Ok(module)
 }
 
 /// Regenerates `fstab.nix` from what the running system actually has mounted.
@@ -293,11 +396,11 @@ pub(super) fn get_filesystem_from_fstab(root_dir: &str) -> mx::Result<String> {
 /// # Post-conditions
 /// Every previous declaration in the file is discarded, LUKS entries added by
 /// [`add_entry_no_transaction`] included, and replaced by a freshly generated
-/// NixOS module wrapping the output of `get_filesystem_from_fstab` for `/`.
+/// NixOS module ([`fstab_module`]) for `/`.
 pub fn def_filesystem_from_unix_fstab_no_transaction(fstab: &mut NixFile) -> mx::Result<()> {
+    let new_file: String = fstab_module("/")?;
     let content: &mut String = fstab.get_mut_file_content()?;
-    let new_file: String = get_filesystem_from_fstab("/")?;
-    *content = format!("{{config, lib, pkgs, ...}}:\n{{\n{}\n}}\n", new_file);
+    *content = new_file;
     Ok(())
 }
 
@@ -318,4 +421,100 @@ pub fn def_filesystem_from_unix_fstab(config_dir: &str) -> mx::Result<()> {
         UpdateInput::Keep,
         |file| def_filesystem_from_unix_fstab_no_transaction(file),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_fs_block;
+
+    /// Output of `nixos-generate-config --show-hardware-config --no-filesystems`,
+    /// reduced to the lines that matter for the extraction.
+    const NO_FS: &str = "\
+# Do not modify this file!
+{ config, lib, pkgs, modulesPath, ... }:
+
+{
+  imports =
+    [ (modulesPath + \"/installer/scan/not-detected.nix\")
+    ];
+
+  boot.initrd.availableKernelModules = [ \"nvme\" ];
+  boot.initrd.kernelModules = [ ];
+  boot.kernelModules = [ ];
+  boot.extraModulePackages = [ ];
+
+  nixpkgs.hostPlatform = lib.mkDefault \"x86_64-linux\";
+}
+";
+
+    /// Builds the full output by splicing `block` where the generator inserts
+    /// its filesystem section, i.e. after `boot.extraModulePackages`.
+    fn full_with(block: &str) -> String {
+        NO_FS.replace(
+            "  boot.extraModulePackages = [ ];\n",
+            &format!("  boot.extraModulePackages = [ ];\n{}", block),
+        )
+    }
+
+    /// Counts the opening and closing occurrences of a bracket pair.
+    fn balance(text: &str, open: char, close: char) -> (usize, usize) {
+        (
+            text.chars().filter(|c| *c == open).count(),
+            text.chars().filter(|c| *c == close).count(),
+        )
+    }
+
+    #[test]
+    fn keeps_multiline_swap_closing_bracket() {
+        let block = "\n  fileSystems.\"/\" =\n    { device = \"/dev/disk/by-uuid/aaaa\";\n      fsType = \"ext4\";\n    };\n\n  swapDevices =\n    [ { device = \"/dev/disk/by-uuid/bbbb\"; }\n    ];\n";
+        let extracted = extract_fs_block(&full_with(block), NO_FS);
+
+        assert!(extracted.contains("swapDevices ="));
+        assert!(extracted.contains("    ];"));
+        assert_eq!(
+            balance(&extracted, '[', ']').0,
+            balance(&extracted, '[', ']').1
+        );
+        assert_eq!(
+            balance(&extracted, '{', '}').0,
+            balance(&extracted, '{', '}').1
+        );
+    }
+
+    #[test]
+    fn keeps_empty_swap_and_filesystems() {
+        let block = "\n  fileSystems.\"/\" =\n    { device = \"/dev/disk/by-uuid/aaaa\";\n      fsType = \"ext4\";\n    };\n\n  swapDevices = [ ];\n";
+        let extracted = extract_fs_block(&full_with(block), NO_FS);
+
+        assert!(extracted.contains("fileSystems.\"/\" ="));
+        assert!(extracted.contains("swapDevices = [ ];"));
+        assert!(!extracted.contains("nixpkgs.hostPlatform"));
+        assert!(!extracted.contains("boot.extraModulePackages"));
+    }
+
+    #[test]
+    fn keeps_luks_line_between_two_filesystems() {
+        let block = "\n  fileSystems.\"/\" =\n    { device = \"/dev/mapper/luks-cccc\";\n      fsType = \"ext4\";\n    };\n\n  boot.initrd.luks.devices.\"luks-cccc\".device = \"/dev/disk/by-uuid/cccc\";\n\n  fileSystems.\"/boot\" =\n    { device = \"/dev/disk/by-uuid/5BA4-ED5B\";\n      fsType = \"vfat\";\n      options = [ \"fmask=0077\" \"dmask=0077\" ];\n    };\n\n  swapDevices = [ ];\n";
+        let extracted = extract_fs_block(&full_with(block), NO_FS);
+
+        assert!(extracted.contains("boot.initrd.luks.devices.\"luks-cccc\".device"));
+        assert_eq!(extracted.matches("fileSystems.").count(), 2);
+        assert_eq!(
+            balance(&extracted, '{', '}').0,
+            balance(&extracted, '{', '}').1
+        );
+    }
+
+    #[test]
+    fn reduces_to_swap_when_no_filesystem_found() {
+        let block = "\n  swapDevices = [ ];\n";
+        let extracted = extract_fs_block(&full_with(block), NO_FS);
+
+        assert_eq!(extracted, "  swapDevices = [ ];");
+    }
+
+    #[test]
+    fn yields_nothing_when_outputs_match() {
+        assert_eq!(extract_fs_block(NO_FS, NO_FS), "");
+    }
 }

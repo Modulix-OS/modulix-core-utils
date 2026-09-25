@@ -25,6 +25,7 @@ use crate::core::transaction::file_lock::NixFile;
 use crate::core::transaction::transaction::LOCK_SKIP_REBUILD_FILE;
 use crate::core::transaction::transaction::TransactionPermission;
 use crate::core::transaction::transaction::{BuildCommand, UpdateInput};
+use crate::error::io_message;
 use crate::{CONFIG_DIRECTORY, filesystem, hardware_config, locale, mx, user};
 use std::path::{Component, Path};
 use std::{fs, process};
@@ -179,7 +180,7 @@ fn resolve_config_path(root_path: &str, config_dir: Option<&str>) -> String {
 /// `nixos-generate-config --show-hardware-config --no-filesystems`
 /// (with `--root root_path` unless `root_path` is `/`) to capture the
 /// hardware config without a filesystem section, builds `fstab.nix` from
-/// `filesystem::get_filesystem_from_fstab`, and commits `flake.nix`
+/// `filesystem::fstab_module`, and commits `flake.nix`
 /// (`FLAKE_FILE`), `configuration.nix` (`CONFIG_FILE`),
 /// `hardware-configuration.nix` and `fstab.nix` in one `Transaction`
 /// (`BuildCommand::Install` in release, `BuildCommand::Boot` in debug —
@@ -217,13 +218,15 @@ fn resolve_config_path(root_path: &str, config_dir: Option<&str>) -> String {
 /// commit has been made.
 ///
 /// # Errors
-/// * `mx::ErrorKind::IOError` - removing/creating the directory, running
-///   `nixos-generate-config`, or other I/O failed.
+/// * `mx::ErrorKind::IOError` - removing/creating the directory, or other I/O
+///   failed.
+/// * `mx::ErrorKind::NixCommandError` - `nixos-generate-config` could not be
+///   spawned or exited non-zero (the message carries its stderr).
 /// * `mx::ErrorKind::InvalidFile` - `nixos-generate-config`'s stdout is not
 ///   valid UTF-8, or a path could not be converted (via
 ///   `remove_dir_recursive`).
 /// * `mx::ErrorKind::GitError` - `git2` failed to open or init the repo.
-/// * Any error from `filesystem::get_filesystem_from_fstab`,
+/// * Any error from `filesystem::fstab_module`,
 ///   `Transaction::new`, `Transaction::add_file`, `Transaction::begin`,
 ///   `Transaction::get_file_mut`, or `Transaction::commit`.
 pub fn init_repo(root_path: &str) -> mx::Result<()> {
@@ -248,16 +251,22 @@ pub fn init_repo(root_path: &str) -> mx::Result<()> {
         if root_path != "/" {
             cmd.args(["--root", root_path]);
         }
-        cmd.output().map_err(mx::ErrorKind::IOError)?
+        cmd.output().map_err(|e| {
+            mx::ErrorKind::NixCommandError(format!("nixos-generate-config: {}", io_message(&e)))
+        })?
     };
+    if !hardware_output.status.success() {
+        return Err(mx::ErrorKind::NixCommandError(format!(
+            "nixos-generate-config exited with {}: {}",
+            hardware_output.status,
+            String::from_utf8_lossy(&hardware_output.stderr)
+        )));
+    }
 
     let hardware_no_fs =
         String::from_utf8(hardware_output.stdout).map_err(|_| mx::ErrorKind::InvalidFile)?;
 
-    let fs = format!(
-        "{{config, lib, pkgs, ...}}:\n{{\n{}\n}}\n",
-        filesystem::get_filesystem_from_fstab(root_path)?
-    );
+    let fs = filesystem::fstab_module(root_path)?;
 
     #[cfg(debug_assertions)]
     let mut initial_transaction = Transaction::new(
@@ -369,7 +378,7 @@ impl Desktop {
 ///
 /// # Fields
 /// * `root` - installation root passed to `resolve_config_path`,
-///   `filesystem::get_filesystem_from_fstab` and
+///   `filesystem::fstab_module` and
 ///   `hardware_config::write_hardware_config_no_transaction` (`/` for the
 ///   live system, or an install root such as `/mnt`).
 /// * `hostname` - value written to `networking.hostName` in
@@ -633,7 +642,7 @@ fn validate_config_path(path_config: &str) -> mx::Result<()> {
 /// order:
 /// 1. `init_cache_dir` creates `.cache` and excludes it (and `result`) via
 ///    `.git/info/exclude`.
-/// 2. `fstab.nix` is rendered from `filesystem::get_filesystem_from_fstab`
+/// 2. `fstab.nix` is rendered from `filesystem::fstab_module`
 ///    and `configuration.nix` from `configuration_nix`.
 /// 3. Outside debug mode, `hold_skip_rebuild_lock` is taken and held for
 ///    the rest of the call (assigned to `_skip_rebuild`, dropped — and thus
@@ -715,7 +724,7 @@ fn validate_config_path(path_config: &str) -> mx::Result<()> {
 /// * `mx::ErrorKind::GitError` - `git2` failed to init the repo.
 /// * `mx::ErrorKind::FailToLock` - `hold_skip_rebuild_lock` could not
 ///   acquire its lock (non-debug builds only).
-/// * Any error from `filesystem::get_filesystem_from_fstab`,
+/// * Any error from `filesystem::fstab_module`,
 ///   `hardware_config::write_hardware_config_no_transaction`,
 ///   `locale::set_locale_no_transaction`,
 ///   `locale::set_keyboard_no_transaction`, `user::add_no_transaction`,
@@ -737,10 +746,7 @@ pub fn init(params: &InitParams) -> mx::Result<()> {
 
     init_cache_dir(repo_path)?;
 
-    let fstab = format!(
-        "{{config, lib, pkgs, ...}}:\n{{\n{}\n}}\n",
-        filesystem::get_filesystem_from_fstab(&params.root)?
-    );
+    let fstab = filesystem::fstab_module(&params.root)?;
     let config = configuration_nix(params);
 
     let _skip_rebuild = if params.debug {

@@ -5,6 +5,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+use crate::error::io_error_at;
 use crate::mx;
 
 /// The machine's identity plus the devices worth knowing about when picking
@@ -46,7 +47,7 @@ impl ComputerInfo {
     /// cannot be read, as happens on a machine without DMI.
     fn grep_vendor() -> mx::Result<String> {
         let vendor = fs::read_to_string("/sys/devices/virtual/dmi/id/sys_vendor")
-            .map_err(mx::ErrorKind::IOError)?;
+            .map_err(|e| io_error_at("/sys/devices/virtual/dmi/id/sys_vendor", e))?;
         match Self::HARDWARE_VENDOR_REPLACMENT
             .iter()
             .position(|(s, _)| s.contains(&vendor))
@@ -70,7 +71,7 @@ impl ComputerInfo {
     /// `/sys/devices/virtual/dmi/id/product_family` cannot be read.
     fn grep_product_family(vendor: &str) -> mx::Result<String> {
         let family = fs::read_to_string("/sys/devices/virtual/dmi/id/product_family")
-            .map_err(mx::ErrorKind::IOError)?
+            .map_err(|e| io_error_at("/sys/devices/virtual/dmi/id/product_family", e))?
             .to_lowercase();
         let pos_vendor = Self::FAMILY_EXCEPTION_RULES
             .iter()
@@ -97,7 +98,7 @@ impl ComputerInfo {
     /// cannot be read.
     fn grep_product_name() -> mx::Result<String> {
         fs::read_to_string("/sys/devices/virtual/dmi/id/product_name")
-            .map_err(mx::ErrorKind::IOError)
+            .map_err(|e| io_error_at("/sys/devices/virtual/dmi/id/product_name", e))
     }
 
     /// Identifies the running machine.
@@ -228,8 +229,8 @@ impl ComputerInfo {
     /// [`mx::ErrorKind::IOError`] if `/sys/block` cannot be listed.
     fn list_block_device() -> mx::Result<Vec<String>> {
         let mut devices = Vec::new();
-        for entry in fs::read_dir("/sys/block").map_err(mx::ErrorKind::IOError)? {
-            let entry = entry.map_err(mx::ErrorKind::IOError)?;
+        for entry in fs::read_dir("/sys/block").map_err(|e| io_error_at("/sys/block", e))? {
+            let entry = entry.map_err(|e| io_error_at("/sys/block", e))?;
             let name = entry.file_name().to_string_lossy().into_owned();
             if name.starts_with("sd") || name.starts_with("nvme") {
                 devices.push(name);
@@ -252,7 +253,7 @@ impl ComputerInfo {
     #[allow(dead_code)]
     fn is_hdd(device: &str) -> mx::Result<bool> {
         let path = format!("/sys/block/{}/queue/rotational", device);
-        let contents = fs::read_to_string(path).map_err(mx::ErrorKind::IOError)?;
+        let contents = fs::read_to_string(&path).map_err(|e| io_error_at(&path, e))?;
         Ok(contents.trim() == "1")
     }
 
@@ -269,7 +270,7 @@ impl ComputerInfo {
     /// cannot be read.
     fn is_ssd(device: &str) -> mx::Result<bool> {
         let path = format!("/sys/block/{}/queue/rotational", device);
-        let contents = fs::read_to_string(path).map_err(mx::ErrorKind::IOError)?;
+        let contents = fs::read_to_string(&path).map_err(|e| io_error_at(&path, e))?;
         Ok(contents.trim() == "0")
     }
 

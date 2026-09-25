@@ -345,7 +345,9 @@ impl NixFile {
                     Ok(()) => (),
                     Err(e) => match e {
                         mx::ErrorKind::IOError(ioe) => match ioe.kind() {
-                            io::ErrorKind::NotFound => return Err(mx::ErrorKind::FileNotFound),
+                            io::ErrorKind::NotFound => {
+                                return Err(mx::ErrorKind::FileNotFound(self.path.clone()));
+                            }
                             _ => return Err(mx::ErrorKind::IOError(ioe)),
                         },
                         err => return Err(err),
@@ -361,7 +363,7 @@ impl NixFile {
                     .open(&self.path)
                     .map_err(|e| match e.kind() {
                         io::ErrorKind::PermissionDenied => mx::ErrorKind::PermissionDenied,
-                        io::ErrorKind::NotFound => mx::ErrorKind::FileNotFound,
+                        io::ErrorKind::NotFound => mx::ErrorKind::FileNotFound(self.path.clone()),
                         _ => mx::ErrorKind::IOError(e),
                     })?,
             )

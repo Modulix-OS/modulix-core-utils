@@ -376,7 +376,7 @@ mod integration {
         t.begin().unwrap();
         assert!(matches!(
             t.get_file("nonexistent.nix"),
-            Err(mx::ErrorKind::FileNotFound)
+            Err(mx::ErrorKind::FileNotFound(_))
         ));
         t.rollback().unwrap();
     }

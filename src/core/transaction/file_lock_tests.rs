@@ -78,7 +78,7 @@ mod unit {
         assert!(
             matches!(
                 f.begin(NixFilePermission::ReadOnly),
-                Err(mx::ErrorKind::FileNotFound)
+                Err(mx::ErrorKind::FileNotFound(_))
             ),
             "expected FileNotFound"
         );

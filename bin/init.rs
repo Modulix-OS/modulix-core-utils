@@ -85,6 +85,27 @@ fn print_usage(program: &str) {
     );
 }
 
+/// Consumes the value following a flag at `args[*i]`.
+///
+/// # Parameters
+/// * `args` - the full argument list.
+/// * `i` - index of the flag itself; advanced to the value's index on success.
+/// * `flag` - the flag's spelling, used only to name it in the error message.
+///
+/// # Returns
+/// The value, cloned out of `args`.
+///
+/// # Errors
+/// An error naming `flag` when it is the last argument, i.e. no value follows it.
+fn take_value(args: &[String], i: &mut usize, flag: &str) -> Result<String, String> {
+    *i += 1;
+    if *i >= args.len() {
+        Err(format!("{flag} requires a value"))
+    } else {
+        Ok(args[*i].clone())
+    }
+}
+
 /// Parses `std::env::args()` into an `InitParams`, applying each flag's documented default
 /// (see the crate-level docs) to any value left unset.
 ///
@@ -104,8 +125,8 @@ fn print_usage(program: &str) {
 ///
 /// # Panics
 /// Never panics. Instead, `parse_args` terminates the process directly (via
-/// `std::process::exit`) in three cases: `--config-dir` given without a following value (after
-/// printing usage, status `1`), an unrecognized `--desktop` value (status `1`), an unknown
+/// `std::process::exit`) in four cases: a value-taking flag given without a following value
+/// (after printing usage, status `1`), an unrecognized `--desktop` value (status `1`), an unknown
 /// option (after printing usage, status `1`), or `--help`/`-h` (after printing usage, status
 /// `0`).
 fn parse_args() -> InitParams {
@@ -125,76 +146,28 @@ fn parse_args() -> InitParams {
 
     let mut i = 1;
     while i < args.len() {
-        match args[i].as_str() {
-            "--root" => {
-                i += 1;
-                if i < args.len() {
-                    root = args[i].clone();
-                }
-            }
-            "--hostname" => {
-                i += 1;
-                if i < args.len() {
-                    hostname = args[i].clone();
-                }
-            }
-            "--username" => {
-                i += 1;
-                if i < args.len() {
-                    username = args[i].clone();
-                }
-            }
-            "--fullname" => {
-                i += 1;
-                if i < args.len() {
-                    full_name = args[i].clone();
-                }
-            }
-            "--desktop" => {
-                i += 1;
-                if i < args.len() {
-                    desktop = args[i].clone();
-                }
-            }
-            "--locale" => {
-                i += 1;
-                if i < args.len() {
-                    locale = args[i].clone();
-                }
-            }
-            "--timezone" => {
-                i += 1;
-                if i < args.len() {
-                    timezone = args[i].clone();
-                }
-            }
-            "--kb-layout" => {
-                i += 1;
-                if i < args.len() {
-                    kb_layout = args[i].clone();
-                }
-            }
-            "--kb-variant" => {
-                i += 1;
-                if i < args.len() {
-                    kb_variant = args[i].clone();
-                }
-            }
-            "--console-keymap" => {
-                i += 1;
-                if i < args.len() {
-                    console_keymap = args[i].clone();
-                }
-            }
-            "--config-dir" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("Error: --config-dir requires a path");
+        let flag = args[i].as_str();
+        macro_rules! value {
+            () => {
+                take_value(&args, &mut i, flag).unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
                     print_usage(&args[0]);
                     std::process::exit(1);
-                }
-                config_dir = Some(args[i].clone());
-            }
+                })
+            };
+        }
+        match flag {
+            "--root" => root = value!(),
+            "--hostname" => hostname = value!(),
+            "--username" => username = value!(),
+            "--fullname" => full_name = value!(),
+            "--desktop" => desktop = value!(),
+            "--locale" => locale = value!(),
+            "--timezone" => timezone = value!(),
+            "--kb-layout" => kb_layout = value!(),
+            "--kb-variant" => kb_variant = value!(),
+            "--console-keymap" => console_keymap = value!(),
+            "--config-dir" => config_dir = Some(value!()),
             "--debug" => {
                 debug = true;
             }
@@ -288,15 +261,15 @@ fn parse_args() -> InitParams {
 /// where every rebuild is forced to `nixos-rebuild build-vm`.
 ///
 /// # Returns
-/// `ExitCode::SUCCESS` on success. On failure, prints `mx-init: <error debug representation>`
-/// to stderr and returns `ExitCode::FAILURE`.
+/// `ExitCode::SUCCESS` on success. On failure, prints `mx-init: <error message>` to stderr and
+/// returns `ExitCode::FAILURE`.
 fn main() -> ExitCode {
     let params = parse_args();
 
     match init(&params) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("mx-init: {e:?}");
+            eprintln!("mx-init: {e}");
             ExitCode::FAILURE
         }
     }

@@ -656,7 +656,7 @@ impl<'a> Transaction<'a> {
         }
         self.list_file
             .get_mut(path)
-            .ok_or(mx::ErrorKind::FileNotFound)
+            .ok_or_else(|| mx::ErrorKind::FileNotFound(path.to_string()))
     }
 
     /// Returns a shared reference to the [`NixFile`] associated with `path`.
@@ -675,7 +675,9 @@ impl<'a> Transaction<'a> {
         if self.git_repo.is_none() {
             return Err(mx::ErrorKind::TransactionNotBegin);
         }
-        self.list_file.get(path).ok_or(mx::ErrorKind::FileNotFound)
+        self.list_file
+            .get(path)
+            .ok_or_else(|| mx::ErrorKind::FileNotFound(path.to_string()))
     }
 
     /// Opens the transaction: initializes the Git repository, stashes any
@@ -748,7 +750,7 @@ impl<'a> Transaction<'a> {
             for (path_file, file) in self.list_file.iter_mut() {
                 match file.begin(NixFilePermission::from(&self.permission_transaction)) {
                     Ok(_) => (),
-                    Err(mx::ErrorKind::FileNotFound)
+                    Err(mx::ErrorKind::FileNotFound(_))
                         if let TransactionPermission::Writtable = self.permission_transaction =>
                     {
                         file.create_file()?;

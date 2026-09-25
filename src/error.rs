@@ -10,7 +10,7 @@ use std::{fmt, io, result, string};
 ///
 /// # Variants
 /// * `InvalidFile` - the target is not parseable as a Nix file.
-/// * `FileNotFound` - the configuration file does not exist.
+/// * `FileNotFound` - the configuration file does not exist; payload is its path.
 /// * `OptionNotFound` - the requested option is absent from the configuration.
 /// * `FailToLock` - another process holds the lock on the file or the build
 ///   queue.
@@ -53,7 +53,7 @@ use std::{fmt, io, result, string};
 #[derive(fmt::Debug)]
 pub enum ErrorKind {
     InvalidFile,
-    FileNotFound,
+    FileNotFound(String),
     OptionNotFound,
     FailToLock,
     PermissionDenied,
@@ -104,7 +104,10 @@ impl fmt::Display for ErrorKind {
             match self {
                 Self::InvalidFile => "File is not a valid Nix file",
                 Self::OptionNotFound => "Option not found",
-                Self::FileNotFound => "File not found",
+                Self::FileNotFound(path) => {
+                    s = format!("File not found: {path}");
+                    s.as_str()
+                }
                 Self::TransactionNotBegin => "Transaction don't start",
                 Self::TransactionAlreadyBegin => "Transaction already start",
                 Self::FailToLock => "Impossible to take lock",
@@ -124,7 +127,7 @@ impl fmt::Display for ErrorKind {
                 Self::RequestSenderError(s) => s.as_str(),
                 Self::GetVGAInfoError(e) => e,
                 Self::IOError(e) => {
-                    s = e.to_string();
+                    s = io_message(e);
                     s.as_str()
                 }
                 Self::GitError(e) => {
@@ -174,5 +177,43 @@ impl fmt::Display for ErrorKind {
 /// [`ErrorKind::IOError`] carrying a new error of the same
 /// [`io::ErrorKind`], whose message is `"<path>: <error>"`.
 pub(crate) fn io_error_at(path: &str, error: io::Error) -> ErrorKind {
-    ErrorKind::IOError(io::Error::new(error.kind(), format!("{path}: {error}")))
+    ErrorKind::IOError(io::Error::new(
+        error.kind(),
+        format!("{path}: {}", io_message(&error)),
+    ))
+}
+
+/// Locale-independent English rendering of an I/O error.
+///
+/// `io::Error`'s own `Display` goes through `strerror`, which glibc localises
+/// — the installer runs under a French `LC_MESSAGES` and the message reached
+/// the user in French. A custom payload (what [`io_error_at`] builds) is our
+/// own English string and is returned as is; everything else is mapped from
+/// `io::ErrorKind`, which is stable and English.
+///
+/// # Parameters
+/// * `error` - the I/O error to render.
+///
+/// # Returns
+/// An English, locale-independent description of `error`.
+pub(crate) fn io_message(error: &io::Error) -> String {
+    if error.get_ref().is_some() {
+        return error.to_string();
+    }
+    match error.kind() {
+        io::ErrorKind::NotFound => "no such file or directory".to_string(),
+        io::ErrorKind::PermissionDenied => "permission denied".to_string(),
+        io::ErrorKind::AlreadyExists => "file already exists".to_string(),
+        io::ErrorKind::NotADirectory => "not a directory".to_string(),
+        io::ErrorKind::IsADirectory => "is a directory".to_string(),
+        io::ErrorKind::StorageFull => "no space left on device".to_string(),
+        io::ErrorKind::WriteZero => "failed to write whole buffer".to_string(),
+        io::ErrorKind::UnexpectedEof => "unexpected end of file".to_string(),
+        io::ErrorKind::Interrupted => "operation interrupted".to_string(),
+        io::ErrorKind::InvalidInput => "invalid input parameter".to_string(),
+        io::ErrorKind::InvalidData => "invalid data".to_string(),
+        io::ErrorKind::TimedOut => "operation timed out".to_string(),
+        io::ErrorKind::BrokenPipe => "broken pipe".to_string(),
+        other => format!("{other:?}"),
+    }
 }

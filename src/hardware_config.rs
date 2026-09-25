@@ -15,6 +15,7 @@ use crate::{
         },
     },
     detect_hardware::driver_config::DriverConfig,
+    error::io_message,
     mx,
 };
 
@@ -43,10 +44,10 @@ const HARDWARE_CONFIG_PATH: &str = "hardware-configuration.nix";
 /// [`crate::detect_hardware`] runs need `pciutils`/`usbutils`/`cpuid`.
 ///
 /// # Errors
-/// [`mx::ErrorKind::IOError`] if the generator cannot be spawned,
+/// [`mx::ErrorKind::NixCommandError`] if the generator cannot be spawned
+/// (names it) or exits non-zero (carries its stderr),
 /// [`mx::ErrorKind::InvalidFile`] if its output is not UTF-8, plus any error
-/// from hardware detection. A non-zero exit status of the generator is not
-/// reported on its own.
+/// from hardware detection.
 pub fn write_hardware_config_no_transaction(
     root_path: &str,
     hardware_file: &mut NixFile,
@@ -57,8 +58,17 @@ pub fn write_hardware_config_no_transaction(
         if root_path != "/" {
             cmd.args(["--root", root_path]);
         }
-        cmd.output().map_err(mx::ErrorKind::IOError)?
+        cmd.output().map_err(|e| {
+            mx::ErrorKind::NixCommandError(format!("nixos-generate-config: {}", io_message(&e)))
+        })?
     };
+    if !hardware_output.status.success() {
+        return Err(mx::ErrorKind::NixCommandError(format!(
+            "nixos-generate-config exited with {}: {}",
+            hardware_output.status,
+            String::from_utf8_lossy(&hardware_output.stderr)
+        )));
+    }
 
     let hardware_no_fs =
         String::from_utf8(hardware_output.stdout).map_err(|_| mx::ErrorKind::InvalidFile)?;
