@@ -43,6 +43,38 @@ const EVAL_TIMEOUT: Duration = Duration::from_secs(20);
 /// Dropping the future kills the child, so a cancelled caller leaves no `nix`
 /// process behind.
 pub async fn run_json<T: DeserializeOwned>(args: &[&str], timeout: Duration) -> mx::Result<T> {
+    let stdout = run(args, timeout).await?;
+    serde_json::from_str(&stdout).map_err(|e| mx::ErrorKind::NixCommandError(e.to_string()))
+}
+
+/// Run `nix <args>` and return its stdout verbatim, bounded by `timeout`.
+///
+/// The raw counterpart of [`run_json`], for the invocations whose output is not
+/// JSON - `nix flake update`, which only writes files and logs to stderr. Both
+/// share this body, so every `nix` subprocess in the crate keeps the same
+/// environment, kill-on-drop and timeout behaviour.
+///
+/// # Parameters
+/// * `args` - arguments passed to `nix`, verbatim and in order.
+/// * `timeout` - ceiling on the whole invocation.
+///
+/// # Pre-conditions
+/// `nix` must be on `PATH`, with flakes enabled for the installables the caller
+/// passes.
+///
+/// # Returns
+/// The process' stdout, decoded as UTF-8. Empty when the command writes nothing
+/// to stdout, which is not an error.
+///
+/// # Errors
+/// [`mx::ErrorKind::NixCommandError`] on timeout or on a non-zero exit (payload
+/// is stderr); [`mx::ErrorKind::IOError`] when the process cannot be spawned;
+/// [`mx::ErrorKind::FromUtf8Error`] when stdout is not UTF-8.
+///
+/// # Post-conditions
+/// Dropping the future kills the child, so a cancelled caller leaves no `nix`
+/// process behind.
+pub async fn run(args: &[&str], timeout: Duration) -> mx::Result<String> {
     let mut command = tokio::process::Command::new("nix");
     command
         .args(args)
@@ -60,8 +92,7 @@ pub async fn run_json<T: DeserializeOwned>(args: &[&str], timeout: Duration) -> 
         ));
     }
 
-    let stdout = String::from_utf8(output.stdout).map_err(mx::ErrorKind::FromUtf8Error)?;
-    serde_json::from_str(&stdout).map_err(|e| mx::ErrorKind::NixCommandError(e.to_string()))
+    String::from_utf8(output.stdout).map_err(mx::ErrorKind::FromUtf8Error)
 }
 
 /// Run `nix eval --json <args>` and deserialize its stdout into `T`.

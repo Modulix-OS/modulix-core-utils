@@ -16,6 +16,16 @@
 //! pinned in `flake.lock` against each input's current upstream revision, so
 //! a caller (the daemon's `Store1.ListOutdatedInputs`) can show what an
 //! update would change before running it.
+//!
+//! [`check_update`] is the same question asked the other way round, and is the
+//! path the daemon actually drives: rather than probing each input, it lets
+//! `nix` resolve the whole lockfile into a scratch file
+//! (`--output-lock-file`) and hands the result back as text. A caller can then
+//! keep that candidate around, describe it locally with [`diff_locks`], and
+//! apply exactly it with [`update_with_lock`] - so the refresh's network cost
+//! is paid once, and the revisions announced are the revisions installed.
+//! [`update`] remains the one-shot variant for a caller with no candidate in
+//! hand.
 
 use std::collections::HashMap;
 use std::path;
@@ -96,6 +106,18 @@ pub struct OutdatedInput {
 
 /// Ceiling on a single `nix flake metadata` probe, per input.
 const METADATA_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Relative path, under a configuration directory, of the lockfile this module
+/// reads and produces candidates for.
+const FILE_FLAKE_LOCK_PATH: &str = "flake.lock";
+
+/// Name, under [`crate::cache_dir`], of the scratch lockfile
+/// [`check_update`] hands to `nix flake update --output-lock-file`.
+const UPDATE_PROBE_FILE: &str = "update-probe.lock";
+
+/// Ceiling on the candidate-lock probe. A full `nix flake update` refetches
+/// every input, so this is minutes, not seconds.
+const UPDATE_PROBE_TIMEOUT: Duration = Duration::from_secs(900);
 
 /// Deserialized shape of a `flake.lock` file, restricted to the fields
 /// [`outdated_inputs`] needs.
@@ -215,7 +237,7 @@ fn compare_rev(locked: &LockedRef) -> String {
 /// [`mx::ErrorKind::ParseError`] if it is not valid JSON in the expected
 /// shape.
 pub async fn outdated_inputs(config_dir: &str) -> mx::Result<Vec<OutdatedInput>> {
-    let lock_path = path::Path::new(config_dir).join("flake.lock");
+    let lock_path = path::Path::new(config_dir).join(FILE_FLAKE_LOCK_PATH);
     let content = tokio::fs::read_to_string(&lock_path)
         .await
         .map_err(mx::ErrorKind::IOError)?;
@@ -275,6 +297,217 @@ pub async fn outdated_inputs(config_dir: &str) -> mx::Result<Vec<OutdatedInput>>
         }
     }
     Ok(outdated)
+}
+
+/// Locked reference of one of `lock`'s **direct** inputs, by input name.
+///
+/// # Arguments
+/// * `lock` - parsed lockfile to look into.
+/// * `name` - input name as declared under `inputs` in `flake.nix`.
+///
+/// # Returns
+/// `Some(locked)` when `root` declares `name` and the node it points at carries
+/// a `locked` block; `None` otherwise, including when the lockfile has no
+/// `root` node.
+fn direct_input<'a>(lock: &'a FlakeLock, name: &str) -> Option<&'a LockedRef> {
+    let root = lock.nodes.get(&lock.root)?;
+    let key = root.inputs.get(name)?.as_str()?;
+    lock.nodes.get(key)?.locked.as_ref()
+}
+
+/// Lists the direct inputs whose pinned revision differs between two
+/// lockfiles.
+///
+/// The local counterpart of [`outdated_inputs`]: it spawns no process and
+/// touches no network, so once [`check_update`] has produced a candidate
+/// lockfile the same report can be rebuilt for free, and is consistent by
+/// construction with what [`update_with_lock`] will apply.
+///
+/// # Arguments
+/// * `old` - lockfile currently pinned, usually `<config_dir>/flake.lock`.
+/// * `new` - candidate lockfile, as returned by [`check_update`].
+///
+/// # Returns
+/// One [`OutdatedInput`] per direct input of `new`'s `root` node whose
+/// revision moved, with `current_rev` read from `old` and `new_rev` /
+/// `last_modified` from `new`. Order follows `new`'s iteration order, which is
+/// unspecified.
+///
+/// # Post-conditions
+/// An input absent from `old` (newly declared) is skipped rather than reported
+/// as outdated, as is one whose `original` block is missing or of type `path`,
+/// and one carrying no `locked` block. An input dropped in `new` is not
+/// reported either: only `new`'s inputs are walked.
+///
+/// # Errors
+/// [`mx::ErrorKind::ParseError`] if either argument is not valid JSON in the
+/// `flake.lock` shape.
+pub fn diff_locks(old: &str, new: &str) -> mx::Result<Vec<OutdatedInput>> {
+    let old_lock: FlakeLock = serde_json::from_str(old).map_err(mx::ErrorKind::ParseError)?;
+    let new_lock: FlakeLock = serde_json::from_str(new).map_err(mx::ErrorKind::ParseError)?;
+
+    let Some(new_root) = new_lock.nodes.get(&new_lock.root) else {
+        return Ok(vec![]);
+    };
+
+    let mut outdated = Vec::new();
+    for (name, node_ref) in &new_root.inputs {
+        let Some(node) = node_ref.as_str().and_then(|key| new_lock.nodes.get(key)) else {
+            continue;
+        };
+        let Some(original) = &node.original else {
+            continue;
+        };
+        if original.kind == "path" {
+            continue;
+        }
+        let Some(locked) = &node.locked else {
+            continue;
+        };
+        let Some(old_locked) = direct_input(&old_lock, name) else {
+            continue;
+        };
+
+        let current_rev = compare_rev(old_locked);
+        let new_rev = compare_rev(locked);
+        if current_rev != new_rev {
+            outdated.push(OutdatedInput {
+                name: name.clone(),
+                current_rev,
+                new_rev,
+                last_modified: locked.last_modified,
+            });
+        }
+    }
+    Ok(outdated)
+}
+
+/// Computes the lockfile a full refresh would produce, without applying it.
+///
+/// Runs `nix flake update` with `--output-lock-file`, so the new lock lands in
+/// a scratch file under [`crate::cache_dir`] and **nothing inside `config_dir`
+/// is written** - no transaction, no immutable-flag handling, no privilege
+/// beyond reading the configuration. The caller can therefore show the pending
+/// change (via [`diff_locks`]) and apply the very same revisions later with
+/// [`update_with_lock`], instead of re-resolving them a second time.
+///
+/// # Arguments
+/// * `config_dir` - configuration repository to probe.
+///
+/// # Pre-conditions
+/// `<config_dir>/flake.lock` must exist: this is the update path of an already
+/// initialised system, not a bootstrap.
+///
+/// # Returns
+/// `Some(lockfile)` with the full text of the candidate `flake.lock` when it
+/// differs from the current one, `None` when every input is already current.
+/// The comparison is made on the parsed JSON, so a pure reformatting is not
+/// reported as an update.
+///
+/// # Post-conditions
+/// `<config_dir>/flake.lock` is untouched. The scratch file is left behind on
+/// purpose - it is overwritten by the next probe and costs one lockfile.
+/// Blocks for the whole refresh, which refetches every input and can take
+/// minutes.
+///
+/// # Errors
+/// [`mx::ErrorKind::NixCommandError`] if `nix flake update` fails or times out,
+/// [`mx::ErrorKind::IOError`] if a lockfile cannot be read or the scratch
+/// directory cannot be created, [`mx::ErrorKind::ParseError`] if either
+/// lockfile is not valid JSON, [`mx::ErrorKind::InvalidFile`] if a path is not
+/// UTF-8.
+pub async fn check_update(config_dir: &str) -> mx::Result<Option<String>> {
+    let lock_path = path::Path::new(config_dir).join(FILE_FLAKE_LOCK_PATH);
+    let current = tokio::fs::read_to_string(&lock_path)
+        .await
+        .map_err(mx::ErrorKind::IOError)?;
+
+    let probe_path = crate::cache_dir().join(UPDATE_PROBE_FILE);
+    if let Some(parent) = probe_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(mx::ErrorKind::IOError)?;
+    }
+
+    let lock_arg = lock_path.to_str().ok_or(mx::ErrorKind::InvalidFile)?;
+    let probe_arg = probe_path.to_str().ok_or(mx::ErrorKind::InvalidFile)?;
+
+    nix_eval::run(
+        &[
+            "flake",
+            "update",
+            "--flake",
+            config_dir,
+            "--reference-lock-file",
+            lock_arg,
+            "--output-lock-file",
+            probe_arg,
+            "--refresh",
+        ],
+        UPDATE_PROBE_TIMEOUT,
+    )
+    .await?;
+
+    let candidate = tokio::fs::read_to_string(&probe_path)
+        .await
+        .map_err(mx::ErrorKind::IOError)?;
+
+    let current_json: serde_json::Value =
+        serde_json::from_str(&current).map_err(mx::ErrorKind::ParseError)?;
+    let candidate_json: serde_json::Value =
+        serde_json::from_str(&candidate).map_err(mx::ErrorKind::ParseError)?;
+
+    if current_json == candidate_json {
+        Ok(None)
+    } else {
+        Ok(Some(candidate))
+    }
+}
+
+/// Applies a lockfile computed beforehand, then rebuilds.
+///
+/// The counterpart of [`update`] for a caller that already holds a candidate
+/// lockfile from [`check_update`]: the transaction writes `lock` as
+/// `flake.lock` instead of running `nix flake update` again, so the system ends
+/// up on exactly the revisions that were announced, and the refresh's network
+/// cost is paid once rather than twice.
+///
+/// # Arguments
+/// * `config_dir` - configuration repository to update.
+/// * `lock` - full `flake.lock` text to write, verbatim.
+/// * `build_command` - `Switch` to rebuild and switch immediately, `Boot` to
+///   only prepare the next boot.
+/// * `cores` - caps the rebuild's `nix` build to this many CPU cores
+///   (`nixos-rebuild --cores`); `None` leaves the Nix default (all of them).
+///
+/// # Pre-conditions
+/// `lock` must be a lockfile `nix` accepts for this very `flake.nix`; a stale
+/// candidate, computed before an input was added or removed, makes the rebuild
+/// fail rather than silently applying the wrong thing.
+///
+/// # Post-conditions
+/// If `lock` is byte-identical to the repository's current `flake.lock`, no
+/// commit is created and no rebuild runs. Blocks for the whole rebuild.
+///
+/// # Errors
+/// As [`transaction::make_transaction_update`]: a failure to write the
+/// lockfile surfaces as [`mx::ErrorKind::IOError`], a rebuild failure as
+/// [`mx::ErrorKind::BuildError`].
+pub fn update_with_lock(
+    config_dir: &str,
+    lock: String,
+    build_command: BuildCommand,
+    cores: Option<u32>,
+) -> mx::Result<()> {
+    make_transaction_update(
+        "update system inputs",
+        config_dir,
+        FILE_FLAKE_PATH,
+        build_command,
+        UpdateInput::UseLock(lock),
+        cores,
+        update_no_transaction,
+    )
 }
 
 #[cfg(test)]

@@ -1,7 +1,8 @@
-/// Tests for the pure helpers behind [`super::outdated_inputs`]: rebuilding a
-/// flake reference from a `flake.lock` node's `original` block, picking the
-/// revision to compare, and deserializing the lockfile shape itself. No test
-/// here shells out to `nix`, since that would require network access.
+/// Tests for the pure helpers behind [`super::outdated_inputs`] and for
+/// [`super::diff_locks`]: rebuilding a flake reference from a `flake.lock`
+/// node's `original` block, picking the revision to compare, diffing two
+/// lockfiles, and deserializing the lockfile shape itself. No test here shells
+/// out to `nix`, since that would require network access.
 ///
 /// ```
 /// cargo test --features system-update update
@@ -153,4 +154,82 @@ fn flake_lock_fixture_deserializes() {
         locked.rev.as_deref(),
         Some("04000fb0d1de982e3bee23fee62228e20f84e50b")
     );
+}
+
+fn lock_json(inputs: &[(&str, &str, &str, u64)]) -> String {
+    let mut nodes = vec![format!(
+        r#""root": {{ "inputs": {{ {} }} }}"#,
+        inputs
+            .iter()
+            .map(|(name, _, _, _)| format!(r#""{name}": "{name}""#))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )];
+    for (name, kind, rev, last_modified) in inputs {
+        nodes.push(format!(
+            r#""{name}": {{
+                "locked": {{ "rev": "{rev}", "lastModified": {last_modified} }},
+                "original": {{ "type": "{kind}", "owner": "Modulix-OS", "repo": "{name}" }}
+            }}"#
+        ));
+    }
+    format!(
+        r#"{{ "root": "root", "nodes": {{ {} }} }}"#,
+        nodes.join(", ")
+    )
+}
+
+#[test]
+fn diff_locks_reports_nothing_when_identical() {
+    let lock = lock_json(&[
+        ("mxpkgs", "github", "aaa", 10),
+        ("nixpkgs", "github", "bbb", 20),
+    ]);
+    let diff = super::diff_locks(&lock, &lock).expect("diff failed");
+    assert!(diff.is_empty());
+}
+
+#[test]
+fn diff_locks_reports_the_moved_input_only() {
+    let old = lock_json(&[
+        ("mxpkgs", "github", "aaa", 10),
+        ("nixpkgs", "github", "bbb", 20),
+    ]);
+    let new = lock_json(&[
+        ("mxpkgs", "github", "ccc", 30),
+        ("nixpkgs", "github", "bbb", 20),
+    ]);
+
+    let diff = super::diff_locks(&old, &new).expect("diff failed");
+    assert_eq!(diff.len(), 1);
+    assert_eq!(diff[0].name, "mxpkgs");
+    assert_eq!(diff[0].current_rev, "aaa");
+    assert_eq!(diff[0].new_rev, "ccc");
+    assert_eq!(diff[0].last_modified, 30);
+}
+
+#[test]
+fn diff_locks_skips_path_inputs() {
+    let old = lock_json(&[("local", "path", "aaa", 10)]);
+    let new = lock_json(&[("local", "path", "ccc", 30)]);
+    let diff = super::diff_locks(&old, &new).expect("diff failed");
+    assert!(diff.is_empty());
+}
+
+#[test]
+fn diff_locks_skips_inputs_absent_from_the_old_lock() {
+    let old = lock_json(&[("mxpkgs", "github", "aaa", 10)]);
+    let new = lock_json(&[
+        ("mxpkgs", "github", "aaa", 10),
+        ("nixpkgs", "github", "bbb", 20),
+    ]);
+    let diff = super::diff_locks(&old, &new).expect("diff failed");
+    assert!(diff.is_empty());
+}
+
+#[test]
+fn diff_locks_rejects_invalid_json() {
+    let lock = lock_json(&[("mxpkgs", "github", "aaa", 10)]);
+    assert!(super::diff_locks("not json", &lock).is_err());
+    assert!(super::diff_locks(&lock, "not json").is_err());
 }

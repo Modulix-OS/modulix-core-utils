@@ -86,7 +86,7 @@ Lifecycle:
 - **`commit(update_input)` → `commit_impl`** —
   1. `NixFile::commit()` each file to disk;
   2. `has_diff_with_commit(old_commit, path)` selects only genuinely changed files and `git_add`s them (avoids empty commits) → `need_modif`;
-  3. if `need_modif`: generate `flake.lock` via `nix flake update` if absent, else honor `UpdateInput` (`Keep`=no update / `UpdateAll` / `UpdateSelected(inputs)`); `flake.lock` is auto-staged if modified;
+  3. if `need_modif`: generate `flake.lock` via `nix flake update` if absent, else honor `UpdateInput` (`Keep`=no update / `UpdateAll` / `UpdateSelected(inputs)` / `UseLock(content)`=write that exact lockfile, no `nix` process); `flake.lock` is auto-staged if modified;
   4. create the git commit (parentless if repo was empty);
   5. **build serialization** via two file locks: `try_lock(/tmp/mx-queue-build.lock)` — only if acquired do we `lock(/tmp/mx-build.lock)`, release the queue lock, then run the rebuild. This lets a single waiter coalesce concurrent builds;
   6. `rebuild_config`: `Install` → `nixos-install --root /mnt --no-root-password --flake <dir>#<CONFIG_NAME>`; `Switch`/`Boot` → `nixos-rebuild <cmd> --flake …`. stdout inherited, stderr captured; non-zero exit → `BuildError(stderr)`;
@@ -127,6 +127,7 @@ Modules: `firewall`, `locale`, `user`, `filesystem`, `flake_input`, `init`, `har
 - **`package_info/`** (`package-info`): `NixPackage` (serde) + lazy flatpak/flathub resolution (`OnceCell`, reqwest, tokio).
 - **`desktop_environment/`** (`desktop-environment`): writes GNOME (dconf/gtk) and Plasma configs.
 - **`config_store/`**: key/value store.
+- **`update.rs`** (`system-update`): the system-update surface, in two styles. Read side, async: `outdated_inputs(config_dir)` probes each direct input with `nix flake metadata --refresh` (one subprocess per input); `check_update(config_dir)` instead lets nix resolve the *whole* lockfile via `nix flake update --output-lock-file <scratch>` — nothing under `config_dir` is written — returning `Some(new_flake_lock_text)` when it differs from the current one, and `diff_locks(old, new)` describes that candidate locally (no process, no network). Write side, blocking: `update(...)` re-resolves inside the transaction (`UpdateInput::UpdateAll`); `update_with_lock(..., lock, ...)` writes a candidate from `check_update` verbatim (`UpdateInput::UseLock`) — what the daemon drives, so the revisions installed are the ones announced and the refresh is paid for once.
 
 ### Cross-cutting conventions
 

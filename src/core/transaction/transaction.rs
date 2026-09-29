@@ -45,10 +45,15 @@ pub enum BuildCommand {
 /// * `UpdateAll` - `nix flake update`, refreshing every input.
 /// * `UpdateSelected` - refresh only the named inputs, which is what an
 ///   operation touching one input uses.
+/// * `UseLock` - write the carried `flake.lock` content as-is instead of
+///   running `nix flake update` at all. Lets a caller that already computed a
+///   candidate lockfile out-of-band (the daemon's update check) apply exactly
+///   the revisions it announced, without a second network round.
 pub enum UpdateInput {
     Keep,
     UpdateAll,
     UpdateSelected(Vec<String>),
+    UseLock(String),
 }
 
 /// What a transaction is allowed to do with the configuration.
@@ -814,11 +819,63 @@ impl<'a> Transaction<'a> {
         Ok(())
     }
 
+    /// Writes `content` as the repository's `flake.lock`, in one rewrite.
+    ///
+    /// The `UpdateInput::UseLock` payload path: no `nix` process is spawned, so
+    /// the revisions applied are exactly the ones the caller computed. The file
+    /// is created when it does not exist yet.
+    ///
+    /// # Arguments
+    /// * `content` – full lockfile text, written verbatim.
+    ///
+    /// # `flake.lock` immutability
+    /// Handled exactly as in [`run_flake_update`](Self::run_flake_update): the
+    /// flag is cleared before the write and restored after, but only if it was
+    /// set, and the write's own result is checked before the re-seal's so a
+    /// failure to re-seal never masks it. An absent lockfile has no flag to
+    /// clear and is left unsealed, like the one a bootstrap `nix flake update`
+    /// generates.
+    ///
+    /// # Post-conditions
+    /// `flake.lock` holds `content` byte for byte. Whether that amounts to a
+    /// change is left to [`flake_lock_modified`](Self::flake_lock_modified),
+    /// which the commit consults right after.
+    ///
+    /// # Errors
+    /// [`mx::ErrorKind::IOError`] if the file cannot be written,
+    /// [`mx::ErrorKind::InvalidFile`] if the lockfile path is not UTF-8.
+    fn write_flake_lock(&self, content: &str) -> mx::Result<()> {
+        let lock_path = self.flake_lock_path();
+        let lock_path = lock_path.to_str().ok_or(mx::ErrorKind::InvalidFile)?;
+
+        let existed = self.flake_lock_exists();
+        let was_immutable = if existed {
+            NixFile::is_immutable(lock_path)?
+        } else {
+            false
+        };
+        if existed {
+            NixFile::make_mutable(lock_path)?;
+        }
+
+        let result = fs::write(lock_path, content).map_err(|e| io_error_at(lock_path, e));
+        let resealed = if was_immutable {
+            NixFile::make_immutable(lock_path)
+        } else {
+            Ok(())
+        };
+        result?;
+        resealed
+    }
+
     /// Refreshes `flake.lock`, per `update_input`.
     ///
     /// Generates the lockfile from scratch with a plain `nix flake update` if
     /// it does not exist yet; otherwise runs `nix flake update [inputs…]`
-    /// (`UpdateInput::Keep` runs nothing).
+    /// (`UpdateInput::Keep` runs nothing). `UpdateInput::UseLock` short-circuits
+    /// all of that and writes the carried content through
+    /// [`write_flake_lock`](Self::write_flake_lock), whether the file exists or
+    /// not.
     ///
     /// # Arguments
     /// * `update_input` – how `flake.lock` is refreshed.
@@ -838,6 +895,11 @@ impl<'a> Transaction<'a> {
     /// [`mx::ErrorKind::IOError`] if `nix` cannot be spawned or waited for,
     /// [`mx::ErrorKind::InvalidFile`] if the lockfile path is not UTF-8.
     fn run_flake_update(&self, update_input: UpdateInput) -> mx::Result<()> {
+        let update_input = match update_input {
+            UpdateInput::UseLock(content) => return self.write_flake_lock(&content),
+            other => other,
+        };
+
         if !self.flake_lock_exists() {
             process::Command::new("nix")
                 .args(["flake", "update"])
@@ -854,7 +916,7 @@ impl<'a> Transaction<'a> {
                 args.extend(s);
                 args
             }
-            UpdateInput::Keep => vec![],
+            UpdateInput::Keep | UpdateInput::UseLock(_) => vec![],
         };
         if command.is_empty() {
             return Ok(());
