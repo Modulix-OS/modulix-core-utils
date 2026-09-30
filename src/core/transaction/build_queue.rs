@@ -6,10 +6,10 @@
 //! head of the queue.
 //!
 //! # Mechanism
-//! Everything lives under [`QUEUE_DIR`]:
-//! * [`META_LOCK`] — short-lived lock held during ticket allocation and each
+//! Everything lives under [`queue_dir`]:
+//! * [`meta_lock`] — short-lived lock held during ticket allocation and each
 //!   scan, to serialize those critical sections across processes.
-//! * [`SEQ_FILE`] — monotonic counter, read+incremented under the meta lock.
+//! * [`seq_file`] — monotonic counter, read+incremented under the meta lock.
 //! * `<N>` — one file per waiter, whose **exclusive flock is held for the whole
 //!   lifetime of the [`Ticket`]**. That lock acts as a liveness proof: a ticket
 //!   whose flock is free belongs to a dead process and can be cleaned up
@@ -27,13 +27,38 @@ use crate::error::io_error_at;
 use crate::mx;
 
 /// Root directory of the queue.
-const QUEUE_DIR: &str = "/tmp/mx-build-queue";
+///
+/// Fixed at `/tmp/mx-build-queue` in every build that matters: the queue is a
+/// **cross-process** rendezvous between `mx-daemon`, the `mx` CLI and
+/// `mx-init`, so a path that varied per process would let two rebuilds run at
+/// once. The unit tests are the one exception — they run unprivileged while
+/// the deployed directory is created `root:root 0755` by
+/// `systemd.tmpfiles.rules` (the daemon runs with `PrivateTmp`, and this path
+/// is bind-mounted back in), so they get their own per-process directory
+/// instead of being unable to write at all.
+#[cfg(not(test))]
+fn queue_dir() -> &'static Path {
+    Path::new("/tmp/mx-build-queue")
+}
 
-/// Meta lock serializing ticket allocation and scans.
-const META_LOCK: &str = "/tmp/mx-build-queue/.meta.lock";
+#[cfg(test)]
+fn queue_dir() -> &'static Path {
+    use std::sync::OnceLock;
+    static DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        std::env::temp_dir().join(format!("mx-build-queue-test-{}", std::process::id()))
+    })
+}
 
-/// Monotonic counter of ticket numbers.
-const SEQ_FILE: &str = "/tmp/mx-build-queue/.seq";
+/// Meta lock serializing ticket allocation and scans, inside [`queue_dir`].
+fn meta_lock() -> std::path::PathBuf {
+    queue_dir().join(".meta.lock")
+}
+
+/// Monotonic counter of ticket numbers, inside [`queue_dir`].
+fn seq_file() -> std::path::PathBuf {
+    queue_dir().join(".seq")
+}
 
 /// Polling interval between two head-of-queue checks.
 const POLL_INTERVAL: Duration = Duration::from_millis(150);
@@ -46,7 +71,7 @@ impl BuildQueue {
     /// leave the queue.
     ///
     /// The whole section (counter increment + ticket file creation/locking) is
-    /// protected by [`META_LOCK`], so no concurrent scan can observe an
+    /// protected by [`meta_lock`], so no concurrent scan can observe an
     /// allocated number whose file does not exist yet.
     ///
     /// # Returns
@@ -54,7 +79,7 @@ impl BuildQueue {
     /// come, only that the place in line is held.
     ///
     /// # Post-conditions
-    /// [`QUEUE_DIR`] exists and holds the ticket file. The meta lock is
+    /// [`queue_dir`] exists and holds the ticket file. The meta lock is
     /// released before returning, so other processes can enqueue in turn.
     ///
     /// # Errors
@@ -62,11 +87,12 @@ impl BuildQueue {
     /// cannot be created, and [`mx::ErrorKind::FailToLock`] if the ticket's own
     /// lock cannot be taken.
     pub fn enqueue() -> mx::Result<Ticket> {
-        fs::create_dir_all(QUEUE_DIR).map_err(|e| io_error_at(QUEUE_DIR, e))?;
+        let dir = queue_dir();
+        fs::create_dir_all(dir).map_err(|e| io_error_at(&dir.to_string_lossy(), e))?;
         let _meta = lock_meta()?;
 
         let seq = next_seq()?;
-        let path = Path::new(QUEUE_DIR).join(seq.to_string());
+        let path = dir.join(seq.to_string());
         let file = OpenOptions::new()
             .write(true)
             .create(true)
@@ -95,7 +121,7 @@ pub struct Ticket {
 impl Ticket {
     /// Blocks until this ticket is at the head of the queue, then returns.
     ///
-    /// On each iteration, under [`META_LOCK`], it scans the lower-numbered
+    /// On each iteration, under [`meta_lock`], it scans the lower-numbered
     /// tickets: a ticket still locked is a live waiter ahead of us; a ticket
     /// whose flock is free belongs to a dead process and is cleaned up. Once no
     /// live waiter remains ahead, we are at the head.
@@ -124,21 +150,21 @@ impl Ticket {
     /// Tells whether this ticket is at the head of the queue.
     ///
     /// # Pre-conditions
-    /// Must be called while holding [`META_LOCK`], otherwise a concurrent
+    /// Must be called while holding [`meta_lock`], otherwise a concurrent
     /// allocation could be missed by the scan.
     ///
     /// # Returns
     /// `true` when no live waiter has a lower number.
     ///
     /// # Post-conditions
-    /// Scans every entry of [`QUEUE_DIR`], skipping [`META_LOCK`], [`SEQ_FILE`]
+    /// Scans every entry of [`queue_dir`], skipping [`meta_lock`], [`seq_file`]
     /// and any other non-numeric name, since only ticket files use a plain
     /// integer. Tickets whose owner died are deleted along the way (crash
     /// recovery), so the call has a cleanup side effect. A ticket file that
     /// vanishes mid-scan (removed concurrently by its own owner) is treated as
     /// nothing to wait for, not as an error.
     fn is_head(&self) -> mx::Result<bool> {
-        for entry in fs::read_dir(QUEUE_DIR).map_err(mx::ErrorKind::IOError)? {
+        for entry in fs::read_dir(queue_dir()).map_err(mx::ErrorKind::IOError)? {
             let entry = entry.map_err(mx::ErrorKind::IOError)?;
             let name = entry.file_name();
             let Ok(n) = name.to_string_lossy().parse::<u64>() else {
@@ -179,7 +205,7 @@ impl Drop for Ticket {
     }
 }
 
-/// Opens and locks [`META_LOCK`].
+/// Opens and locks [`meta_lock`].
 ///
 /// # Returns
 /// The locked file; the lock lasts exactly as long as the returned handle, so
@@ -193,12 +219,13 @@ impl Drop for Ticket {
 /// [`mx::ErrorKind::IOError`] if the lock file cannot be opened, and
 /// [`mx::ErrorKind::FailToLock`] if locking fails.
 fn lock_meta() -> mx::Result<File> {
+    let path = meta_lock();
     let file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(false)
-        .open(META_LOCK)
-        .map_err(|e| io_error_at(META_LOCK, e))?;
+        .open(&path)
+        .map_err(|e| io_error_at(&path.to_string_lossy(), e))?;
     file.lock().map_err(|_| mx::ErrorKind::FailToLock)?;
     Ok(file)
 }
@@ -206,28 +233,29 @@ fn lock_meta() -> mx::Result<File> {
 /// Allocates the next ticket number.
 ///
 /// # Pre-conditions
-/// Must be called while holding [`META_LOCK`], since the read-increment-write
+/// Must be called while holding [`meta_lock`], since the read-increment-write
 /// is not atomic on its own.
 ///
 /// # Returns
-/// The new number, one above the stored one; 1 when [`SEQ_FILE`] is missing,
+/// The new number, one above the stored one; 1 when [`seq_file`] is missing,
 /// empty or unparseable - a corrupted counter restarts the numbering instead of
 /// failing.
 ///
 /// # Post-conditions
-/// [`SEQ_FILE`] holds the number just returned.
+/// [`seq_file`] holds the number just returned.
 ///
 /// # Errors
 /// [`mx::ErrorKind::IOError`] if the counter cannot be opened, read or
 /// rewritten.
 fn next_seq() -> mx::Result<u64> {
+    let path = seq_file();
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(SEQ_FILE)
-        .map_err(|e| io_error_at(SEQ_FILE, e))?;
+        .open(&path)
+        .map_err(|e| io_error_at(&path.to_string_lossy(), e))?;
 
     let mut content = String::new();
     file.read_to_string(&mut content)

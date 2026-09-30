@@ -17,7 +17,7 @@ fn test_guard() -> std::sync::MutexGuard<'static, ()> {
 
 /// Removes the whole queue dir so each test starts from a clean slate.
 fn reset_queue() {
-    let _ = fs::remove_dir_all(QUEUE_DIR);
+    let _ = fs::remove_dir_all(queue_dir());
 }
 
 #[test]
@@ -84,9 +84,9 @@ fn waiter_blocks_until_head_drops() {
 fn stale_orphan_ticket_is_cleaned_up() {
     let _g = test_guard();
     reset_queue();
-    fs::create_dir_all(QUEUE_DIR).unwrap();
+    fs::create_dir_all(queue_dir()).unwrap();
 
-    let orphan = std::path::Path::new(QUEUE_DIR).join("1");
+    let orphan = queue_dir().join("1");
     fs::write(&orphan, b"").unwrap();
 
     let waiter = Ticket {
@@ -95,9 +95,9 @@ fn stale_orphan_ticket_is_cleaned_up() {
             .write(true)
             .create(true)
             .truncate(true)
-            .open(std::path::Path::new(QUEUE_DIR).join("5"))
+            .open(queue_dir().join("5"))
             .unwrap(),
-        path: std::path::Path::new(QUEUE_DIR).join("5"),
+        path: queue_dir().join("5"),
     };
     waiter.file.lock().unwrap();
 
