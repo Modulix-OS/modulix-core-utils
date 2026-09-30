@@ -7,7 +7,10 @@
 /// ```
 /// cargo test --features system-update update
 /// ```
-use super::{FlakeLock, LockedRef, OriginalRef, compare_rev, flake_ref_from_original};
+use super::{
+    BuildCommand, FlakeLock, LockedRef, OriginalRef, compare_rev, flake_ref_from_original,
+    stage_head_tree,
+};
 
 fn original(
     kind: &str,
@@ -232,4 +235,67 @@ fn diff_locks_rejects_invalid_json() {
     let lock = lock_json(&[("mxpkgs", "github", "aaa", 10)]);
     assert!(super::diff_locks("not json", &lock).is_err());
     assert!(super::diff_locks(&lock, "not json").is_err());
+}
+
+#[test]
+fn build_command_build_is_never_substituted() {
+    assert_eq!(BuildCommand::Build.as_str(), "build");
+}
+
+#[test]
+fn stage_head_tree_writes_tracked_files_only() {
+    let root = std::env::temp_dir().join(format!(
+        "mx-stage-head-test-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let src = root.join("src");
+    let dst = root.join("dst");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(src.join("nested")).unwrap();
+
+    let repo = git2::Repository::init(&src).unwrap();
+    std::fs::write(src.join("flake.nix"), "{}").unwrap();
+    std::fs::write(src.join("flake.lock"), "old").unwrap();
+    std::fs::write(src.join("nested").join("configuration.nix"), "{}").unwrap();
+
+    let mut index = repo.index().unwrap();
+    for tracked in ["flake.nix", "flake.lock", "nested/configuration.nix"] {
+        index.add_path(std::path::Path::new(tracked)).unwrap();
+    }
+    index.write().unwrap();
+    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+    let who = git2::Signature::now("test", "test@example.invalid").unwrap();
+    repo.commit(Some("HEAD"), &who, &who, "initial", &tree, &[])
+        .unwrap();
+
+    // Untracked, and the reason this uses HEAD rather than a directory copy:
+    // `nix` reads the real repository as `git+file://` and never sees this.
+    std::fs::create_dir_all(src.join(".cache")).unwrap();
+    std::fs::write(src.join(".cache").join("index.bin"), "huge").unwrap();
+
+    stage_head_tree(&src, &dst).unwrap();
+
+    assert!(dst.join("flake.nix").is_file());
+    assert!(dst.join("nested").join("configuration.nix").is_file());
+    assert_eq!(
+        std::fs::read_to_string(dst.join("flake.lock")).unwrap(),
+        "old"
+    );
+    assert!(!dst.join(".cache").exists());
+    assert!(!dst.join(".git").exists());
+
+    // The source repository is left alone - working directory and HEAD both.
+    assert!(src.join(".cache").join("index.bin").is_file());
+    assert_eq!(
+        repo.head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .message()
+            .unwrap(),
+        "initial"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
 }

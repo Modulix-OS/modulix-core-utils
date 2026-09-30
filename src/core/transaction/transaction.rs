@@ -21,8 +21,10 @@ pub(crate) const LOCK_SKIP_REBUILD_FILE: &str = "/tmp/mx-skip-rebuild.lock";
 
 /// `nixos-rebuild` (or `nixos-install`) command to run after a successful commit.
 ///
-/// In `debug` mode (without `--release`), all variants trigger `build-vm` to
-/// avoid modifying the host system during development.
+/// In `debug` mode (without `--release`), every variant that would touch the
+/// host system triggers `build-vm` instead, to avoid modifying it during
+/// development. [`BuildCommand::Build`] is exempt: it never activates anything,
+/// so it stays itself in both profiles.
 #[derive(Clone)]
 pub enum BuildCommand {
     /// Rebuilds the system and switches immediately (`nixos-rebuild switch`).
@@ -36,6 +38,12 @@ pub enum BuildCommand {
     /// system. Runtime-selected (not a debug-only gate) so a release binary
     /// (e.g. `mx-init --debug`) can also seed a disposable test VM.
     BuildVm,
+    /// Realises the new system closure without activating it
+    /// (`nixos-rebuild build`): every derivation is built and every substituted
+    /// path fetched, but neither the running system nor the boot entries change.
+    /// Used to pay the download/build cost ahead of a later `Switch`/`Boot`,
+    /// which then finds the store already warm.
+    Build,
 }
 
 /// How the commit refreshes `flake.lock`.
@@ -166,9 +174,11 @@ impl BuildCommand {
     /// * `Switch`  → `"switch"`
     /// * `Boot`    → `"boot"`
     /// * `Install` → `""` (uses `nixos-install` directly, see [`Transaction::rebuild_config`])
+    /// * `BuildVm` → `"build-vm"`
+    /// * `Build`   → `"build"`
     ///
-    /// In debug mode: all variants return `"build-vm"` so as not to modify the
-    /// host system.
+    /// In debug mode: every variant returns `"build-vm"` so as not to modify the
+    /// host system, except `Build`, which cannot modify it in the first place.
     ///
     /// # Returns
     /// The subcommand to hand `nixos-rebuild`; the empty string for `Install`,
@@ -180,14 +190,17 @@ impl BuildCommand {
             BuildCommand::Boot => "boot",
             BuildCommand::Install => "",
             BuildCommand::BuildVm => "build-vm",
+            BuildCommand::Build => "build",
         }
     }
 
     /// Debug-build counterpart of the release `as_str`.
     ///
     /// # Returns
-    /// Always `"build-vm"`, so a development run builds a VM image instead of
-    /// touching the host system, whatever the variant asked for.
+    /// `"build-vm"` for every variant that would otherwise touch the host
+    /// system, so a development run builds a VM image instead; `"build"` for
+    /// [`BuildCommand::Build`], which activates nothing and therefore needs no
+    /// debug substitute.
     #[cfg(debug_assertions)]
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -195,6 +208,7 @@ impl BuildCommand {
             BuildCommand::Boot => "build-vm",
             BuildCommand::Install => "build-vm",
             BuildCommand::BuildVm => "build-vm",
+            BuildCommand::Build => "build",
         }
     }
 }
@@ -346,7 +360,10 @@ impl<'a> Transaction<'a> {
                 c.arg("--root").arg("/mnt").arg("--no-root-password");
                 c
             }
-            BuildCommand::Switch | BuildCommand::Boot | BuildCommand::BuildVm => {
+            BuildCommand::Switch
+            | BuildCommand::Boot
+            | BuildCommand::BuildVm
+            | BuildCommand::Build => {
                 let mut c = process::Command::new("nixos-rebuild");
                 c.arg(build_command.as_str());
                 c
@@ -383,6 +400,10 @@ impl<'a> Transaction<'a> {
     ///   discard it.
     /// * `cores`         – forwarded as `--cores <cores>`; `None` leaves the
     ///   Nix default.
+    /// * `cwd`           – working directory of the child process; `None`
+    ///   inherits the caller's. The `build-vm` and `build` subcommands drop a
+    ///   `result` symlink there, so a caller that must not litter its own
+    ///   directory passes a scratch path.
     ///
     /// # Returns
     /// `Ok(true)` if the process exited successfully (code 0), `Ok(false)` otherwise.
@@ -395,15 +416,19 @@ impl<'a> Transaction<'a> {
     /// # Errors
     /// [`mx::ErrorKind::IOError`] if the process cannot be spawned or waited
     /// for; a non-zero exit is reported as `Ok(false)`, not as an error.
-    fn rebuild_config(
+    pub(crate) fn rebuild_config(
         path_config: &str,
         config_name: &str,
         build_command: BuildCommand,
         stderr: Option<&mut String>,
         cores: Option<u32>,
+        cwd: Option<&str>,
     ) -> mx::Result<bool> {
         let mut command =
             Self::build_rebuild_command(path_config, config_name, &build_command, cores);
+        if let Some(cwd) = cwd {
+            command.current_dir(cwd);
+        }
         let mut child = command
             .stdout(process::Stdio::inherit())
             .stderr(process::Stdio::piped())
@@ -1017,6 +1042,7 @@ impl<'a> Transaction<'a> {
                     self.build_type.clone(),
                     Some(&mut stderr),
                     self.rebuild_cores,
+                    None,
                 )?;
                 if !success {
                     return Err(mx::ErrorKind::BuildError(stderr));

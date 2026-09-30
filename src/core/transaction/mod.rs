@@ -7,7 +7,7 @@
 //! processes. Domain modules do not drive them by hand: they call
 //! [`make_transaction`] (or [`make_transaction_read_only`]) with a closure.
 
-mod build_queue;
+pub(crate) mod build_queue;
 pub mod file_lock;
 pub mod transaction;
 

@@ -26,18 +26,37 @@
 //! is paid once, and the revisions announced are the revisions installed.
 //! [`update`] remains the one-shot variant for a caller with no candidate in
 //! hand.
+//!
+//! [`build_with_lock`] is the third member of that family, and the only one
+//! that changes nothing: it realises the closure a candidate lockfile describes
+//! without activating it, so the download and build cost is paid before the
+//! user asks for the update rather than during it. It deliberately does not go
+//! through a transaction - writing the candidate into the repository's
+//! `flake.lock` would move the configuration ahead of the running system, and
+//! the next [`check_update`] would then report "up to date" while the system
+//! still runs the old revisions. It builds a checkout of the configuration
+//! repository's HEAD in a scratch directory instead - HEAD, not the working
+//! directory, because `nix` reads the real repository as a `git+file://` flake
+//! and so sees tracked files only.
 
 use std::collections::HashMap;
+use std::fs;
 use std::path;
 use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::CONFIG_NAME;
 pub use crate::core::transaction::transaction::BuildCommand;
 use crate::core::{
     nix_eval,
-    transaction::{make_transaction_update, transaction::UpdateInput},
+    transaction::{
+        build_queue::BuildQueue,
+        make_transaction_update,
+        transaction::{Transaction, UpdateInput},
+    },
 };
+use crate::error::io_error_at;
 use crate::mx;
 
 /// Relative path, under a configuration directory, of the flake this module
@@ -508,6 +527,183 @@ pub fn update_with_lock(
         cores,
         update_no_transaction,
     )
+}
+
+/// Writes the content `HEAD` points at, and nothing else, into `dst`.
+///
+/// Used to stage a throwaway copy of a configuration repository so a build can
+/// run against a modified `flake.lock` without the original repository ever
+/// being touched. Checking `HEAD`'s tree out - rather than copying the working
+/// directory - is what keeps the copy faithful: `nix` resolves a configuration
+/// directory that is a git work tree as a `git+file://` flake, which sees
+/// **tracked files only**, so an untracked sibling (the daemon's own
+/// `.cache/`, tens of megabytes of package index) must not end up in the flake
+/// source.
+///
+/// # Arguments
+/// * `src` - git repository to read `HEAD` from; must exist and be readable.
+/// * `dst` - directory to write the tree into; created if missing.
+///
+/// # Pre-conditions
+/// `src` must be a git repository with a resolvable `HEAD` commit. `dst` must
+/// not lie inside `src`.
+///
+/// # Post-conditions
+/// `dst` holds every file of `HEAD`'s tree. `src` is untouched: neither its
+/// working directory, nor its index, nor its `HEAD` move (the checkout is
+/// redirected with `target_dir` and `update_index(false)`).
+///
+/// # Errors
+/// [`mx::ErrorKind::IOError`] if `dst` cannot be created, and
+/// [`mx::ErrorKind::GitError`] if `src` cannot be opened, `HEAD` cannot be
+/// resolved, or the checkout fails.
+fn stage_head_tree(src: &path::Path, dst: &path::Path) -> mx::Result<()> {
+    fs::create_dir_all(dst).map_err(|e| io_error_at(&dst.to_string_lossy(), e))?;
+
+    let repo = git2::Repository::open(src).map_err(mx::ErrorKind::GitError)?;
+    let tree = repo
+        .head()
+        .and_then(|head| head.peel_to_commit())
+        .and_then(|commit| commit.tree())
+        .map_err(mx::ErrorKind::GitError)?;
+
+    let mut checkout = git2::build::CheckoutBuilder::new();
+    checkout
+        .target_dir(dst)
+        .force()
+        .recreate_missing(true)
+        .update_index(false);
+
+    repo.checkout_tree(tree.as_object(), Some(&mut checkout))
+        .map_err(mx::ErrorKind::GitError)
+}
+
+/// Builds the system a candidate lockfile describes, without activating it.
+///
+/// The "download" half of an update, for a caller that wants the network and
+/// CPU cost paid up front (the daemon's `UpdateSystem("build")`, driven by
+/// GNOME Software's `NO_APPLY` job): every derivation of the new closure is
+/// realised and every substituted path fetched, so the `Switch`/`Boot` that
+/// follows finds the store warm and only has to activate.
+///
+/// Unlike [`update_with_lock`], `config_dir` is left **byte-identical**: the
+/// build runs against a throwaway checkout of its `HEAD` (see
+/// [`stage_head_tree`]) carrying `lock` as its `flake.lock`. Writing the
+/// candidate into the real repository would advance the configuration past the
+/// running system, and the next [`check_update`] would then find nothing to
+/// update while the system is still behind.
+///
+/// The staged copy has no `.git`, so `nix` reads it as a `path:` flake where it
+/// reads the real repository as `git+file://`. The flake *source* therefore
+/// hashes differently and the top-level `nixos-system-*` derivation is rebuilt
+/// by the `Switch`/`Boot` that follows - cheap, and not what this function is
+/// for. What it does share is everything that depends on the inputs' revisions
+/// rather than on the flake source: every package the update moves is fetched or
+/// built here, once.
+///
+/// # Arguments
+/// * `config_dir` - configuration repository to build a copy of.
+/// * `lock` - full `flake.lock` text to build against, verbatim, as returned by
+///   [`check_update`].
+/// * `cores` - caps the build to this many CPU cores (`nixos-rebuild --cores`);
+///   `None` leaves the Nix default (all of them).
+///
+/// # Pre-conditions
+/// `lock` must be a lockfile `nix` accepts for this very `flake.nix`, same as
+/// [`update_with_lock`]. `config_dir` must be a git repository with a
+/// resolvable `HEAD`, and the flake must not declare any relative-path input
+/// (`path:./…` outside the repository), which would no longer resolve from the
+/// scratch copy.
+///
+/// # Post-conditions
+/// `config_dir` is unchanged - no commit, no `flake.lock` write, no rebuild of
+/// the running system. Blocks for the whole build, which is as long as the
+/// build half of an update. The scratch copy and the `result` symlink the build
+/// left next to it are removed before returning, on success and on failure
+/// alike; the directory is named per call, so concurrent callers do not clobber
+/// each other's, and is created with `create_dir` so an entry already sitting at
+/// that path (a planted symlink, since this runs as root under a
+/// world-writable directory) fails the call instead of being followed. Takes a
+/// turn in the shared build queue, so it never runs concurrently with a real
+/// rebuild.
+///
+/// # Errors
+/// [`mx::ErrorKind::IOError`] or [`mx::ErrorKind::GitError`] if the scratch
+/// checkout cannot be staged,
+/// [`mx::ErrorKind::BuildError`] with the build's standard error if
+/// `nixos-rebuild build` exits non-zero, plus anything
+/// [`BuildQueue::enqueue`] reports.
+pub fn build_with_lock(config_dir: &str, lock: String, cores: Option<u32>) -> mx::Result<()> {
+    /// Distinguishes the scratch directories of concurrent calls. The pid alone
+    /// is not enough: the daemon is one long-lived process, and two clients can
+    /// ask for a build at the same time — sharing a path would have the second
+    /// call's `remove_dir_all` delete the tree the first one is building.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    let scratch = std::env::temp_dir().join(format!(
+        "mx-update-build-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let staged = scratch.join("config");
+
+    // `create_dir`, not `create_dir_all`, and no pre-emptive cleanup: this runs
+    // as root with a predictable name under a world-writable directory, so the
+    // one thing that must not happen is following a symlink someone planted
+    // there. `create_dir` fails with `AlreadyExists` on an existing entry of any
+    // kind, turning that into a failed pre-build rather than a root-owned write
+    // outside the scratch area.
+    fs::create_dir(&scratch).map_err(|e| io_error_at(&scratch.to_string_lossy(), e))?;
+
+    let result = build_in_scratch(config_dir, lock, cores, &scratch, &staged);
+    let _ = fs::remove_dir_all(&scratch);
+    result
+}
+
+/// Body of [`build_with_lock`], split out so its caller can clean the scratch
+/// directory up on every exit path.
+///
+/// # Arguments
+/// * `config_dir`, `lock`, `cores` - as in [`build_with_lock`].
+/// * `scratch` - directory the build runs in; receives the `result` symlink.
+/// * `staged` - directory inside `scratch` the configuration copy lands in, and
+///   the flake `nixos-rebuild` is pointed at.
+///
+/// # Post-conditions
+/// `scratch` and `staged` exist when this returns; the caller removes them.
+///
+/// # Errors
+/// As [`build_with_lock`].
+fn build_in_scratch(
+    config_dir: &str,
+    lock: String,
+    cores: Option<u32>,
+    scratch: &path::Path,
+    staged: &path::Path,
+) -> mx::Result<()> {
+    stage_head_tree(path::Path::new(config_dir), staged)?;
+
+    let lock_path = staged.join("flake.lock");
+    fs::write(&lock_path, lock).map_err(|e| io_error_at(&lock_path.to_string_lossy(), e))?;
+
+    let ticket = BuildQueue::enqueue()?;
+    ticket.wait_turn()?;
+
+    let mut stderr = String::new();
+    let success = Transaction::rebuild_config(
+        &staged.to_string_lossy(),
+        CONFIG_NAME,
+        BuildCommand::Build,
+        Some(&mut stderr),
+        cores,
+        Some(&scratch.to_string_lossy()),
+    )?;
+
+    if success {
+        Ok(())
+    } else {
+        Err(mx::ErrorKind::BuildError(stderr))
+    }
 }
 
 #[cfg(test)]
