@@ -77,6 +77,9 @@ pub mod install_package;
 #[cfg(feature = "user")]
 pub mod user;
 
+#[cfg(feature = "release-info")]
+pub mod release;
+
 #[cfg(feature = "system-update")]
 pub mod update;
 
@@ -145,7 +148,7 @@ const REFS_FOLLOW: GitRefs = GitRefs::Branch;
 
 /// Name of the tracked ref, i.e. the upstream revision a freshly installed or
 /// freshly indexed system follows.
-const REFS_FOLLOWED: &str = "master";
+const REFS_FOLLOWED: &str = "main";
 
 /// [`REFS_FOLLOW`] rendered as its GitHub URL segment.
 const REFS_FOLLOW_PATH: &str = REFS_FOLLOW.github_path();
@@ -171,6 +174,18 @@ pub const REMOTE_MODULE_URL: &str = concatcp!(
     "/",
     REFS_FOLLOWED,
     "/modules/"
+);
+
+/// Raw-content URL of the `release.json` `mxpkgs` publishes: the two fields
+/// (`version`, `codeName`) that identify a Modulix OS release, and the same
+/// file the distribution's own `flake.nix` reads for `mx.branding`. Fetched by
+/// [`release`] so a running system can tell whether upstream moved on.
+pub const REMOTE_RELEASE_URL: &str = concatcp!(
+    "https://raw.githubusercontent.com/Modulix-OS/mxpkgs/",
+    REFS_FOLLOW_PATH,
+    "/",
+    REFS_FOLLOWED,
+    "/release.json"
 );
 
 /// `nixosConfigurations` attribute the flake in [`CONFIG_DIRECTORY`] exposes,
