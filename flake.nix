@@ -41,10 +41,7 @@
 
             mx-apply-update = naerskLib.buildPackage {
                 src = ./.;
-                cargoBuildOptions = x: x ++ [
-                  "--features" "system-update"
-                  "--bin" "mx-apply-update"
-                ];
+                cargoBuildOptions = x: x ++ [ "--features" "system-update" ];
                 buildInputs = with pkgs; [ openssl ];
                 nativeBuildInputs = with pkgs; [ pkg-config ];
             };
