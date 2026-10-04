@@ -25,20 +25,67 @@ use crate::{
 /// `fileSystems` and `swapDevices`.
 const FILE_SYSTEM_PATH: &str = "fstab.nix";
 
-/// LUKS container backing an encrypted mount point.
+/// How the filesystem at a mount point is reached.
+///
+/// The caller states the facts it knows about the device; everything that
+/// follows from them — the `dm-crypt` mapper name, the
+/// `boot.initrd.luks.devices` entry, the TPM2 attribute, and dropping that
+/// entry again on removal — is decided in this module. A caller never needs to
+/// name a mapper or spell a LUKS option path itself.
+pub enum MountDevice<'a> {
+    /// Mounted straight from `device`.
+    Plain {
+        /// Device to declare as `fileSystems."<mp>".device`. Any spelling
+        /// NixOS accepts (`/dev/disk/by-uuid/<uuid>`, `/dev/sda1`, …).
+        device: &'a str,
+    },
+    /// Mounted through a `dm-crypt` mapper opened on a LUKS container.
+    Luks {
+        /// `/dev/disk/by-uuid/<uuid>` of the LUKS *container* (the locked
+        /// partition), not of the cleartext filesystem inside it. Must be the
+        /// `by-uuid` spelling: the initrd has no stable device names.
+        container: &'a str,
+        /// The mapper device file currently in use (`/dev/mapper/<name>`),
+        /// when the caller knows it — UDisks2' `PreferredDevice`, for
+        /// instance. Its basename becomes the declared name, so the
+        /// configuration matches the name the container is really opened as.
+        /// `None` falls back to the `luks-<uuid>` spelling derived from
+        /// `container`.
+        mapper_device: Option<&'a str>,
+        /// Ensure the initrd tries a TPM2 token
+        /// (`crypttabExtraOpts = [ "tpm2-device=auto" ]`).
+        ///
+        /// `false` means "do not add it", **not** "remove it":
+        /// [`add_mount_no_transaction`] never resets `crypttabExtraOpts`, so an
+        /// enrolment already in the file survives. A caller that cannot know
+        /// whether a TPM2 token is enrolled — anything reading an `fstab`
+        /// entry, which carries no such information — can therefore pass
+        /// `false` without destroying one.
+        ///
+        /// Requires `boot.initrd.systemd.enable`, which this module does not
+        /// set.
+        tpm2: bool,
+    },
+}
+
+/// LUKS container backing an encrypted mount point, as written to the
+/// configuration.
+///
+/// Internal: built by [`add_mount_no_transaction`] from a
+/// [`MountDevice::Luks`], so that no caller has to know the mapper naming
+/// rules.
 ///
 /// # Fields
 /// * `name` - `dm-crypt` mapper name. Becomes the
 ///   `boot.initrd.luks.devices."<name>"` key and the `/dev/mapper/<name>` the
 ///   mount point is declared on, so it must be the name the container is
-///   actually opened as. [`default_luks_name`] renders the `luks-<uuid>`
-///   spelling that used to be hardcoded here.
+///   actually opened as.
 /// * `tpm2` - a TPM2 token is enrolled on the container, so the initrd must
 ///   try it (`crypttabExtraOpts = [ "tpm2-device=auto" ]`). Requires
 ///   `boot.initrd.systemd.enable`, which this module does not set.
-pub struct LuksEntry<'a> {
-    pub name: &'a str,
-    pub tpm2: bool,
+struct LuksEntry<'a> {
+    name: &'a str,
+    tpm2: bool,
 }
 
 /// Renders the default mapper name for a LUKS container.
@@ -47,17 +94,43 @@ pub struct LuksEntry<'a> {
 /// * `device` - the `/dev/disk/by-uuid/<uuid>` path of the LUKS container.
 ///
 /// # Returns
-/// `luks-<uuid>`, the spelling [`add_entry_no_transaction`] hardcoded before
-/// [`LuksEntry::name`] made it a parameter.
+/// `luks-<uuid>`, the spelling used when the caller does not know the mapper
+/// device actually in use.
 ///
 /// # Errors
 /// [`mx::ErrorKind::InvalidUuid`] when `device` is not a `/dev/disk/by-uuid/`
 /// path.
-pub fn default_luks_name(device: &str) -> mx::Result<String> {
+fn default_luks_name(device: &str) -> mx::Result<String> {
     let uuid = device
         .strip_prefix("/dev/disk/by-uuid/")
         .ok_or(mx::ErrorKind::InvalidUuid)?;
     Ok(format!("luks-{}", uuid))
+}
+
+/// Resolves the `dm-crypt` mapper name to declare for a LUKS container.
+///
+/// # Parameters
+/// * `mapper_device` - [`MountDevice::Luks::mapper_device`]: the mapper device
+///   file in use, when known.
+/// * `container` - [`MountDevice::Luks::container`].
+///
+/// # Returns
+/// The basename of `mapper_device` when it sits under `/dev/mapper/` and is
+/// not empty — that is the name the container is really opened as, so
+/// declaring it keeps the configuration and the running system in agreement.
+/// Otherwise [`default_luks_name`] applied to `container`.
+///
+/// # Errors
+/// [`mx::ErrorKind::InvalidUuid`] when the fallback applies and `container` is
+/// not a `/dev/disk/by-uuid/` path, leaving no name to derive.
+fn mapper_name(mapper_device: Option<&str>, container: &str) -> mx::Result<String> {
+    if let Some(name) = mapper_device.and_then(|device| device.strip_prefix("/dev/mapper/"))
+        && !name.is_empty()
+    {
+        return Ok(name.to_string());
+    }
+
+    default_luks_name(container)
 }
 
 /// Declares one mount point in an already-open `fstab.nix`.
@@ -65,49 +138,64 @@ pub fn default_luks_name(device: &str) -> mx::Result<String> {
 /// # Parameters
 /// * `fstab` - the open configuration file to edit.
 /// * `mount_point` - absolute mount path, used as the `fileSystems` key.
-/// * `device` - device to mount; for an encrypted volume it must be the
-///   `/dev/disk/by-uuid/<uuid>` form of the *LUKS container*.
+/// * `device` - how the filesystem is reached; see [`MountDevice`]. A
+///   [`MountDevice::Luks`] also declares its
+///   `boot.initrd.luks.devices."<name>"` entry and mounts the resulting
+///   `/dev/mapper/<name>` rather than the container itself.
 /// * `fs_type` - filesystem type as NixOS names it (`ext4`, `btrfs`, …).
-/// * `option` - mount options, written as the option list; an empty slice
+/// * `options` - mount options, written as the option list; an empty slice
 ///   leaves NixOS' defaults.
-/// * `luks` - `Some` for an encrypted volume: also declares
-///   `boot.initrd.luks.devices."<luks.name>"` for `device` and mounts the
-///   resulting `/dev/mapper/<luks.name>` instead of `device` itself, with
-///   `crypttabExtraOpts` when `luks.tpm2`. `None` mounts `device` directly.
 ///
 /// # Post-conditions
 /// Any options previously declared for `mount_point` are reset before the new
-/// ones are added, so the resulting list holds exactly `option`.
+/// ones are added, so the resulting list holds exactly `options`. A LUKS
+/// entry's `crypttabExtraOpts` is **not** reset, so an existing TPM2
+/// enrolment survives a call with `tpm2: false` (see
+/// [`MountDevice::Luks::tpm2`]).
 ///
 /// # Errors
-/// [`mx::ErrorKind::InvalidUuid`] when `luks` is `Some` and `device` is not a
-/// `/dev/disk/by-uuid/` path, plus any error from editing the file.
-pub fn add_entry_no_transaction(
+/// [`mx::ErrorKind::InvalidUuid`] when `device` is a [`MountDevice::Luks`]
+/// whose `container` is not a `/dev/disk/by-uuid/` path, plus any error from
+/// editing the file.
+pub fn add_mount_no_transaction(
     fstab: &mut NixFile,
     mount_point: &str,
-    device: &str,
+    device: &MountDevice<'_>,
     fs_type: &str,
-    option: &[&str],
-    luks: Option<&LuksEntry<'_>>,
+    options: &[&str],
 ) -> mx::Result<()> {
     let root_option = format!("fileSystems.\"{}\"", mount_point);
-    if let Some(luks) = luks {
-        if !device.starts_with("/dev/disk/by-uuid/") {
-            return Err(mx::ErrorKind::InvalidUuid);
-        }
-        let luks_path = format!("/dev/mapper/{}", luks.name);
-        mxOption::new(&format!("{}.device", luks_option(luks.name)))
-            .set(fstab, format!("\"{}\"", device).as_str())?;
 
-        mxOption::new(format!("{}.device", root_option).as_str())
-            .set(fstab, format!("\"{}\"", luks_path).as_str())?;
-
-        if luks.tpm2 {
-            set_luks_tpm2_no_transaction(fstab, luks.name)?;
+    match device {
+        MountDevice::Plain { device } => {
+            mxOption::new(format!("{}.device", root_option).as_str())
+                .set(fstab, format!("\"{}\"", device).as_str())?;
         }
-    } else {
-        mxOption::new(format!("{}.device", root_option).as_str())
-            .set(fstab, format!("\"{}\"", device).as_str())?;
+        MountDevice::Luks {
+            container,
+            mapper_device,
+            tpm2,
+        } => {
+            if !container.starts_with("/dev/disk/by-uuid/") {
+                return Err(mx::ErrorKind::InvalidUuid);
+            }
+
+            let name = mapper_name(*mapper_device, container)?;
+            let luks = LuksEntry {
+                name: &name,
+                tpm2: *tpm2,
+            };
+
+            mxOption::new(&format!("{}.device", luks_option(luks.name)))
+                .set(fstab, format!("\"{}\"", container).as_str())?;
+
+            mxOption::new(format!("{}.device", root_option).as_str())
+                .set(fstab, format!("\"/dev/mapper/{}\"", luks.name).as_str())?;
+
+            if luks.tpm2 {
+                set_luks_tpm2_no_transaction(fstab, luks.name)?;
+            }
+        }
     }
 
     mxOption::new(format!("{}.fsType", root_option).as_str())
@@ -118,7 +206,7 @@ pub fn add_entry_no_transaction(
     mxOption::new(&option_path).set_option_to_default(fstab)?;
 
     let list_opt = mxList::new(&option_path, true);
-    for o in option {
+    for o in options {
         list_opt.add(fstab, &format!("\"{}\"", o))?;
     }
     Ok(())
@@ -139,7 +227,7 @@ fn luks_option(luks_name: &str) -> String {
 /// Adds `tpm2-device=auto` to a LUKS entry's `crypttabExtraOpts` in an
 /// already-open `fstab.nix`.
 ///
-/// Split out of [`add_entry_no_transaction`] because an `fstab.nix` generated
+/// Split out of [`add_mount_no_transaction`] because an `fstab.nix` generated
 /// by `nixos-generate-config` already carries the entry's `.device` — it
 /// detects the open mapper and writes it under the live `dm/name` — but never
 /// emits `crypttabExtraOpts`. An installer that lets the generator describe
@@ -187,8 +275,8 @@ pub fn set_luks_tpm2_no_transaction(fstab: &mut NixFile, luks_name: &str) -> mx:
 /// # Parameters
 /// * `config_dir` - configuration repository to edit (see
 ///   [`crate::CONFIG_DIRECTORY`]).
-/// * `mount_point`, `device`, `fs_type`, `option`, `luks` - as in
-///   [`add_entry_no_transaction`].
+/// * `mount_point`, `device`, `fs_type`, `options` - as in
+///   [`add_mount_no_transaction`].
 ///
 /// # Post-conditions
 /// On success the mount point is part of the active generation; on error the
@@ -196,23 +284,22 @@ pub fn set_luks_tpm2_no_transaction(fstab: &mut NixFile, luks_name: &str) -> mx:
 /// Blocks for the whole `nixos-rebuild switch`.
 ///
 /// # Errors
-/// Any error from [`add_entry_no_transaction`], plus
+/// Any error from [`add_mount_no_transaction`], plus
 /// [`mx::ErrorKind::BuildError`] if the rebuild fails.
-pub fn add_entry(
+pub fn add_mount(
     config_dir: &str,
     mount_point: &str,
-    device: &str,
+    device: &MountDevice<'_>,
     fs_type: &str,
-    option: &[&str],
-    luks: Option<&LuksEntry<'_>>,
+    options: &[&str],
 ) -> mx::Result<()> {
     transaction::make_transaction(
-        &format!("Add {} entry with device: {} in fstab", mount_point, device),
+        &format!("Add {} entry in fstab", mount_point),
         config_dir,
         FILE_SYSTEM_PATH,
         BuildCommand::Switch,
         UpdateInput::Keep,
-        |file| add_entry_no_transaction(file, mount_point, device, fs_type, option, luks),
+        |file| add_mount_no_transaction(file, mount_point, device, fs_type, options),
     )
 }
 
@@ -242,23 +329,134 @@ pub fn set_luks_tpm2(config_dir: &str, luks_name: &str) -> mx::Result<()> {
     )
 }
 
-/// Removes a mount point from an already-open `fstab.nix`.
+/// Removes a mount point from an already-open `fstab.nix`, and with it the
+/// `boot.initrd.luks.devices` entry it was the last user of.
 ///
 /// # Parameters
 /// * `fstab` - the open configuration file to edit.
 /// * `mount_point` - mount path whose `fileSystems` entry must go.
 ///
 /// # Returns
-/// `true` if at least one declaration was found and removed, `false` if the
-/// mount point was not declared (which is not an error).
+/// `true` if at least one `fileSystems` declaration was found and removed,
+/// `false` if the mount point was not declared (which is not an error). The
+/// LUKS entry's fate does not affect this value.
 ///
 /// # Post-conditions
-/// Every instance of the entry is removed, including duplicates. A LUKS
-/// declaration added by [`add_entry_no_transaction`] is *not* removed.
-pub fn remove_entry_no_transaction(fstab: &mut NixFile, mount_point: &str) -> mx::Result<bool> {
+/// Every instance of the `fileSystems` entry is removed, including duplicates.
+/// When the entry mounted a `/dev/mapper/<name>` and no *other* remaining
+/// mount point still mounts that same mapper, `boot.initrd.luks.devices
+/// ."<name>"` goes too — several mount points can share one container
+/// (sub-volumes, binds), and dropping the entry while one of them survives
+/// would leave an initrd unable to open it.
+///
+/// # Errors
+/// Any error from reading or editing the file. A `fileSystems` entry whose
+/// `device` is undeclared or unreadable is removed all the same, without
+/// touching any LUKS entry.
+pub fn remove_mount_no_transaction(fstab: &mut NixFile, mount_point: &str) -> mx::Result<bool> {
     let root_option = format!("fileSystems.\"{}\"", mount_point);
+    let mapper = mounted_mapper(fstab, &root_option);
+
     let found = mxOption::new(&root_option).set_option_all_instance_to_default(fstab)?;
+
+    if let Some(name) = mapper
+        && !mapper_still_used(fstab, &name)?
+    {
+        drop_luks_entry(fstab, &name)?;
+    }
+
     Ok(found)
+}
+
+/// Removes every declaration of one `boot.initrd.luks.devices` entry.
+///
+/// # Parameters
+/// * `fstab` - the open configuration file to edit.
+/// * `name` - mapper name keying the entry to remove.
+///
+/// # Post-conditions
+/// No declaration of the entry remains, whichever spelling it was written in.
+/// An empty `boot.initrd.luks.devices` attribute set may be left behind, which
+/// NixOS accepts.
+///
+/// # Errors
+/// Any error from editing the file.
+fn drop_luks_entry(fstab: &mut NixFile, name: &str) -> mx::Result<()> {
+    let entry = luks_option(name);
+
+    // Both spellings have to be tried. `add_mount_no_transaction` writes the
+    // entry as nested attribute sets, which removing the entry's own path
+    // handles; `nixos-generate-config` writes each leaf flat
+    // (`boot.initrd.luks.devices."<name>".device = …`), and removing a parent
+    // path does not match a flat leaf. Removing a leaf whose parent is already
+    // gone is a no-op, so running both in this order is safe.
+    for path in [
+        entry.clone(),
+        format!("{}.device", entry),
+        format!("{}.crypttabExtraOpts", entry),
+    ] {
+        mxOption::new(&path).set_option_all_instance_to_default(fstab)?;
+    }
+
+    Ok(())
+}
+
+/// Mapper name a `fileSystems` entry mounts, if it mounts one.
+///
+/// # Parameters
+/// * `fstab` - the open configuration file to read.
+/// * `root_option` - the entry's dotted path, `fileSystems."<mp>"`, quotes
+///   included.
+///
+/// # Returns
+/// `Some(name)` when the entry's `device` is `/dev/mapper/<name>`; `None` when
+/// it mounts something else, or when `device` is undeclared or not a quoted
+/// Nix string — in which case there is nothing to conclude and no LUKS entry
+/// may be touched.
+///
+/// The quotes are stripped here rather than with `core::utils`'
+/// `string_nix_to_value`, which `option::get`'s documentation points at: that
+/// module is declared nowhere in `core`, so it is not compiled.
+fn mounted_mapper(fstab: &NixFile, root_option: &str) -> Option<String> {
+    let device_option = format!("{}.device", root_option);
+    let declared = mxOption::new(&device_option).get(fstab).ok()?;
+
+    declared
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .and_then(|device| device.strip_prefix("/dev/mapper/"))
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
+/// Whether any `fileSystems` entry still mounts `/dev/mapper/<name>`.
+///
+/// # Parameters
+/// * `fstab` - the open configuration file to read, *after* the entry being
+///   removed is gone.
+/// * `name` - mapper name to look for.
+///
+/// # Returns
+/// `true` as soon as one remaining entry mounts that mapper. `false` when none
+/// does, which is what licenses dropping the mapper's
+/// `boot.initrd.luks.devices` entry.
+///
+/// # Errors
+/// Any error from enumerating `fileSystems`' children.
+fn mapper_still_used(fstab: &NixFile, name: &str) -> mx::Result<bool> {
+    let mapper = format!("/dev/mapper/{}", name);
+
+    for key in mxOption::new("fileSystems").list_children(fstab)? {
+        // `list_children` hands back each key as written, quotes included, so
+        // it composes straight into a dotted path.
+        if mounted_mapper(fstab, &format!("fileSystems.{}", key))
+            .is_some_and(|used| format!("/dev/mapper/{}", used) == mapper)
+        {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 /// Removes a mount point and rebuilds the system.
@@ -271,17 +469,20 @@ pub fn remove_entry_no_transaction(fstab: &mut NixFile, mount_point: &str) -> mx
 /// `true` if a declaration was removed, `false` if there was nothing to
 /// remove - in which case the rebuild still runs.
 ///
+/// # Post-conditions
+/// As [`remove_mount_no_transaction`], including the LUKS entry clean-up.
+///
 /// # Errors
 /// [`mx::ErrorKind::BuildError`] if the rebuild fails; the configuration is
 /// then rolled back.
-pub fn remove_entry(config_dir: &str, mount_point: &str) -> mx::Result<bool> {
+pub fn remove_mount(config_dir: &str, mount_point: &str) -> mx::Result<bool> {
     transaction::make_transaction(
         &format!("remove {} entry in fstab", mount_point),
         config_dir,
         FILE_SYSTEM_PATH,
         BuildCommand::Switch,
         UpdateInput::Keep,
-        |file| remove_entry_no_transaction(file, mount_point),
+        |file| remove_mount_no_transaction(file, mount_point),
     )
 }
 
@@ -517,7 +718,7 @@ pub(crate) fn fstab_module(root_dir: &str) -> mx::Result<String> {
 ///
 /// # Post-conditions
 /// Every previous declaration in the file is discarded, LUKS entries added by
-/// [`add_entry_no_transaction`] included, and replaced by a freshly generated
+/// [`add_mount_no_transaction`] included, and replaced by a freshly generated
 /// NixOS module ([`fstab_module`]) for `/`.
 pub fn def_filesystem_from_unix_fstab_no_transaction(fstab: &mut NixFile) -> mx::Result<()> {
     let new_file: String = fstab_module("/")?;
@@ -644,7 +845,8 @@ mod tests {
 #[cfg(test)]
 mod luks_tests {
     use super::{
-        LuksEntry, add_entry_no_transaction, default_luks_name, set_luks_tpm2_no_transaction,
+        MountDevice, add_mount_no_transaction, default_luks_name, mapper_name,
+        remove_mount_no_transaction, set_luks_tpm2_no_transaction,
     };
     use crate::core::transaction::Transaction;
     use crate::core::transaction::transaction::{BuildCommand, TransactionPermission};
@@ -715,20 +917,20 @@ mod luks_tests {
     }
 
     #[test]
-    fn add_entry_keys_the_luks_entry_on_the_given_name() {
+    fn add_mount_keys_the_luks_entry_on_the_mapper_in_use() {
         let content = with_fstab("{config, lib, pkgs, ...}:\n{\n}\n", |file| {
-            add_entry_no_transaction(
+            add_mount_no_transaction(
                 file,
                 "/",
-                "/dev/disk/by-uuid/cafe",
+                &MountDevice::Luks {
+                    container: "/dev/disk/by-uuid/cafe",
+                    mapper_device: Some("/dev/mapper/modulixroot"),
+                    tpm2: false,
+                },
                 "ext4",
                 &[],
-                Some(&LuksEntry {
-                    name: "modulixroot",
-                    tpm2: false,
-                }),
             )
-            .expect("add_entry_no_transaction failed");
+            .expect("add_mount_no_transaction failed");
         });
 
         // `mxOption::set` renders a brand-new dotted path as nested attribute
@@ -742,20 +944,20 @@ mod luks_tests {
     }
 
     #[test]
-    fn add_entry_enrolls_tpm2_only_when_asked() {
+    fn add_mount_enrolls_tpm2_only_when_asked() {
         let content = with_fstab("{config, lib, pkgs, ...}:\n{\n}\n", |file| {
-            add_entry_no_transaction(
+            add_mount_no_transaction(
                 file,
                 "/",
-                "/dev/disk/by-uuid/cafe",
+                &MountDevice::Luks {
+                    container: "/dev/disk/by-uuid/cafe",
+                    mapper_device: Some("/dev/mapper/modulixroot"),
+                    tpm2: true,
+                },
                 "ext4",
                 &[],
-                Some(&LuksEntry {
-                    name: "modulixroot",
-                    tpm2: true,
-                }),
             )
-            .expect("add_entry_no_transaction failed");
+            .expect("add_mount_no_transaction failed");
         });
 
         assert!(content.contains("crypttabExtraOpts"));
@@ -763,20 +965,20 @@ mod luks_tests {
     }
 
     #[test]
-    fn add_entry_refuses_a_luks_device_that_is_not_by_uuid() {
+    fn add_mount_refuses_a_luks_container_that_is_not_by_uuid() {
         let content = with_fstab("{config, lib, pkgs, ...}:\n{\n}\n", |file| {
-            let err = add_entry_no_transaction(
+            let err = add_mount_no_transaction(
                 file,
                 "/",
-                "/dev/sda2",
+                &MountDevice::Luks {
+                    container: "/dev/sda2",
+                    mapper_device: Some("/dev/mapper/modulixroot"),
+                    tpm2: false,
+                },
                 "ext4",
                 &[],
-                Some(&LuksEntry {
-                    name: "modulixroot",
-                    tpm2: false,
-                }),
             )
-            .expect_err("a non-by-uuid LUKS device must be refused");
+            .expect_err("a non-by-uuid LUKS container must be refused");
             assert!(matches!(err, crate::mx::ErrorKind::InvalidUuid));
         });
 
@@ -811,5 +1013,175 @@ mod luks_tests {
         });
 
         assert_eq!(content.matches("\"tpm2-device=auto\"").count(), 1);
+    }
+
+    #[test]
+    fn mapper_name_prefers_the_device_in_use() {
+        assert_eq!(
+            mapper_name(Some("/dev/mapper/modulixroot"), "/dev/disk/by-uuid/cafe").unwrap(),
+            "modulixroot"
+        );
+    }
+
+    #[test]
+    fn mapper_name_falls_back_to_the_container_uuid() {
+        assert_eq!(
+            mapper_name(None, "/dev/disk/by-uuid/cafe").unwrap(),
+            "luks-cafe"
+        );
+        assert_eq!(
+            mapper_name(Some("/dev/dm-0"), "/dev/disk/by-uuid/cafe").unwrap(),
+            "luks-cafe"
+        );
+        assert_eq!(
+            mapper_name(Some("/dev/mapper/"), "/dev/disk/by-uuid/cafe").unwrap(),
+            "luks-cafe"
+        );
+    }
+
+    #[test]
+    fn mapper_name_errors_when_nothing_can_be_derived() {
+        assert!(mapper_name(Some("/dev/dm-0"), "/dev/sda2").is_err());
+        assert!(mapper_name(None, "/dev/sda2").is_err());
+    }
+
+    #[test]
+    fn add_mount_declares_a_plain_device_as_is() {
+        let content = with_fstab("{config, lib, pkgs, ...}:\n{\n}\n", |file| {
+            add_mount_no_transaction(
+                file,
+                "/mnt/data",
+                &MountDevice::Plain {
+                    device: "/dev/disk/by-uuid/beef",
+                },
+                "ext4",
+                &["noatime"],
+            )
+            .expect("add_mount_no_transaction failed");
+        });
+
+        assert!(content.contains("device = \"/dev/disk/by-uuid/beef\";"));
+        assert!(content.contains("\"noatime\""));
+        assert!(!content.contains("boot.initrd.luks"));
+        assert!(!content.contains("luks = {"));
+    }
+
+    /// A plain device needs no UUID: only a LUKS container does, because the
+    /// initrd has no stable device names.
+    #[test]
+    fn add_mount_accepts_any_spelling_for_a_plain_device() {
+        let content = with_fstab("{config, lib, pkgs, ...}:\n{\n}\n", |file| {
+            add_mount_no_transaction(
+                file,
+                "/mnt/data",
+                &MountDevice::Plain {
+                    device: "/dev/sda1",
+                },
+                "ext4",
+                &[],
+            )
+            .expect("add_mount_no_transaction failed");
+        });
+
+        assert!(content.contains("device = \"/dev/sda1\";"));
+    }
+
+    #[test]
+    fn remove_mount_drops_the_entry_and_reports_it() {
+        let content = with_fstab(GENERATED, |file| {
+            assert!(
+                remove_mount_no_transaction(file, "/").expect("remove_mount_no_transaction failed")
+            );
+        });
+
+        assert!(!content.contains("fileSystems.\"/\""));
+        assert!(!content.contains("/dev/mapper/modulixroot"));
+    }
+
+    /// The gap this used to leave: the mount point went, its LUKS entry
+    /// stayed behind forever.
+    #[test]
+    fn remove_mount_drops_the_luks_entry_it_was_the_last_user_of() {
+        let content = with_fstab(GENERATED, |file| {
+            remove_mount_no_transaction(file, "/").expect("remove_mount_no_transaction failed");
+        });
+
+        assert!(!content.contains("modulixroot"));
+        assert!(!content.contains("/dev/disk/by-uuid/cafe"));
+    }
+
+    /// Two mount points on one container: removing the first must leave the
+    /// LUKS entry alone, or the initrd can no longer open the volume the
+    /// second one still needs.
+    #[test]
+    fn remove_mount_keeps_a_luks_entry_another_mount_point_still_needs() {
+        let seed = "\
+{config, lib, pkgs, ...}:
+{
+  fileSystems.\"/\" =
+    { device = \"/dev/mapper/modulixroot\";
+      fsType = \"btrfs\";
+    };
+
+  fileSystems.\"/home\" =
+    { device = \"/dev/mapper/modulixroot\";
+      fsType = \"btrfs\";
+    };
+
+  boot.initrd.luks.devices.\"modulixroot\".device = \"/dev/disk/by-uuid/cafe\";
+}
+";
+
+        let after_first = with_fstab(seed, |file| {
+            remove_mount_no_transaction(file, "/home").expect("remove_mount_no_transaction failed");
+        });
+
+        assert!(!after_first.contains("fileSystems.\"/home\""));
+        assert!(after_first.contains("boot.initrd.luks.devices.\"modulixroot\".device"));
+
+        // And once the last user goes, the entry goes with it.
+        let after_both = with_fstab(&after_first, |file| {
+            remove_mount_no_transaction(file, "/").expect("remove_mount_no_transaction failed");
+        });
+
+        assert!(!after_both.contains("modulixroot"));
+    }
+
+    #[test]
+    fn remove_mount_reports_an_undeclared_mount_point() {
+        let content = with_fstab(GENERATED, |file| {
+            assert!(
+                !remove_mount_no_transaction(file, "/nowhere")
+                    .expect("remove_mount_no_transaction failed")
+            );
+        });
+
+        // Nothing else was touched.
+        assert!(content.contains("boot.initrd.luks.devices.\"modulixroot\".device"));
+        assert!(content.contains("fileSystems.\"/\""));
+    }
+
+    /// A plain mount point carries no mapper, so removing it must not go
+    /// looking for a LUKS entry to drop.
+    #[test]
+    fn remove_mount_of_a_plain_device_touches_no_luks_entry() {
+        let seed = "\
+{config, lib, pkgs, ...}:
+{
+  fileSystems.\"/boot\" =
+    { device = \"/dev/disk/by-uuid/beef\";
+      fsType = \"vfat\";
+    };
+
+  boot.initrd.luks.devices.\"modulixroot\".device = \"/dev/disk/by-uuid/cafe\";
+}
+";
+
+        let content = with_fstab(seed, |file| {
+            remove_mount_no_transaction(file, "/boot").expect("remove_mount_no_transaction failed");
+        });
+
+        assert!(!content.contains("fileSystems.\"/boot\""));
+        assert!(content.contains("boot.initrd.luks.devices.\"modulixroot\".device"));
     }
 }
