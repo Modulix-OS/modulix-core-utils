@@ -23,6 +23,23 @@
 //! - `--kb-layout <LAYOUT>`: keyboard layout (default `us`).
 //! - `--kb-variant <VARIANT>`: keyboard variant (default: empty string).
 //! - `--console-keymap <KEYMAP>`: console keymap (default `us`).
+//! - `--package <ATTR>`: nixpkgs attribute name seeded into `package.nix`; repeatable, each
+//!   occurrence appends one entry (default: no package, so no `package.nix` and no import for
+//!   it). An attribute that does not exist is not validated here and only fails when the
+//!   configuration is built.
+//! - `--module <NAME>`: Modulix module name, dotted as in mxpkgs' `modules/index.json`
+//!   (e.g. `services.flatpak`), seeded into `module.nix` as `mx.<NAME>.enable = true`;
+//!   repeatable, each occurrence appends one entry (default: no module, so no `module.nix` and
+//!   no import for it). An unknown name is not validated here and only fails when the
+//!   configuration is built.
+//! - `--luks-name <NAME>`: mapper name the encrypted root is currently opened as, which must be
+//!   the same name `nixos-generate-config` keyed its own `boot.initrd.luks.devices` entry on
+//!   (default: none, the target is treated as unencrypted). On its own this writes nothing; it
+//!   only gives `--luks-tpm2` an entry to extend.
+//! - `--luks-tpm2`: a TPM2 token is enrolled on that container, so
+//!   `crypttabExtraOpts = [ "tpm2-device=auto" ]` is added to its entry. Requires
+//!   `--luks-name` (prints usage, exits with status `1` without it), since the option has to
+//!   land on the generator's existing entry rather than on a second, unused one.
 //! - `--config-dir <PATH>`: writes the config repo here instead of the default location
 //!   (`<root>/etc/modulix-os/` in release builds); unlike every other flag, omitting its value
 //!   is a hard error (prints usage, exits with status `1`) rather than falling back to a
@@ -53,7 +70,7 @@
 use std::env;
 use std::process::ExitCode;
 
-use modulix_core_utils::init::{Desktop, InitParams, init};
+use modulix_core_utils::init::{Desktop, InitParams, LuksInit, init};
 
 /// Prints the `mx-init` usage banner (recognized flags, their argument placeholders, and
 /// defaults) to stderr.
@@ -80,6 +97,10 @@ fn print_usage(program: &str) {
     --kb-layout <LAYOUT>\tKeyboard layout (default: us)
     --kb-variant <VARIANT>\tKeyboard variant (default: empty)
     --console-keymap <KEYMAP>\tConsole keymap (default: us)
+    --package <ATTR>\tnixpkgs attribute seeded into package.nix; repeatable (default: none)
+    --module <NAME>\tModulix module name seeded into module.nix; repeatable (default: none)
+    --luks-name <NAME>\tMapper name of the encrypted root (default: none, unencrypted)
+    --luks-tpm2\t\tAdd crypttabExtraOpts = [ \"tpm2-device=auto\" ]; requires --luks-name
     --config-dir <PATH>\tWrite the config repo here instead of the default location
     --debug\t\tSeed with `nixos-rebuild build-vm` instead of installing/switching"
     );
@@ -116,19 +137,20 @@ fn take_value(args: &[String], i: &mut usize, flag: &str) -> Result<String, Stri
 ///
 /// # Recognized flags
 /// `--root`, `--hostname`, `--username`, `--fullname`, `--desktop`, `--locale`, `--timezone`,
-/// `--kb-layout`, `--kb-variant`, `--console-keymap`, `--config-dir`, `--debug`, `--help`/`-h`
-/// (see the crate-level docs for each flag's effect and default). `--desktop` is additionally
-/// validated via `Desktop::parse`.
+/// `--kb-layout`, `--kb-variant`, `--console-keymap`, `--package`, `--module`, `--luks-name`,
+/// `--luks-tpm2`, `--config-dir`, `--debug`, `--help`/`-h` (see the crate-level docs for each
+/// flag's effect and default). `--desktop` is additionally validated via `Desktop::parse`.
+/// `--package` and `--module` are repeatable and accumulate in argument order.
 ///
 /// # Returns
 /// The populated `InitParams` to pass to `modulix_core_utils::init::init`.
 ///
 /// # Panics
 /// Never panics. Instead, `parse_args` terminates the process directly (via
-/// `std::process::exit`) in four cases: a value-taking flag given without a following value
-/// (after printing usage, status `1`), an unrecognized `--desktop` value (status `1`), an unknown
-/// option (after printing usage, status `1`), or `--help`/`-h` (after printing usage, status
-/// `0`).
+/// `std::process::exit`) in five cases: a value-taking flag given without a following value
+/// (after printing usage, status `1`), an unrecognized `--desktop` value (status `1`),
+/// `--luks-tpm2` without `--luks-name` (after printing usage, status `1`), an unknown option
+/// (after printing usage, status `1`), or `--help`/`-h` (after printing usage, status `0`).
 fn parse_args() -> InitParams {
     let args: Vec<String> = env::args().collect();
     let mut root = String::new();
@@ -141,6 +163,10 @@ fn parse_args() -> InitParams {
     let mut kb_layout = String::new();
     let mut kb_variant = String::new();
     let mut console_keymap = String::new();
+    let mut packages: Vec<String> = Vec::new();
+    let mut modules: Vec<String> = Vec::new();
+    let mut luks_name: Option<String> = None;
+    let mut luks_tpm2 = false;
     let mut config_dir: Option<String> = None;
     let mut debug = false;
 
@@ -167,6 +193,12 @@ fn parse_args() -> InitParams {
             "--kb-layout" => kb_layout = value!(),
             "--kb-variant" => kb_variant = value!(),
             "--console-keymap" => console_keymap = value!(),
+            "--package" => packages.push(value!()),
+            "--module" => modules.push(value!()),
+            "--luks-name" => luks_name = Some(value!()),
+            "--luks-tpm2" => {
+                luks_tpm2 = true;
+            }
             "--config-dir" => config_dir = Some(value!()),
             "--debug" => {
                 debug = true;
@@ -208,6 +240,16 @@ fn parse_args() -> InitParams {
         }
     };
 
+    let luks = match (luks_name, luks_tpm2) {
+        (Some(name), tpm2) => Some(LuksInit { name, tpm2 }),
+        (None, false) => None,
+        (None, true) => {
+            eprintln!("Error: --luks-tpm2 requires --luks-name <NAME>");
+            print_usage(&args[0]);
+            std::process::exit(1);
+        }
+    };
+
     InitParams {
         root: if root.is_empty() {
             "/mnt".to_string()
@@ -243,6 +285,9 @@ fn parse_args() -> InitParams {
         } else {
             console_keymap
         },
+        packages,
+        modules,
+        luks,
         config_dir,
         debug,
     }
