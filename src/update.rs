@@ -44,7 +44,7 @@ use std::fs;
 use std::path;
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::CONFIG_NAME;
 pub use crate::core::transaction::transaction::BuildCommand;
@@ -61,7 +61,7 @@ use crate::mx;
 
 /// Relative path, under a configuration directory, of the flake this module
 /// refreshes.
-const FILE_FLAKE_PATH: &str = "flake.nix";
+pub(crate) const FILE_FLAKE_PATH: &str = "flake.nix";
 
 /// Payload of the update transaction. The refresh itself is performed by the
 /// commit (`UpdateInput::UpdateAll`, forced via
@@ -116,6 +116,10 @@ pub fn update(config_dir: &str, build_command: BuildCommand, cores: Option<u32>)
 ///   pinned in `flake.lock`.
 /// * `new_rev` - the revision (or `narHash`) available upstream.
 /// * `last_modified` - the upstream revision's timestamp, Unix seconds.
+///
+/// Serializable so a staged update can record on disk what it would change
+/// (see `crate::staging`).
+#[derive(Serialize, Deserialize)]
 pub struct OutdatedInput {
     pub name: String,
     pub current_rev: String,
@@ -128,7 +132,7 @@ const METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Relative path, under a configuration directory, of the lockfile this module
 /// reads and produces candidates for.
-const FILE_FLAKE_LOCK_PATH: &str = "flake.lock";
+pub(crate) const FILE_FLAKE_LOCK_PATH: &str = "flake.lock";
 
 /// Name, under [`crate::cache_dir`], of the scratch lockfile
 /// [`check_update`] hands to `nix flake update --output-lock-file`.
@@ -557,7 +561,7 @@ pub fn update_with_lock(
 /// [`mx::ErrorKind::IOError`] if `dst` cannot be created, and
 /// [`mx::ErrorKind::GitError`] if `src` cannot be opened, `HEAD` cannot be
 /// resolved, or the checkout fails.
-fn stage_head_tree(src: &path::Path, dst: &path::Path) -> mx::Result<()> {
+pub(crate) fn stage_head_tree(src: &path::Path, dst: &path::Path) -> mx::Result<()> {
     fs::create_dir_all(dst).map_err(|e| io_error_at(&dst.to_string_lossy(), e))?;
 
     let repo = git2::Repository::open(src).map_err(mx::ErrorKind::GitError)?;
@@ -622,8 +626,10 @@ fn stage_head_tree(src: &path::Path, dst: &path::Path) -> mx::Result<()> {
 /// left next to it are removed before returning, on success and on failure
 /// alike; the directory is named per call, so concurrent callers do not clobber
 /// each other's, and is created with `create_dir` so an entry already sitting at
-/// that path (a planted symlink, since this runs as root under a
-/// world-writable directory) fails the call instead of being followed. Takes a
+/// that path (a planted symlink) fails the call instead of being followed. The
+/// scratch lives under [`crate::cache_dir`] rather than `/tmp`, so a rebuild
+/// moved into its own systemd unit still resolves it when the calling daemon
+/// runs with `PrivateTmp`. Takes a
 /// turn in the shared build queue, so it never runs concurrently with a real
 /// rebuild.
 ///
@@ -640,18 +646,20 @@ pub fn build_with_lock(config_dir: &str, lock: String, cores: Option<u32>) -> mx
     /// call's `remove_dir_all` delete the tree the first one is building.
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-    let scratch = std::env::temp_dir().join(format!(
-        "mx-update-build-{}-{}",
+    let cache = crate::cache_dir();
+    fs::create_dir_all(&cache).map_err(|e| io_error_at(&cache.to_string_lossy(), e))?;
+
+    let scratch = cache.join(format!(
+        "update-build-{}-{}",
         std::process::id(),
         SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     let staged = scratch.join("config");
 
-    // `create_dir`, not `create_dir_all`, and no pre-emptive cleanup: this runs
-    // as root with a predictable name under a world-writable directory, so the
-    // one thing that must not happen is following a symlink someone planted
-    // there. `create_dir` fails with `AlreadyExists` on an existing entry of any
-    // kind, turning that into a failed pre-build rather than a root-owned write
+    // `create_dir`, not `create_dir_all`, and no pre-emptive cleanup: the one
+    // thing that must not happen is following a symlink someone planted there.
+    // `create_dir` fails with `AlreadyExists` on an existing entry of any kind,
+    // turning that into a failed pre-build rather than a root-owned write
     // outside the scratch area.
     fs::create_dir(&scratch).map_err(|e| io_error_at(&scratch.to_string_lossy(), e))?;
 

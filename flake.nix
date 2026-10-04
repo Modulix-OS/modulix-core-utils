@@ -39,6 +39,16 @@
                 '';
             };
 
+            mx-apply-update = naerskLib.buildPackage {
+                src = ./.;
+                cargoBuildOptions = x: x ++ [
+                  "--features" "system-update"
+                  "--bin" "mx-apply-update"
+                ];
+                buildInputs = with pkgs; [ openssl ];
+                nativeBuildInputs = with pkgs; [ pkg-config ];
+            };
+
             default = mx-init;
          });
         devShell = forAllSystems (system:

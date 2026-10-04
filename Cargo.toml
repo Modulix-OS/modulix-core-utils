@@ -135,6 +135,11 @@ name = "mx-init"
 path = "bin/init.rs"
 required-features = ["init"]
 
+[[bin]]
+name = "mx-apply-update"
+path = "bin/apply-update.rs"
+required-features = ["system-update"]
+
 [[exemple]]
 name = "filesystem"
 required-features = ["filesystem"]

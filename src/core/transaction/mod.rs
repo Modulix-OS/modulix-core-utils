@@ -168,6 +168,73 @@ where
     }
 }
 
+/// Variant of [`make_transaction_update`] that commits without rebuilding.
+///
+/// For the caller that has already activated the configuration it is about to
+/// record: the staged-update promotion builds and activates the new system from
+/// the pre-built copy under [`crate::cache_dir`], then needs the configuration
+/// repository to catch up with the lockfile that was applied. Running a rebuild
+/// there would redo, from the real repository, work that is already done.
+///
+/// Unlike the sentinel file `Transaction` also honours, this is explicit and
+/// scoped to one transaction - see [`Transaction::set_skip_rebuild`].
+///
+/// # Arguments
+/// * `description`, `config_dir`, `file_path`, `updated_input`, `f` - as in
+///   [`make_transaction_update`]. No `build_command` is taken: none runs.
+///
+/// # Type parameters
+/// * `F` – the closure type.
+/// * `R` – value the closure produces, handed back on success.
+///
+/// # Post-conditions
+/// Returns as soon as the commit is written - it does not block on a build.
+/// The configuration is committed, the running system untouched. On error the
+/// repository is rolled back to its previous commit, as in
+/// [`make_transaction_update`].
+///
+/// # Returns
+/// As in [`make_transaction`].
+pub fn make_transaction_commit_only<F, R>(
+    description: &str,
+    config_dir: &str,
+    file_path: &str,
+    updated_input: UpdateInput,
+    f: F,
+) -> mx::Result<R>
+where
+    F: FnOnce(&mut NixFile) -> mx::Result<R>,
+{
+    let mut transaction = Transaction::new(
+        config_dir,
+        description,
+        BuildCommand::Boot,
+        TransactionPermission::Writtable,
+    )?;
+    transaction.set_force_commit(true);
+    transaction.set_skip_rebuild(true);
+    transaction.add_file(file_path)?;
+    transaction.begin()?;
+
+    let file = match transaction.get_file_mut(file_path) {
+        Ok(file) => file,
+        Err(e) => {
+            transaction.rollback()?;
+            return Err(e);
+        }
+    };
+    match f(file) {
+        Ok(ret) => {
+            transaction.commit(updated_input)?;
+            Ok(ret)
+        }
+        Err(e) => {
+            transaction.rollback()?;
+            Err(e)
+        }
+    }
+}
+
 /// Read-only counterpart of [`make_transaction`]: opens the file without the
 /// right to modify it, for a caller that only needs to read the configuration
 /// under the transaction's locks.

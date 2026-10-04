@@ -78,6 +78,9 @@ pub mod install_package;
 pub mod user;
 
 #[cfg(feature = "system-update")]
+pub mod staging;
+
+#[cfg(feature = "system-update")]
 pub mod update;
 
 mod error;

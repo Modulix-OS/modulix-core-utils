@@ -287,6 +287,105 @@ mod unit {
             ]
         );
     }
+
+    /// The transient-unit wrapper keeps the rebuild program and its arguments
+    /// after the `--` separator, and asks for the properties that let the
+    /// rebuild outlive a stop of the calling unit.
+    #[test]
+    fn detach_rebuild_command_wraps_program_and_args() {
+        let inner = Transaction::build_rebuild_command(
+            "/etc/modulix-os",
+            "default",
+            &BuildCommand::Switch,
+            None,
+        );
+        let detached = Transaction::detach_rebuild_command(inner, None);
+
+        assert_eq!(detached.get_program().to_str().unwrap(), "systemd-run");
+        let args: Vec<&str> = detached.get_args().map(|a| a.to_str().unwrap()).collect();
+
+        assert!(args.contains(&"--wait"));
+        assert!(args.contains(&"--pipe"));
+        assert!(args.contains(&"--collect"));
+        assert!(args.contains(&"--property=KillMode=process"));
+        assert!(args.iter().any(|a| a.starts_with("--unit=mx-rebuild-")));
+
+        let separator = args.iter().position(|a| *a == "--").expect("-- missing");
+        assert_eq!(
+            &args[separator + 1..],
+            &[
+                "nixos-rebuild",
+                BuildCommand::Switch.as_str(),
+                "--flake",
+                "/etc/modulix-os#default"
+            ]
+        );
+    }
+
+    /// A working directory becomes a unit property, because one set on the
+    /// `systemd-run` client would not reach the transient unit.
+    #[test]
+    fn detach_rebuild_command_passes_cwd_as_property() {
+        let inner = Transaction::build_rebuild_command(
+            "/scratch/config",
+            "default",
+            &BuildCommand::Build,
+            None,
+        );
+        let detached = Transaction::detach_rebuild_command(inner, Some("/scratch"));
+
+        let args: Vec<&str> = detached.get_args().map(|a| a.to_str().unwrap()).collect();
+        assert!(args.contains(&"--property=WorkingDirectory=/scratch"));
+    }
+
+    /// No working-directory property is emitted when the caller passes `None`.
+    #[test]
+    fn detach_rebuild_command_no_cwd_property_when_none() {
+        let inner = Transaction::build_rebuild_command(
+            "/etc/modulix-os",
+            "default",
+            &BuildCommand::Boot,
+            None,
+        );
+        let detached = Transaction::detach_rebuild_command(inner, None);
+
+        let args: Vec<&str> = detached.get_args().map(|a| a.to_str().unwrap()).collect();
+        assert!(
+            !args
+                .iter()
+                .any(|a| a.starts_with("--property=WorkingDirectory="))
+        );
+    }
+
+    /// Two wrappings of the same process get distinct unit names, so two
+    /// concurrent rebuilds cannot collide on one transient unit.
+    #[test]
+    fn detach_rebuild_command_unit_names_are_unique() {
+        let unit_of = || {
+            let inner = Transaction::build_rebuild_command(
+                "/etc/modulix-os",
+                "default",
+                &BuildCommand::Switch,
+                None,
+            );
+            let detached = Transaction::detach_rebuild_command(inner, None);
+            detached
+                .get_args()
+                .map(|a| a.to_str().unwrap().to_string())
+                .find(|a| a.starts_with("--unit="))
+                .expect("--unit missing")
+        };
+
+        assert_ne!(unit_of(), unit_of());
+    }
+
+    /// A name that cannot exist in any `PATH` entry is not reported as found.
+    #[test]
+    fn binary_on_path_rejects_unknown_binary() {
+        assert!(!Transaction::binary_on_path(
+            "mx-this-binary-does-not-exist"
+        ));
+    }
 }
 
 mod integration {

@@ -44,7 +44,7 @@ nix build .#debug    # non-release build via naersk
 `#[cfg(debug_assertions)]` changes two things that make debug builds safe to run on a dev host:
 
 - **`CONFIG_DIRECTORY`** (`lib.rs`): `/etc/modulix-os/` in release, `<repo>/test/` in debug. `test/` is a **real NixOS fixture config** (`configuration.nix`, `firewall.nix`, `users.nix`, `fstab.nix`…) that examples/tests mutate in debug. It is also a nested git repo (`test/.git`) because the transaction engine requires one.
-- **`BuildCommand::as_str()`** (`transaction.rs`): in debug **all** variants (`Switch`/`Boot`/`Install`) return `"build-vm"`, so a commit never touches the host system — it builds a VM image instead.
+- **`BuildCommand::as_str()`** (`transaction.rs`): in debug every variant that would touch the host (`Switch`/`Boot`/`Install`/`BuildVm`) returns `"build-vm"`, so a commit never touches the host system — it builds a VM image instead. `Build` is the exception: it activates nothing, so it stays `"build"` in both profiles.
 
 `build.rs` injects `TARGET_NIX` (e.g. `x86_64-linux`) as a compile-time env var.
 
@@ -88,7 +88,7 @@ Lifecycle:
   2. `has_diff_with_commit(old_commit, path)` selects only genuinely changed files and `git_add`s them (avoids empty commits) → `need_modif`;
   3. if `need_modif`: generate `flake.lock` via `nix flake update` if absent, else honor `UpdateInput` (`Keep`=no update / `UpdateAll` / `UpdateSelected(inputs)` / `UseLock(content)`=write that exact lockfile, no `nix` process); `flake.lock` is auto-staged if modified;
   4. create the git commit (parentless if repo was empty);
-  5. **build serialization** via two file locks: `try_lock(/tmp/mx-queue-build.lock)` — only if acquired do we `lock(/tmp/mx-build.lock)`, release the queue lock, then run the rebuild. This lets a single waiter coalesce concurrent builds;
+  5. **build serialization** via `BuildQueue` (`core/transaction/build_queue.rs`): a FIFO ticket directory, `/tmp/mx-build-queue`, where each waiter holds an exclusive flock on its ticket file as a liveness proof — `wait_turn` deletes the tickets whose flock is free, so a killed process never wedges the queue. Separately, the sentinel `/tmp/mx-skip-rebuild.lock` is probed with `try_lock`: held by someone else ⇒ the commit stands and **no rebuild runs** (`init` uses that so an install does not rebuild per intermediate transaction). `Transaction::set_skip_rebuild(true)` is the explicit, per-transaction form of the same thing, used by the staged-update promotion;
   6. `rebuild_config`: `Install` → `nixos-install --root /mnt --no-root-password --flake <dir>#<CONFIG_NAME>`; `Switch`/`Boot` → `nixos-rebuild <cmd> --flake …`. stdout inherited, stderr captured; non-zero exit → `BuildError(stderr)`;
   7. `NixFile::close()` all, `stash_restore()`, drop the repo handle. Any failure inside `commit_impl` triggers an automatic `rollback`.
 - **`rollback()`** — if `old_commit` is zero just close files; otherwise repoint HEAD ref to `old_commit`, force `checkout_head`, **delete files that `was_created`**, restore immutable flag on pre-existing ones, `close()` every `NixFile` (mandatory — otherwise the flock leaks and blocks future `begin`s), then `stash_restore`.
@@ -162,6 +162,20 @@ All three live in the same transaction as the rest of the seed, so the repo is o
 - **Errors**: one enum `error::ErrorKind`, re-exported as `crate::mx::{Result, ErrorKind}`. No `thiserror`. Return `mx::Result<T>`, propagate with `?`.
 - **Renamed imports**: `Option as mxOption`, `List as mxList` to avoid shadowing std types.
 - Never hand-edit Nix as raw strings in domain code — go through `mxOption`/`mxList` so AST positioning and indentation stay correct.
+
+## Staged system updates (`staging.rs` + `bin/apply-update.rs`)
+
+**A system update is never applied while the machine is in use.** It is resolved and built up front, and the switch happens at shutdown. State lives under `cache_dir()/pending-update/`: `config/` (the `HEAD` tree plus the candidate `flake.lock`), `lock` (the candidate, canonical), `result` (the `nixos-rebuild build` symlink, i.e. the **garbage-collection root** that keeps the pre-built closure alive), `meta.json` (`StagedUpdate`).
+
+- `stage_update(config_dir, cores)` — `check_update` → stage the tree → `nixos-rebuild build` (on `spawn_blocking`, behind a `BuildQueue` ticket). Idempotent: an unchanged candidate whose closure is still rooted is returned as-is. Touches `config_dir` not at all.
+- `apply_staged(config_dir, cores)` — `nixos-rebuild boot` **against the staged copy**, then promotes the candidate with `make_transaction_commit_only` (commit, no rebuild). It must be the staged copy: a `.git`-less checkout hashes as a `path:` flake where the real repository is `git+file://`, so activating the real repository would rebuild the top-level derivation instead of reusing the pre-built one.
+- `staged_status()` / `discard_staged()` — read side and teardown. `built` is reported `false` once `result` is gone, so a caller is never promised a fast activation that would in fact rebuild.
+- `repair_after_crash(config_dir)` → `Transaction::restore_orphan_stashes` — pops the auto-stash an interrupted transaction left behind. `Transaction` has no `Drop`, so a `SIGKILL` mid-transaction leaves one; nothing else detects it. Callers run it at start-up, before serving.
+- `bin/apply-update.rs` builds the `mx-apply-update` binary (flake output `packages.<system>.mx-apply-update`), which mxpkgs runs from a `Before=shutdown.target` unit. It needs `/nix/store` and `/boot` still mounted, hence `DefaultDependencies=no` + `Before=umount.target`.
+
+**Invariant: the committed `flake.lock` is the one the running system was built from.** The candidate stays out of the git tree, so a concurrent install (`UpdateInput::Keep`, which runs no `nix` process at all when a lockfile is present) cannot drag the pending update in.
+
+Two related changes in `transaction.rs`: the rebuild is wrapped in `systemd-run --collect --wait --pipe --unit=mx-rebuild-<pid>-<n> --property=KillMode=process` when `INVOCATION_ID` is set, so it runs in its own cgroup and survives a stop of the calling unit (a daemon restarted by its own `switch` used to kill it); and `build_with_lock`'s scratch moved from `/tmp` to `cache_dir()`, because a transient unit does not see the `PrivateTmp` of the caller.
 
 ## Adding a new config module
 
