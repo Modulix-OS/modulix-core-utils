@@ -137,17 +137,22 @@ Note `option::get`'s documentation points at `core::utils::string_nix_to_value` 
 
 `set_luks_tpm2_no_transaction(fstab, luks_name)` exists on its own because **`nixos-generate-config` already declares the LUKS entry's `.device`** — it detects the open mapper and keys the entry on the live `/sys/class/block/<dm>/dm/name` — and `fstab_module` copies that block into `fstab.nix` verbatim (`extract_fs_block` preserves it on purpose). A caller that lets the generator describe the encrypted root must therefore add only `crypttabExtraOpts` and must **not** re-declare `.device`: two definitions of the same `types.str` option make the NixOS module system fail, even at equal values. Neither function writes `boot.initrd.systemd.enable`/`.tpm2.enable` — in Modulix those come from `mxpkgs/modulixos/boot.nix`.
 
-Known gap: `def_filesystem_from_unix_fstab_no_transaction` replaces the whole file with generator output, so it destroys `crypttabExtraOpts`. `extract_fs_block` cannot help — it never reads the existing file.
+`set_luks_container_no_transaction(fstab, luks_name, container)` is the exception to that rule, and only because the generator has a blind spot: it emits `boot.initrd.luks.devices."<name>".device` **only while walking the mount points it found**, so a container holding swap alone — which it reports under `swapDevices` and nowhere else — arrives with no way to be unlocked in the initrd. That function declares the missing `.device`, refuses anything that is not a `/dev/disk/by-uuid/` path, and must never be aimed at a container the generator already described.
+
+`set_resume_device_no_transaction(fstab, device)` writes `boot.resumeDevice`. It lives in `fstab.nix` next to the swap device it names, and it is not optional for hibernation: with a systemd initrd NixOS only passes `resume=` when that option is set (`nixos/modules/system/boot/systemd/initrd.nix`), the fallback over `swapDevices` exists in the script initrd only. The value renders as a `boot = { resumeDevice = …; }` attribute set, which Nix merges with the flat `boot.initrd.…` lines the generator wrote.
+
+Known gap: `def_filesystem_from_unix_fstab_no_transaction` replaces the whole file with generator output, so it destroys `crypttabExtraOpts`, any `.device` written by `set_luks_container_no_transaction`, and `boot.resumeDevice`. `extract_fs_block` cannot help — it never reads the existing file.
 
 #### `init.rs`
 
-`InitParams` carries three fields beyond the identity/locale seed, all of them optional:
+`InitParams` carries four fields beyond the identity/locale seed, all of them optional:
 
 - `packages: Vec<String>` → `package.nix` via `install_package::install_no_transaction`, so the entries carry the `pkgs.<attr>` spelling a later `install_package::uninstall` matches on.
 - `modules: Vec<String>` → `module.nix` via `install_module::install_no_transaction`, one `mx.<name>.enable = true` per dotted name (as spelled in mxpkgs' `modules/index.json`; not validated, an unknown name fails at build time).
-- `luks: Option<LuksInit>` → `filesystem::set_luks_tpm2_no_transaction` on `fstab.nix` when `tpm2` is set, applied **after** the content write that replaces that buffer.
+- `luks: Vec<LuksInit>` → `write_fstab_extras` on `fstab.nix`, applied **after** the content write that replaces that buffer. One entry per LUKS container: `container: Some(path)` declares the `.device` the generator left out (a swap-only container), `None` means the generator already declared it (the root), and `tpm2` adds `crypttabExtraOpts`. An entry with `container: None` and `tpm2: false` writes nothing.
+- `resume_device: Option<String>` → `filesystem::set_resume_device_no_transaction`, in the same pass. `/dev/mapper/<name>` when the swap lives in a LUKS container.
 
-All three live in the same transaction as the rest of the seed, so the repo is one commit and — with the skip-rebuild lock held — no build. An empty list creates no file and adds no import. `configuration_nix` lists `./package.nix`/`./module.nix` by hand for exactly the reason the other four are listed: `Transaction::begin` does inject new files into `imports`, but `init` then overwrites `configuration.nix` wholesale. Neither file is in `BASE_FILES` — they are the two files a user keeps editing afterwards, and `NixFile::create_file`/`commit` seal them anyway.
+All four live in the same transaction as the rest of the seed, so the repo is one commit and — with the skip-rebuild lock held — no build. An empty list creates no file and adds no import. `configuration_nix` lists `./package.nix`/`./module.nix` by hand for exactly the reason the other four are listed: `Transaction::begin` does inject new files into `imports`, but `init` then overwrites `configuration.nix` wholesale. Neither file is in `BASE_FILES` — they are the two files a user keeps editing afterwards, and `NixFile::create_file`/`commit` seal them anyway.
 
 ### Other subsystems
 

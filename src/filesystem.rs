@@ -270,6 +270,94 @@ pub fn set_luks_tpm2_no_transaction(fstab: &mut NixFile, luks_name: &str) -> mx:
     Ok(())
 }
 
+/// Declares the backing container of a LUKS entry in an already-open
+/// `fstab.nix`.
+///
+/// Counterpart of [`set_luks_tpm2_no_transaction`] for a container
+/// `nixos-generate-config` does not report: the generator only emits
+/// `boot.initrd.luks.devices."<name>".device` while walking the mount points
+/// it found, so a container holding swap alone — which it lists under
+/// `swapDevices` and nothing else — reaches the configuration without any way
+/// to be unlocked at boot.
+///
+/// # Parameters
+/// * `fstab` - the open configuration file to edit.
+/// * `luks_name` - mapper name the container is opened as, used verbatim as
+///   the attribute key.
+/// * `container` - the raw container device, as a `/dev/disk/by-uuid/<uuid>`
+///   path so the declaration survives device renumbering.
+///
+/// # Pre-conditions
+/// The entry must not already be declared by the generator: two definitions of
+/// this `types.str` option make the NixOS module system fail even at equal
+/// values. Call this only for a container the generator left out.
+///
+/// # Post-conditions
+/// `boot.initrd.luks.devices."<luks_name>".device` is `container`.
+///
+/// Not durable against [`def_filesystem_from_unix_fstab_no_transaction`],
+/// which replaces the whole file with generator output.
+///
+/// # Returns
+/// `Ok(())` once the edit is applied to `fstab`'s in-memory buffer.
+///
+/// # Errors
+/// [`mx::ErrorKind::InvalidUuid`] when `container` is not a
+/// `/dev/disk/by-uuid/` path, plus any error `mxOption::set` propagates.
+pub fn set_luks_container_no_transaction(
+    fstab: &mut NixFile,
+    luks_name: &str,
+    container: &str,
+) -> mx::Result<()> {
+    if !container.starts_with("/dev/disk/by-uuid/") {
+        return Err(mx::ErrorKind::InvalidUuid);
+    }
+
+    mxOption::new(&format!("{}.device", luks_option(luks_name)))
+        .set(fstab, format!("\"{}\"", container).as_str())?;
+    Ok(())
+}
+
+/// Declares the device hibernation resumes from, in an already-open
+/// `fstab.nix`.
+///
+/// `swapDevices` alone is not enough with a systemd initrd: NixOS only passes
+/// `resume=` to the kernel when `boot.resumeDevice` is set, and the fallback
+/// over `swapDevices` exists in the script initrd only. It lives in
+/// `fstab.nix` because it names the same swap device the rest of the file
+/// describes.
+///
+/// # Parameters
+/// * `fstab` - the open configuration file to edit.
+/// * `device` - absolute path of the swap device to resume from
+///   (`/dev/mapper/<name>` for swap inside a LUKS container, a
+///   `/dev/disk/by-uuid/<uuid>` path otherwise).
+///
+/// # Pre-conditions
+/// The device is a swap device of the target, large enough to hold a
+/// hibernation image, and reachable from the initrd.
+///
+/// # Post-conditions
+/// `boot.resumeDevice` is `device`.
+///
+/// # Returns
+/// `Ok(())` once the edit is applied to `fstab`'s in-memory buffer.
+///
+/// # Errors
+/// [`mx::ErrorKind::InvalidArgument`] when `device` is not an absolute path —
+/// NixOS asserts on that — plus any error `mxOption::set` propagates.
+pub fn set_resume_device_no_transaction(fstab: &mut NixFile, device: &str) -> mx::Result<()> {
+    if !device.starts_with('/') {
+        return Err(mx::ErrorKind::InvalidArgument(format!(
+            "boot.resumeDevice must be an absolute path, got {}",
+            device
+        )));
+    }
+
+    mxOption::new("boot.resumeDevice").set(fstab, format!("\"{}\"", device).as_str())?;
+    Ok(())
+}
+
 /// Declares one mount point and rebuilds the system.
 ///
 /// # Parameters
@@ -846,7 +934,8 @@ mod tests {
 mod luks_tests {
     use super::{
         MountDevice, add_mount_no_transaction, default_luks_name, mapper_name,
-        remove_mount_no_transaction, set_luks_tpm2_no_transaction,
+        remove_mount_no_transaction, set_luks_container_no_transaction,
+        set_luks_tpm2_no_transaction, set_resume_device_no_transaction,
     };
     use crate::core::transaction::Transaction;
     use crate::core::transaction::transaction::{BuildCommand, TransactionPermission};
@@ -1183,5 +1272,71 @@ mod luks_tests {
 
         assert!(!content.contains("fileSystems.\"/boot\""));
         assert!(content.contains("boot.initrd.luks.devices.\"modulixroot\".device"));
+    }
+
+    #[test]
+    fn set_luks_container_declares_a_generator_less_entry() {
+        let content = with_fstab(GENERATED, |file| {
+            set_luks_container_no_transaction(file, "modulixswap", "/dev/disk/by-uuid/beef")
+                .expect("set_luks_container_no_transaction failed");
+        });
+
+        assert!(content.contains("\"modulixswap\""));
+        assert!(content.contains("/dev/disk/by-uuid/beef"));
+        // The root entry the generator wrote is untouched: declaring its
+        // `.device` twice would break evaluation.
+        assert_eq!(
+            content
+                .matches("boot.initrd.luks.devices.\"modulixroot\".device")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn set_luks_container_is_idempotent() {
+        let content = with_fstab(GENERATED, |file| {
+            for _ in 0..2 {
+                set_luks_container_no_transaction(file, "modulixswap", "/dev/disk/by-uuid/beef")
+                    .expect("set_luks_container_no_transaction failed");
+            }
+        });
+
+        assert_eq!(content.matches("/dev/disk/by-uuid/beef").count(), 1);
+    }
+
+    #[test]
+    fn set_luks_container_refuses_a_device_that_is_not_by_uuid() {
+        let content = with_fstab(GENERATED, |file| {
+            let err = set_luks_container_no_transaction(file, "modulixswap", "/dev/vda3")
+                .expect_err("a non-by-uuid container must be refused");
+            assert!(matches!(err, crate::mx::ErrorKind::InvalidUuid));
+        });
+
+        assert!(!content.contains("modulixswap"));
+    }
+
+    #[test]
+    fn set_resume_device_writes_the_option() {
+        let content = with_fstab(GENERATED, |file| {
+            set_resume_device_no_transaction(file, "/dev/mapper/modulixswap")
+                .expect("set_resume_device_no_transaction failed");
+        });
+
+        assert!(content.contains("resumeDevice = \"/dev/mapper/modulixswap\";"));
+        // The generator left a flat `boot.initrd…` line in the file; Nix
+        // merges it with the attribute set this writes.
+        assert!(rnix::Root::parse(&content).errors().is_empty());
+    }
+
+    #[test]
+    fn set_resume_device_refuses_a_relative_path() {
+        let content = with_fstab(GENERATED, |file| {
+            let err = set_resume_device_no_transaction(file, "dev/mapper/modulixswap")
+                .expect_err("a relative resume device must be refused");
+            assert!(matches!(err, crate::mx::ErrorKind::InvalidArgument(_)));
+        });
+
+        assert!(!content.contains("boot.resumeDevice"));
     }
 }

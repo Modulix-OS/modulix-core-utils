@@ -400,7 +400,9 @@ impl Desktop {
 ///   `locale::set_locale_no_transaction`.
 /// * `packages` - nixpkgs attribute names seeded into `package.nix`.
 /// * `modules` - Modulix module names seeded into `module.nix`.
-/// * `luks` - the encrypted root, when there is one.
+/// * `luks` - the LUKS containers of the target, root first.
+/// * `resume_device` - swap device hibernation resumes from, when the target
+///   is set up for hibernation.
 /// * `config_dir` - overrides where the config repo is written (see
 ///   `resolve_config_path`).
 /// * `debug` - debug/test mode: seeds the repo with `nixos-rebuild build-vm`
@@ -428,10 +430,17 @@ pub struct InitParams {
     /// unknown name only fails at build time. Empty creates no file and adds
     /// no import.
     pub modules: Vec<String>,
-    /// Encrypted root, when the target has one. Only `crypttabExtraOpts` is
-    /// written: `nixos-generate-config` already declares the entry's
-    /// `.device` (see `LuksInit`).
-    pub luks: Option<LuksInit>,
+    /// LUKS containers of the target, empty when it is not encrypted. The
+    /// root container only needs `crypttabExtraOpts`, since
+    /// `nixos-generate-config` already declares its `.device`; a swap-only
+    /// container needs both, because the generator never reports it (see
+    /// `LuksInit`).
+    pub luks: Vec<LuksInit>,
+    /// Swap device `boot.resumeDevice` is set to, when the target is set up
+    /// for hibernation. `None` writes nothing, which leaves hibernation unable
+    /// to find its image: with a systemd initrd NixOS only passes `resume=`
+    /// when this option is set.
+    pub resume_device: Option<String>,
     /// Overrides where the config repo is written (see `resolve_config_path`).
     pub config_dir: Option<String>,
     /// Debug/test mode: seeds the repo with `nixos-rebuild build-vm` instead of
@@ -440,19 +449,26 @@ pub struct InitParams {
     pub debug: bool,
 }
 
-/// Encrypted root of an install target, for the one LUKS fact
+/// One LUKS container of an install target, for the LUKS facts
 /// `nixos-generate-config` cannot report.
 ///
 /// # Fields
-/// * `name` - mapper name the root is currently opened as. The generator
+/// * `name` - mapper name the container is currently opened as. The generator
 ///   reads it straight out of `/sys/class/block/<dm>/dm/name` and keys its own
 ///   `boot.initrd.luks.devices` entry on it, so this must be the same name or
-///   the extra options land on a second, unused entry.
+///   the options land on a second, unused entry.
+/// * `container` - the raw container device as a `/dev/disk/by-uuid/<uuid>`
+///   path, for a container the generator left out of the configuration, i.e.
+///   one holding swap alone: it only emits `boot.initrd.luks.devices` entries
+///   for the mount points it walks. `None` for the root container, whose
+///   `.device` the generator already declared — a second definition of that
+///   `types.str` option makes the NixOS module system fail even at equal
+///   values.
 /// * `tpm2` - a TPM2 token is enrolled on the container, so
 ///   `crypttabExtraOpts = [ "tpm2-device=auto" ]` is added to that entry.
-///   `false` writes nothing at all.
 pub struct LuksInit {
     pub name: String,
+    pub container: Option<String>,
     pub tpm2: bool,
 }
 
@@ -684,6 +700,54 @@ fn validate_config_path(path_config: &str) -> mx::Result<()> {
     } else {
         Err(mx::ErrorKind::InvalidFile)
     }
+}
+
+/// Adds to a generated `fstab.nix` the LUKS and hibernation facts
+/// `nixos-generate-config` leaves out.
+///
+/// Called once per [`init`], after the file has been replaced wholesale by
+/// `filesystem::fstab_module`'s output, so the entries the generator did
+/// declare are already in the buffer.
+///
+/// # Parameters
+/// * `fstab` - the open `fstab.nix` of the transaction.
+/// * `params` - init parameters; only `luks` and `resume_device` are read.
+///
+/// # Pre-conditions
+/// Every [`LuksInit::container`] that is `Some` names a container the
+/// generator did *not* declare, and every `None` one it did — the generator
+/// only walks mount points, so in practice the root container is `None` and a
+/// swap-only container is `Some`.
+///
+/// # Post-conditions
+/// Each container has its `.device` declared when it carried one, and
+/// `crypttabExtraOpts = [ "tpm2-device=auto" ]` when it is TPM2-enrolled;
+/// `boot.resumeDevice` is set when `resume_device` is `Some`. Nothing is
+/// written for an empty `luks` list and a `None` `resume_device`.
+///
+/// # Returns
+/// `Ok(())` once every edit is applied to `fstab`'s in-memory buffer; the
+/// caller commits or rolls back.
+///
+/// # Errors
+/// Any error from `filesystem::set_luks_container_no_transaction`,
+/// `filesystem::set_luks_tpm2_no_transaction` or
+/// `filesystem::set_resume_device_no_transaction`.
+fn write_fstab_extras(fstab: &mut NixFile, params: &InitParams) -> mx::Result<()> {
+    for luks in &params.luks {
+        if let Some(container) = &luks.container {
+            filesystem::set_luks_container_no_transaction(fstab, &luks.name, container)?;
+        }
+        if luks.tpm2 {
+            filesystem::set_luks_tpm2_no_transaction(fstab, &luks.name)?;
+        }
+    }
+
+    if let Some(device) = &params.resume_device {
+        filesystem::set_resume_device_no_transaction(fstab, device)?;
+    }
+
+    Ok(())
 }
 
 /// The installer's engine: creates the NixOS config repo for a brand-new
@@ -972,13 +1036,12 @@ pub fn init(params: &InitParams) -> mx::Result<()> {
     }
 
     // After the content loop above, which replaces `fstab.nix` wholesale with
-    // the generator's output — the entry this adds an option to is in there.
-    if let Some(luks) = &params.luks
-        && luks.tpm2
-    {
+    // the generator's output — the entries these options attach to are in
+    // there.
+    if !params.luks.is_empty() || params.resume_device.is_some() {
         match tx.get_file_mut("fstab.nix") {
             Ok(file) => {
-                if let Err(e) = filesystem::set_luks_tpm2_no_transaction(file, &luks.name) {
+                if let Err(e) = write_fstab_extras(file, params) {
                     tx.rollback()?;
                     return Err(e);
                 }
@@ -1017,7 +1080,8 @@ mod tests {
             console_keymap: "fr".to_string(),
             packages: Vec::new(),
             modules: Vec::new(),
-            luks: None,
+            luks: Vec::new(),
+            resume_device: None,
             config_dir: None,
             debug: true,
         }

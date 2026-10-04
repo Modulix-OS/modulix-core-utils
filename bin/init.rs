@@ -40,6 +40,18 @@
 //!   `crypttabExtraOpts = [ "tpm2-device=auto" ]` is added to its entry. Requires
 //!   `--luks-name` (prints usage, exits with status `1` without it), since the option has to
 //!   land on the generator's existing entry rather than on a second, unused one.
+//! - `--luks-swap-name <NAME>`: mapper name of a second container holding swap alone
+//!   (default: none). Unlike the root one this container needs its `.device` declared too,
+//!   since `nixos-generate-config` only emits `boot.initrd.luks.devices` entries for the
+//!   mount points it walks, and a swap device is not one.
+//! - `--luks-swap-container <PATH>`: that container's raw device, as a
+//!   `/dev/disk/by-uuid/<uuid>` path. Required by `--luks-swap-name` and requiring it in
+//!   turn (prints usage, exits with status `1` on either alone).
+//! - `--luks-swap-tpm2`: same as `--luks-tpm2` for the swap container. Requires
+//!   `--luks-swap-name`.
+//! - `--resume-device <PATH>`: absolute path of the swap device hibernation resumes from,
+//!   written as `boot.resumeDevice` (default: none, hibernation cannot find its image). Use
+//!   `/dev/mapper/<NAME>` when the swap lives in a LUKS container.
 //! - `--config-dir <PATH>`: writes the config repo here instead of the default location
 //!   (`<root>/etc/modulix-os/` in release builds); unlike every other flag, omitting its value
 //!   is a hard error (prints usage, exits with status `1`) rather than falling back to a
@@ -101,6 +113,10 @@ fn print_usage(program: &str) {
     --module <NAME>\tModulix module name seeded into module.nix; repeatable (default: none)
     --luks-name <NAME>\tMapper name of the encrypted root (default: none, unencrypted)
     --luks-tpm2\t\tAdd crypttabExtraOpts = [ \"tpm2-device=auto\" ]; requires --luks-name
+    --luks-swap-name <NAME>\tMapper name of a swap-only LUKS container (default: none)
+    --luks-swap-container <PATH>\tThat container's /dev/disk/by-uuid/<uuid> device
+    --luks-swap-tpm2\tAs --luks-tpm2, for the swap container; requires --luks-swap-name
+    --resume-device <PATH>\tSwap device to resume hibernation from (boot.resumeDevice)
     --config-dir <PATH>\tWrite the config repo here instead of the default location
     --debug\t\tSeed with `nixos-rebuild build-vm` instead of installing/switching"
     );
@@ -138,7 +154,8 @@ fn take_value(args: &[String], i: &mut usize, flag: &str) -> Result<String, Stri
 /// # Recognized flags
 /// `--root`, `--hostname`, `--username`, `--fullname`, `--desktop`, `--locale`, `--timezone`,
 /// `--kb-layout`, `--kb-variant`, `--console-keymap`, `--package`, `--module`, `--luks-name`,
-/// `--luks-tpm2`, `--config-dir`, `--debug`, `--help`/`-h` (see the crate-level docs for each
+/// `--luks-tpm2`, `--luks-swap-name`, `--luks-swap-container`, `--luks-swap-tpm2`,
+/// `--resume-device`, `--config-dir`, `--debug`, `--help`/`-h` (see the crate-level docs for each
 /// flag's effect and default). `--desktop` is additionally validated via `Desktop::parse`.
 /// `--package` and `--module` are repeatable and accumulate in argument order.
 ///
@@ -149,7 +166,9 @@ fn take_value(args: &[String], i: &mut usize, flag: &str) -> Result<String, Stri
 /// Never panics. Instead, `parse_args` terminates the process directly (via
 /// `std::process::exit`) in five cases: a value-taking flag given without a following value
 /// (after printing usage, status `1`), an unrecognized `--desktop` value (status `1`),
-/// `--luks-tpm2` without `--luks-name` (after printing usage, status `1`), an unknown option
+/// `--luks-tpm2` without `--luks-name`, `--luks-swap-tpm2` without `--luks-swap-name`, or
+/// `--luks-swap-name`/`--luks-swap-container` without the other (after printing usage,
+/// status `1`), an unknown option
 /// (after printing usage, status `1`), or `--help`/`-h` (after printing usage, status `0`).
 fn parse_args() -> InitParams {
     let args: Vec<String> = env::args().collect();
@@ -167,6 +186,10 @@ fn parse_args() -> InitParams {
     let mut modules: Vec<String> = Vec::new();
     let mut luks_name: Option<String> = None;
     let mut luks_tpm2 = false;
+    let mut luks_swap_name: Option<String> = None;
+    let mut luks_swap_container: Option<String> = None;
+    let mut luks_swap_tpm2 = false;
+    let mut resume_device: Option<String> = None;
     let mut config_dir: Option<String> = None;
     let mut debug = false;
 
@@ -199,6 +222,12 @@ fn parse_args() -> InitParams {
             "--luks-tpm2" => {
                 luks_tpm2 = true;
             }
+            "--luks-swap-name" => luks_swap_name = Some(value!()),
+            "--luks-swap-container" => luks_swap_container = Some(value!()),
+            "--luks-swap-tpm2" => {
+                luks_swap_tpm2 = true;
+            }
+            "--resume-device" => resume_device = Some(value!()),
             "--config-dir" => config_dir = Some(value!()),
             "--debug" => {
                 debug = true;
@@ -240,15 +269,39 @@ fn parse_args() -> InitParams {
         }
     };
 
-    let luks = match (luks_name, luks_tpm2) {
-        (Some(name), tpm2) => Some(LuksInit { name, tpm2 }),
-        (None, false) => None,
+    let mut luks: Vec<LuksInit> = Vec::new();
+    match (luks_name, luks_tpm2) {
+        (Some(name), tpm2) => luks.push(LuksInit {
+            name,
+            container: None,
+            tpm2,
+        }),
+        (None, false) => {}
         (None, true) => {
             eprintln!("Error: --luks-tpm2 requires --luks-name <NAME>");
             print_usage(&args[0]);
             std::process::exit(1);
         }
-    };
+    }
+    match (luks_swap_name, luks_swap_container) {
+        (Some(name), Some(container)) => luks.push(LuksInit {
+            name,
+            container: Some(container),
+            tpm2: luks_swap_tpm2,
+        }),
+        (None, None) => {
+            if luks_swap_tpm2 {
+                eprintln!("Error: --luks-swap-tpm2 requires --luks-swap-name <NAME>");
+                print_usage(&args[0]);
+                std::process::exit(1);
+            }
+        }
+        _ => {
+            eprintln!("Error: --luks-swap-name and --luks-swap-container require each other");
+            print_usage(&args[0]);
+            std::process::exit(1);
+        }
+    }
 
     InitParams {
         root: if root.is_empty() {
@@ -288,6 +341,7 @@ fn parse_args() -> InitParams {
         packages,
         modules,
         luks,
+        resume_device,
         config_dir,
         debug,
     }
