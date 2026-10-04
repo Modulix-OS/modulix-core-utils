@@ -10,22 +10,26 @@
 //! expanded to themselves plus every child via
 //! [`crate::module_info::resolve_with_children`] before being applied.
 
-use crate::core::app_info_trait::AppInfoMinimal;
-use crate::core::transaction::transaction::UpdateInput;
-use crate::module_info::ModuleInfo;
 use crate::{
-    core::{
-        list::List as mxList,
-        option::Option as mxOption,
-        transaction::{self, file_lock::NixFile, transaction::BuildCommand},
-    },
+    core::{list::List as mxList, option::Option as mxOption, transaction::file_lock::NixFile},
     mx,
 };
+
+#[cfg(feature = "install-module")]
+use crate::core::app_info_trait::AppInfoMinimal;
+#[cfg(feature = "install-module")]
+use crate::core::transaction::{
+    self,
+    transaction::{BuildCommand, UpdateInput},
+};
+#[cfg(feature = "install-module")]
+use crate::module_info::ModuleInfo;
+#[cfg(feature = "install-module")]
 use std::path;
 
 /// Path, relative to `config_dir`, of the Nix file every function in this
 /// module edits or reads.
-const FILE_MODULE_PATH: &str = "module.nix";
+pub const FILE_MODULE_PATH: &str = "module.nix";
 
 /// Dotted option path toggling a module on or off.
 ///
@@ -201,6 +205,7 @@ pub fn remove_plugin_no_transaction(
 /// cancelled; otherwise whatever `edit` or
 /// [`transaction::make_transaction`] return (e.g. a `BuildError` from a
 /// failed `nixos-rebuild`).
+#[cfg(feature = "install-module")]
 async fn edit_modules(
     config_dir: &str,
     description: String,
@@ -250,6 +255,7 @@ async fn edit_modules(
 /// Whatever [`crate::module_info::resolve_with_children`] returns (e.g. an
 /// `HttpError` fetching the remote index) or whatever `edit_modules`
 /// returns.
+#[cfg(feature = "install-module")]
 pub async fn install(config_dir: &str, module_name: &str) -> mx::Result<()> {
     let targets = crate::module_info::resolve_with_children(module_name).await?;
     edit_modules(
@@ -283,6 +289,7 @@ pub async fn install(config_dir: &str, module_name: &str) -> mx::Result<()> {
 /// # Errors
 /// Whatever [`crate::module_info::resolve_with_children`] or
 /// `edit_modules` return.
+#[cfg(feature = "install-module")]
 pub async fn uninstall(config_dir: &str, module_name: &str) -> mx::Result<()> {
     let targets = crate::module_info::resolve_with_children(module_name).await?;
     edit_modules(
@@ -322,6 +329,7 @@ pub async fn uninstall(config_dir: &str, module_name: &str) -> mx::Result<()> {
 /// [`mx::ErrorKind::ThreadError`] if the blocking task panics or is
 /// cancelled; otherwise whatever [`install_plugin_no_transaction`] or
 /// `transaction::make_transaction` return.
+#[cfg(feature = "install-module")]
 pub async fn install_plugin(
     config_dir: &str,
     module_name: &str,
@@ -376,6 +384,7 @@ pub async fn install_plugin(
 /// [`mx::ErrorKind::ThreadError`] if the blocking task panics or is
 /// cancelled; otherwise whatever [`remove_plugin_no_transaction`] or
 /// `transaction::make_transaction` return.
+#[cfg(feature = "install-module")]
 pub async fn remove_plugin(
     config_dir: &str,
     module_name: &str,
@@ -419,6 +428,7 @@ pub async fn remove_plugin(
 /// Propagates any error from [`mxOption::list_enable_descendants`] or
 /// [`mxOption::get`] other than [`mx::ErrorKind::OptionNotFound`], which is
 /// treated as "not enabled" rather than failing the whole listing.
+#[cfg(feature = "install-module")]
 fn enabled_module_names(file: &NixFile) -> mx::Result<Vec<String>> {
     let mut names = Vec::new();
     for module in mxOption::new("mx").list_enable_descendants(file)? {
@@ -463,6 +473,7 @@ fn enabled_module_names(file: &NixFile) -> mx::Result<Vec<String>> {
 /// # Errors
 /// Whatever `transaction::make_transaction_read_only` or
 /// `enabled_module_names` return.
+#[cfg(feature = "install-module")]
 pub fn list_enabled_module_names(config_dir: &str) -> mx::Result<Vec<String>> {
     if !path::Path::new(&format!("{config_dir}{FILE_MODULE_PATH}")).exists() {
         return Ok(Vec::new());
@@ -499,6 +510,7 @@ pub fn list_enabled_module_names(config_dir: &str) -> mx::Result<Vec<String>> {
 /// Whatever `transaction::make_transaction_read_only` returns, or
 /// [`mx::ErrorKind::OptionIsNotList`] if the option is declared but holds
 /// something other than a list.
+#[cfg(feature = "install-module")]
 pub fn list_installed_plugin_attrs(config_dir: &str, module_name: &str) -> mx::Result<Vec<String>> {
     if !path::Path::new(&format!("{config_dir}{FILE_MODULE_PATH}")).exists() {
         return Ok(Vec::new());
@@ -546,6 +558,7 @@ pub fn list_installed_plugin_attrs(config_dir: &str, module_name: &str) -> mx::R
 /// Whatever `transaction::make_transaction_read_only` returns, or
 /// [`mx::ErrorKind::OptionIsNotList`] if a module's `plugins` option is
 /// declared but holds something other than a list.
+#[cfg(feature = "install-module")]
 pub fn list_installed_plugins(config_dir: &str) -> mx::Result<Vec<(String, String)>> {
     if !path::Path::new(&format!("{config_dir}{FILE_MODULE_PATH}")).exists() {
         return Ok(Vec::new());
@@ -596,6 +609,7 @@ pub fn list_installed_plugins(config_dir: &str) -> mx::Result<Vec<(String, Strin
 /// # Errors
 /// [`mx::ErrorKind::ThreadError`] if the blocking task panics or is
 /// cancelled; otherwise whatever [`list_enabled_module_names`] returns.
+#[cfg(feature = "install-module")]
 pub async fn list_installed_modules(config_dir: &str) -> mx::Result<Vec<ModuleInfo>> {
     let config_dir = config_dir.to_string();
     let names = tokio::task::spawn_blocking(move || list_enabled_module_names(&config_dir))
@@ -610,6 +624,6 @@ pub async fn list_installed_modules(config_dir: &str) -> mx::Result<Vec<ModuleIn
     Ok(modules)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "install-module"))]
 #[path = "install_module_tests.rs"]
 mod tests;

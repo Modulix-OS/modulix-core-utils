@@ -26,7 +26,10 @@ use crate::core::transaction::transaction::LOCK_SKIP_REBUILD_FILE;
 use crate::core::transaction::transaction::TransactionPermission;
 use crate::core::transaction::transaction::{BuildCommand, UpdateInput};
 use crate::error::io_message;
-use crate::{CONFIG_DIRECTORY, filesystem, hardware_config, locale, mx, user};
+use crate::{
+    CONFIG_DIRECTORY, filesystem, hardware_config, install_module, install_package, locale, mx,
+    user,
+};
 use std::path::{Component, Path};
 use std::{fs, process};
 
@@ -395,6 +398,9 @@ impl Desktop {
 ///   `locale::set_keyboard_no_transaction`.
 /// * `console_keymap` - console keymap passed to
 ///   `locale::set_locale_no_transaction`.
+/// * `packages` - nixpkgs attribute names seeded into `package.nix`.
+/// * `modules` - Modulix module names seeded into `module.nix`.
+/// * `luks` - the encrypted root, when there is one.
 /// * `config_dir` - overrides where the config repo is written (see
 ///   `resolve_config_path`).
 /// * `debug` - debug/test mode: seeds the repo with `nixos-rebuild build-vm`
@@ -411,12 +417,43 @@ pub struct InitParams {
     pub kb_layout: String,
     pub kb_variant: String,
     pub console_keymap: String,
+    /// nixpkgs attribute names seeded into `package.nix` through
+    /// `install_package::install_no_transaction`, so they carry the same
+    /// `pkgs.<attr>` spelling a later `install_package::uninstall` matches on.
+    /// Empty creates no file and adds no import.
+    pub packages: Vec<String>,
+    /// Modulix module names, dotted as in mxpkgs' `modules/index.json`
+    /// (e.g. `services.flatpak`), each seeded into `module.nix` as
+    /// `mx.<name>.enable = true`. Not validated against that index — an
+    /// unknown name only fails at build time. Empty creates no file and adds
+    /// no import.
+    pub modules: Vec<String>,
+    /// Encrypted root, when the target has one. Only `crypttabExtraOpts` is
+    /// written: `nixos-generate-config` already declares the entry's
+    /// `.device` (see `LuksInit`).
+    pub luks: Option<LuksInit>,
     /// Overrides where the config repo is written (see `resolve_config_path`).
     pub config_dir: Option<String>,
     /// Debug/test mode: seeds the repo with `nixos-rebuild build-vm` instead of
     /// `nixos-install`/`switch`, and skips the skip-rebuild lock so the build
     /// actually runs.
     pub debug: bool,
+}
+
+/// Encrypted root of an install target, for the one LUKS fact
+/// `nixos-generate-config` cannot report.
+///
+/// # Fields
+/// * `name` - mapper name the root is currently opened as. The generator
+///   reads it straight out of `/sys/class/block/<dm>/dm/name` and keys its own
+///   `boot.initrd.luks.devices` entry on it, so this must be the same name or
+///   the extra options land on a second, unused entry.
+/// * `tpm2` - a TPM2 token is enrolled on the container, so
+///   `crypttabExtraOpts = [ "tpm2-device=auto" ]` is added to that entry.
+///   `false` writes nothing at all.
+pub struct LuksInit {
+    pub name: String,
+    pub tpm2: bool,
 }
 
 /// Resolves the config repo path for an [`init`] call.
@@ -439,17 +476,31 @@ fn config_path(params: &InitParams) -> String {
 /// `Transaction::begin`: `begin` injects newly created files into the `imports`
 /// of `configuration.nix`, but [`init`] then overwrites that file's whole
 /// buffer with this template, which would drop the injection. [`init`] always
-/// creates `locale.nix` and `users.nix`, so listing them is exact.
+/// creates `locale.nix` and `users.nix`, so listing them is exact; it creates
+/// `package.nix` and `module.nix` only for a non-empty `packages`/`modules`,
+/// which is exactly when they are listed here.
 ///
 /// # Parameters
 /// * `p` - init parameters; `hostname` and `desktop` are interpolated into
-///   the template.
+///   the template, and `packages`/`modules` decide the two optional imports.
 ///
 /// # Returns
 /// The full `configuration.nix` source, importing
-/// `hardware-configuration.nix`, `fstab.nix`, `locale.nix` and `users.nix`,
-/// and setting `networking.hostName` and `mx.desktop`.
+/// `hardware-configuration.nix`, `fstab.nix`, `locale.nix`, `users.nix` and —
+/// when their list is non-empty — `package.nix` and `module.nix`, and setting
+/// `networking.hostName` and `mx.desktop`.
 fn configuration_nix(p: &InitParams) -> String {
+    let mut extra = String::new();
+    if !p.packages.is_empty() {
+        extra.push_str("    ./");
+        extra.push_str(install_package::FILE_PACKAGE_PATH);
+        extra.push('\n');
+    }
+    if !p.modules.is_empty() {
+        extra.push_str("    ./");
+        extra.push_str(install_module::FILE_MODULE_PATH);
+        extra.push('\n');
+    }
     format!(
         r#"{{ config, lib, pkgs, ... }}:
 {{
@@ -458,13 +509,14 @@ fn configuration_nix(p: &InitParams) -> String {
     ./fstab.nix
     ./locale.nix
     ./users.nix
-  ];
+{extra}  ];
 
   networking.hostName = "{hostname}";
 
   mx.desktop = "{desktop}";
 }}
 "#,
+        extra = extra,
         hostname = p.hostname,
         desktop = p.desktop.as_str(),
     )
@@ -477,6 +529,11 @@ fn configuration_nix(p: &InitParams) -> String {
 /// `flake.lock` is in the list even though no [`NixFile`] owns it: it is
 /// produced by `nix flake update` during the commit, and would otherwise be
 /// the one writable file left behind.
+///
+/// `package.nix` and `module.nix` are deliberately absent: they are the two
+/// files a user keeps editing after the install, through transactions of
+/// their own, and `NixFile::create_file`/`commit` already seal them. Adding
+/// them here would seal nothing extra.
 const BASE_FILES: &[&str] = &[
     "flake.nix",
     "flake.lock",
@@ -658,7 +715,9 @@ fn validate_config_path(path_config: &str) -> mx::Result<()> {
 ///    which variant is named here).
 /// 5. A single `Transaction` (`TransactionPermission::Writtable`) is opened
 ///    over `flake.nix`, `hardware-configuration.nix`, `fstab.nix`,
-///    `locale::LOCALE_FILE_PATH` and `user::USER_FILE_PATH`
+///    `locale::LOCALE_FILE_PATH`, `user::USER_FILE_PATH` and — only when the
+///    matching list is non-empty — `install_package::FILE_PACKAGE_PATH` and
+///    `install_module::FILE_MODULE_PATH`
 ///    (`configuration.nix` is auto-added by `Transaction::begin`); within it,
 ///    `flake.nix`/`configuration.nix`/`fstab.nix` get their rendered content,
 ///    the hardware file is filled by
@@ -674,11 +733,20 @@ fn validate_config_path(path_config: &str) -> mx::Result<()> {
 ///    not in `configuration.nix` — so it is written whatever `params.desktop`
 ///    is, and stays editable afterwards through `locale::set_keyboard`. The
 ///    user file is filled for the same reason: one seed transaction, not one
-///    per file. Any failure at this stage calls `tx.rollback()` and returns
-///    the original error.
+///    per file. Then, still in the same transaction, `params.packages` go
+///    into `package.nix` via `install_package::install_no_transaction` and
+///    `params.modules` into `module.nix` via
+///    `install_module::install_no_transaction`, and a `params.luks` with
+///    `tpm2` set gets `filesystem::set_luks_tpm2_no_transaction` applied to
+///    `fstab.nix` — after its content write, since that one replaces the whole
+///    buffer. The LUKS entry itself is not written here: the generator already
+///    declared it, and a second definition of the same option would make the
+///    NixOS module system fail. Any failure at this stage calls
+///    `tx.rollback()` and returns the original error.
 /// 6. `tx.commit(UpdateInput::UpdateAll)` commits and refreshes `flake.lock`.
 /// 7. `seal_base_files` re-applies the immutable flag to every file in
-///    `BASE_FILES` that exists.
+///    `BASE_FILES` that exists. `package.nix` and `module.nix` are not in
+///    that list and do not need to be — see `BASE_FILES`.
 ///
 /// # Parameters
 /// * `params` - see [`InitParams`] for the meaning of every field.
@@ -695,7 +763,8 @@ fn validate_config_path(path_config: &str) -> mx::Result<()> {
 /// # Post-conditions
 /// On success: the resolved config directory is a freshly initialized git
 /// repo on branch `main`, containing `flake.nix`, `configuration.nix`,
-/// `hardware-configuration.nix`, `fstab.nix`, the locale and user files, and
+/// `hardware-configuration.nix`, `fstab.nix`, the locale and user files,
+/// `package.nix`/`module.nix` when their list was non-empty, and
 /// `flake.lock`, all committed as `"modulix init"`; every file in
 /// `BASE_FILES` present on disk is immutable; `.cache` exists and is
 /// listed in `.git/info/exclude` together with `result`. Outside debug mode,
@@ -772,13 +841,20 @@ pub fn init(params: &InitParams) -> mx::Result<()> {
     /// factored out so [`Transaction::add_file`] and
     /// [`Transaction::get_file_mut`] stay in sync.
     const HARDWARE_FILE: &str = "hardware-configuration.nix";
-    for f in [
+    let mut files = vec![
         "flake.nix",
         HARDWARE_FILE,
         "fstab.nix",
         locale::LOCALE_FILE_PATH,
         user::USER_FILE_PATH,
-    ] {
+    ];
+    if !params.packages.is_empty() {
+        files.push(install_package::FILE_PACKAGE_PATH);
+    }
+    if !params.modules.is_empty() {
+        files.push(install_module::FILE_MODULE_PATH);
+    }
+    for f in files {
         tx.add_file(f)?;
     }
 
@@ -862,9 +938,127 @@ pub fn init(params: &InitParams) -> mx::Result<()> {
         }
     }
 
+    if !params.packages.is_empty() {
+        let packages: Vec<&str> = params.packages.iter().map(String::as_str).collect();
+        match tx.get_file_mut(install_package::FILE_PACKAGE_PATH) {
+            Ok(file) => {
+                if let Err(e) = install_package::install_no_transaction(file, &packages) {
+                    tx.rollback()?;
+                    return Err(e);
+                }
+            }
+            Err(e) => {
+                tx.rollback()?;
+                return Err(e);
+            }
+        }
+    }
+
+    if !params.modules.is_empty() {
+        match tx.get_file_mut(install_module::FILE_MODULE_PATH) {
+            Ok(file) => {
+                for module in &params.modules {
+                    if let Err(e) = install_module::install_no_transaction(file, module) {
+                        tx.rollback()?;
+                        return Err(e);
+                    }
+                }
+            }
+            Err(e) => {
+                tx.rollback()?;
+                return Err(e);
+            }
+        }
+    }
+
+    // After the content loop above, which replaces `fstab.nix` wholesale with
+    // the generator's output — the entry this adds an option to is in there.
+    if let Some(luks) = &params.luks
+        && luks.tpm2
+    {
+        match tx.get_file_mut("fstab.nix") {
+            Ok(file) => {
+                if let Err(e) = filesystem::set_luks_tpm2_no_transaction(file, &luks.name) {
+                    tx.rollback()?;
+                    return Err(e);
+                }
+            }
+            Err(e) => {
+                tx.rollback()?;
+                return Err(e);
+            }
+        }
+    }
+
     tx.commit(UpdateInput::UpdateAll)?;
 
     seal_base_files(&path_config)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Desktop, InitParams, configuration_nix};
+
+    /// `InitParams` with every optional list empty, as a starting point the
+    /// tests below only change one field of.
+    fn params() -> InitParams {
+        InitParams {
+            root: "/mnt".to_string(),
+            hostname: "modulixos".to_string(),
+            username: "user".to_string(),
+            full_name: "User".to_string(),
+            desktop: Desktop::Gnome,
+            locale: "fr_FR.UTF-8".to_string(),
+            timezone: "Europe/Paris".to_string(),
+            kb_layout: "fr".to_string(),
+            kb_variant: String::new(),
+            console_keymap: "fr".to_string(),
+            packages: Vec::new(),
+            modules: Vec::new(),
+            luks: None,
+            config_dir: None,
+            debug: true,
+        }
+    }
+
+    #[test]
+    fn empty_lists_import_neither_optional_file() {
+        let rendered = configuration_nix(&params());
+        assert!(!rendered.contains("./package.nix"));
+        assert!(!rendered.contains("./module.nix"));
+        assert!(rendered.contains("./users.nix"));
+    }
+
+    #[test]
+    fn a_package_list_adds_its_import() {
+        let mut p = params();
+        p.packages = vec!["firefox".to_string()];
+        let rendered = configuration_nix(&p);
+        assert!(rendered.contains("./package.nix"));
+        assert!(!rendered.contains("./module.nix"));
+    }
+
+    #[test]
+    fn a_module_list_adds_its_import() {
+        let mut p = params();
+        p.modules = vec!["services.flatpak".to_string()];
+        let rendered = configuration_nix(&p);
+        assert!(rendered.contains("./module.nix"));
+        assert!(!rendered.contains("./package.nix"));
+    }
+
+    #[test]
+    fn optional_imports_land_inside_the_imports_list() {
+        let mut p = params();
+        p.packages = vec!["firefox".to_string()];
+        p.modules = vec!["services.flatpak".to_string()];
+        let rendered = configuration_nix(&p);
+
+        let close = rendered.find("];").expect("the imports list must close");
+        assert!(rendered.find("./package.nix").unwrap() < close);
+        assert!(rendered.find("./module.nix").unwrap() < close);
+        assert!(rendered.contains("networking.hostName = \"modulixos\";"));
+    }
 }

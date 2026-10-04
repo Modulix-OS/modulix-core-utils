@@ -65,13 +65,13 @@ pub mod locale;
 #[cfg(feature = "module-info")]
 pub mod module_info;
 
-#[cfg(feature = "install-module")]
+#[cfg(any(feature = "install-module", feature = "install-module-file"))]
 pub mod install_module;
 
 #[cfg(feature = "modulix-module")]
 pub mod modulix_modules;
 
-#[cfg(feature = "install-package")]
+#[cfg(any(feature = "install-package", feature = "install-package-file"))]
 pub mod install_package;
 
 #[cfg(feature = "user")]

@@ -5,7 +5,7 @@
 //! `pkgs.firefox`, or `pkgs.firefox.dev` to request a specific output), never
 //! as a Nix string: `crate::core::list::List` treats every list element as
 //! opaque Nix text, so install and uninstall only have to agree on that exact
-//! spelling. Neither `install_no_transaction` nor [`install`] checks that the
+//! spelling. Neither `install_no_transaction` nor `install` checks that the
 //! attribute exists in nixpkgs; an unknown or misspelled attribute is only
 //! caught once the transaction's `nixos-rebuild switch` evaluates the
 //! configuration, as a nix evaluation failure wrapped in
@@ -21,32 +21,36 @@
 //! removed package silently disappears from the listing instead of failing
 //! it.
 
+use crate::{
+    core::{list::List as mxList, transaction::file_lock::NixFile},
+    mx,
+};
+
+#[cfg(feature = "install-package")]
 use std::collections::HashMap;
+#[cfg(feature = "install-package")]
 use std::path;
 
-#[cfg(feature = "app-info-gui")]
+#[cfg(all(feature = "install-package", feature = "app-info-gui"))]
 use tokio::sync::OnceCell;
 
-use crate::core::transaction::transaction::UpdateInput;
-use crate::{
-    core::{
-        list::List as mxList,
-        transaction::{self, file_lock::NixFile, transaction::BuildCommand},
-    },
-    mx,
-    package_info::NixPackage,
+#[cfg(feature = "install-package")]
+use crate::core::transaction::{
+    self,
+    transaction::{BuildCommand, UpdateInput},
 };
+#[cfg(feature = "install-package")]
+use crate::package_info::NixPackage;
 
 /// Relative path, under a configuration directory, of the Nix file this
 /// module reads and writes.
 ///
-/// Passed as `file_path` to [`transaction::make_transaction`] /
-/// [`transaction::make_transaction_read_only`] by every public entry point
-/// below.
-const FILE_PACKAGE_PATH: &str = "package.nix";
+/// Passed as the transaction file path by every public entry point below, and
+/// named by `init::init` so the installer seeds the very same file.
+pub const FILE_PACKAGE_PATH: &str = "package.nix";
 
 /// Appends each of `packages` to `environment.systemPackages`, as the
-/// composable half of [`install`].
+/// composable half of `install` (feature `install-package`).
 ///
 /// # Parameters
 /// * `file` - the open `package.nix` to edit; must belong to a writable
@@ -82,7 +86,7 @@ pub fn install_no_transaction(file: &mut NixFile, packages: &[&str]) -> mx::Resu
 }
 
 /// Removes each of `packages` from `environment.systemPackages`, as the
-/// composable half of [`uninstall`].
+/// composable half of `uninstall` (feature `install-package`).
 ///
 /// # Parameters
 /// * `file` - the open `package.nix` to edit; must belong to a writable
@@ -122,6 +126,7 @@ pub fn uninstall_no_transaction(file: &mut NixFile, packages: &[&str]) -> mx::Re
 /// package entry is realistically qualified with - so an entry using a rarer
 /// output name is parsed as an unqualified attribute whose last path segment
 /// happens to be that name.
+#[cfg(feature = "install-package")]
 const NIX_OUTPUTS: &[&str] = &["out", "dev", "lib", "doc", "man", "info", "static"];
 
 /// Splits one `environment.systemPackages` entry into an attribute name and
@@ -138,6 +143,7 @@ const NIX_OUTPUTS: &[&str] = &["out", "dev", "lib", "doc", "man", "info", "stati
 /// member of [`NIX_OUTPUTS`] (and `name` is what precedes it), otherwise
 /// `output` defaults to `"out"` and `name` is `raw` with only the `pkgs.`
 /// prefix stripped.
+#[cfg(feature = "install-package")]
 fn parse_pkg_entry(raw: &str) -> (String, String) {
     let stripped = raw.strip_prefix("pkgs.").unwrap_or(raw);
     match stripped.rsplit_once('.') {
@@ -163,6 +169,7 @@ fn parse_pkg_entry(raw: &str) -> (String, String) {
 /// [`mx::ErrorKind::OptionIsNotList`] if the option is declared as something
 /// other than a list, plus any error [`mxList::get_element_in_list`]
 /// propagates from parsing the file.
+#[cfg(feature = "install-package")]
 fn collect_entries(file: &NixFile) -> mx::Result<Vec<(String, String)>> {
     let pkgs = mxList::new("environment.systemPackages", true);
     let entries: Vec<(String, String)> = match pkgs.get_element_in_list(file) {
@@ -193,6 +200,7 @@ fn collect_entries(file: &NixFile) -> mx::Result<Vec<(String, String)>> {
 /// else the one `mxpkgs` re-exports, else a `throw` that fails the whole
 /// `nix eval` with an explicit message instead of the interpreter's own
 /// `attribute 'nixpkgs' missing`.
+#[cfg(feature = "install-package")]
 const NIXPKGS_LOOKUP: &str = "flake.inputs.nixpkgs \
      or flake.inputs.mxpkgs.inputs.nixpkgs \
      or (throw \"no nixpkgs input in the Modulix configuration flake\")";
@@ -215,6 +223,7 @@ const NIXPKGS_LOOKUP: &str = "flake.inputs.nixpkgs \
 /// set it); an attribute from `entries` that nixpkgs does not define is
 /// dropped from the result rather than failing the evaluation - see
 /// [`NIXPKGS_LOOKUP`] for how `nixpkgs` itself is located.
+#[cfg(feature = "install-package")]
 fn build_nix_expr(config_dir: &str, entries: &[(String, String)]) -> String {
     let nix_list = entries
         .iter()
@@ -255,6 +264,7 @@ fn build_nix_expr(config_dir: &str, entries: &[(String, String)]) -> String {
 /// [`mx::ErrorKind::NixCommandError`] if the process exits non-zero (payload
 /// is its stderr) or if its stdout does not parse as JSON (payload is the
 /// parse error's message).
+#[cfg(feature = "install-package")]
 fn eval_nix_expr(expr: &str) -> mx::Result<HashMap<String, serde_json::Value>> {
     let cmd_output = std::process::Command::new("nix")
         .args(["eval", "--impure", "--json", "--expr", expr])
@@ -289,6 +299,7 @@ fn eval_nix_expr(expr: &str) -> mx::Result<HashMap<String, serde_json::Value>> {
 /// has no entry for `name` or is missing that particular field - which
 /// happens for an attribute nixpkgs no longer defines, since
 /// [`build_nix_expr`] filters those out rather than erroring.
+#[cfg(feature = "install-package")]
 fn build_package(
     name: String,
     explicit_output: String,
@@ -332,6 +343,7 @@ fn build_package(
 /// Whatever `collect_entries` or `eval_nix_expr` returns, including
 /// [`mx::ErrorKind::OptionIsNotList`], [`mx::ErrorKind::IOError`] and
 /// [`mx::ErrorKind::NixCommandError`].
+#[cfg(feature = "install-package")]
 pub fn list_installed_package_no_transaction(
     config_dir: &str,
     file: &NixFile,
@@ -376,6 +388,7 @@ pub fn list_installed_package_no_transaction(
 /// [`mx::ErrorKind::BuildError`] when `nixos-rebuild switch` fails (e.g. an
 /// unknown attribute) and [`mx::ErrorKind::GitNotCommitted`] when the
 /// configuration repository is not clean enough to proceed.
+#[cfg(feature = "install-package")]
 pub fn install(config_dir: &str, packages: &[&str]) -> mx::Result<()> {
     transaction::make_transaction(
         &format!("Install packages {}", packages.join(", ")),
@@ -413,6 +426,7 @@ pub fn install(config_dir: &str, packages: &[&str]) -> mx::Result<()> {
 /// Any [`mx::ErrorKind`] `transaction::make_transaction` or
 /// [`uninstall_no_transaction`] can produce, notably
 /// [`mx::ErrorKind::BuildError`] when `nixos-rebuild switch` fails.
+#[cfg(feature = "install-package")]
 pub fn uninstall(config_dir: &str, packages: &[&str]) -> mx::Result<()> {
     transaction::make_transaction(
         &format!("Uninstall {}", packages.join(", ")),
@@ -451,6 +465,7 @@ pub fn uninstall(config_dir: &str, packages: &[&str]) -> mx::Result<()> {
 /// [`list_installed_package_no_transaction`] can produce, notably
 /// [`mx::ErrorKind::IOError`] / [`mx::ErrorKind::NixCommandError`] from the
 /// metadata `nix eval`.
+#[cfg(feature = "install-package")]
 pub fn list_installed_package(config_dir: &str) -> mx::Result<Vec<NixPackage>> {
     if !path::Path::new(&format!("{config_dir}{FILE_PACKAGE_PATH}")).exists() {
         return Ok(Vec::new());
@@ -499,6 +514,7 @@ pub fn list_installed_package(config_dir: &str) -> mx::Result<Vec<NixPackage>> {
 /// Any [`mx::ErrorKind`] `transaction::make_transaction_read_only` or
 /// `collect_entries` can produce, notably
 /// [`mx::ErrorKind::OptionIsNotList`].
+#[cfg(feature = "install-package")]
 pub fn list_installed_package_names(config_dir: &str) -> mx::Result<Vec<String>> {
     if !path::Path::new(&format!("{config_dir}{FILE_PACKAGE_PATH}")).exists() {
         return Ok(Vec::new());
@@ -518,7 +534,7 @@ pub fn list_installed_package_names(config_dir: &str) -> mx::Result<Vec<String>>
 }
 
 /// Unit tests for this module's pure helpers.
-#[cfg(test)]
+#[cfg(all(test, feature = "install-package"))]
 mod tests {
     use super::*;
 

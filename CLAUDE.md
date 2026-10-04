@@ -121,6 +121,26 @@ All follow the **same two-level pattern** (`firewall.rs`, `modulix_modules.rs` a
 
 Modules: `firewall`, `locale`, `user`, `filesystem`, `flake_input`, `init`, `hardware_config`, `modulix_modules`, `install_package`.
 
+**`install_package` and `install_module` are each split across two features**, because `init` needs only their composable half while their public wrappers drag in half the crate (`install-package` → `package-info` → `memmap2`; `install-module` → `module-info` → `reqwest` + TLS). The light `install-package-file` / `install-module-file` are `["core-nix-file"]` and expose only `FILE_*_PATH` (both `pub`, like `locale::LOCALE_FILE_PATH`) and the `*_no_transaction` fns; everything else — `install`/`uninstall`, the `list_*` readers, the index fetch, and each module's `mod tests` — stays under the heavy feature. `init` depends on the two light ones, so an installer linking `init` pulls no HTTP client. `src/lib.rs` gates both modules on `any(heavy, light)`.
+
+#### `filesystem.rs` and LUKS
+
+`add_entry_no_transaction` takes `luks: Option<&LuksEntry>`, not an `encrypted: bool`: `LuksEntry::name` is the `dm-crypt` mapper name, so the caller decides the `boot.initrd.luks.devices."<name>"` key and the `/dev/mapper/<name>` the mount point lands on. `default_luks_name(device)` renders the `luks-<uuid>` spelling that used to be hardcoded. `LuksEntry::tpm2` adds `crypttabExtraOpts = [ "tpm2-device=auto" ]`.
+
+`set_luks_tpm2_no_transaction(fstab, luks_name)` exists on its own because **`nixos-generate-config` already declares the LUKS entry's `.device`** — it detects the open mapper and keys the entry on the live `/sys/class/block/<dm>/dm/name` — and `fstab_module` copies that block into `fstab.nix` verbatim (`extract_fs_block` preserves it on purpose). A caller that lets the generator describe the encrypted root must therefore add only `crypttabExtraOpts` and must **not** re-declare `.device`: two definitions of the same `types.str` option make the NixOS module system fail, even at equal values. Neither function writes `boot.initrd.systemd.enable`/`.tpm2.enable` — in Modulix those come from `mxpkgs/modulixos/boot.nix`.
+
+Known gap: `def_filesystem_from_unix_fstab_no_transaction` replaces the whole file with generator output, so it destroys `crypttabExtraOpts`. `extract_fs_block` cannot help — it never reads the existing file.
+
+#### `init.rs`
+
+`InitParams` carries three fields beyond the identity/locale seed, all of them optional:
+
+- `packages: Vec<String>` → `package.nix` via `install_package::install_no_transaction`, so the entries carry the `pkgs.<attr>` spelling a later `install_package::uninstall` matches on.
+- `modules: Vec<String>` → `module.nix` via `install_module::install_no_transaction`, one `mx.<name>.enable = true` per dotted name (as spelled in mxpkgs' `modules/index.json`; not validated, an unknown name fails at build time).
+- `luks: Option<LuksInit>` → `filesystem::set_luks_tpm2_no_transaction` on `fstab.nix` when `tpm2` is set, applied **after** the content write that replaces that buffer.
+
+All three live in the same transaction as the rest of the seed, so the repo is one commit and — with the skip-rebuild lock held — no build. An empty list creates no file and adds no import. `configuration_nix` lists `./package.nix`/`./module.nix` by hand for exactly the reason the other four are listed: `Transaction::begin` does inject new files into `imports`, but `init` then overwrites `configuration.nix` wholesale. Neither file is in `BASE_FILES` — they are the two files a user keeps editing afterwards, and `NixFile::create_file`/`commit` seal them anyway.
+
 ### Other subsystems
 
 - **`detect_hardware/`** (`detect-hardware`): parses `lspci`/`lsusb`/`cpuid` with regex → CPU/GPU/machine info → derives Nix driver config. The wrapped binary needs `pciutils`/`usbutils`/`cpuid` on PATH (`flake.nix postInstall` wraps it).

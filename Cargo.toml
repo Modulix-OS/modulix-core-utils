@@ -50,7 +50,9 @@ init = [
     "filesystem",
     "hardware-config",
     "locale",
-    "user"
+    "user",
+    "install-package-file",
+    "install-module-file"
 ]
 locale = ["core-nix-file"]
 modulix-module = ["core-nix-file"]
@@ -63,15 +65,17 @@ module-info = [
     "dep:tokio",
     "reqwest"
 ]
+install-module-file = ["core-nix-file"]
 install-module = [
-    "core-nix-file",
+    "install-module-file",
     "module-info",
     "serde-json",
     "dep:tokio",
     "core-app-info-trait"
 ]
+install-package-file = ["core-nix-file"]
 install-package = [
-    "core-nix-file",
+    "install-package-file",
     "package-info",
     "dep:phf",
     "dep:xz2",

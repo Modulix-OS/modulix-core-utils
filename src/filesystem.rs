@@ -25,6 +25,41 @@ use crate::{
 /// `fileSystems` and `swapDevices`.
 const FILE_SYSTEM_PATH: &str = "fstab.nix";
 
+/// LUKS container backing an encrypted mount point.
+///
+/// # Fields
+/// * `name` - `dm-crypt` mapper name. Becomes the
+///   `boot.initrd.luks.devices."<name>"` key and the `/dev/mapper/<name>` the
+///   mount point is declared on, so it must be the name the container is
+///   actually opened as. [`default_luks_name`] renders the `luks-<uuid>`
+///   spelling that used to be hardcoded here.
+/// * `tpm2` - a TPM2 token is enrolled on the container, so the initrd must
+///   try it (`crypttabExtraOpts = [ "tpm2-device=auto" ]`). Requires
+///   `boot.initrd.systemd.enable`, which this module does not set.
+pub struct LuksEntry<'a> {
+    pub name: &'a str,
+    pub tpm2: bool,
+}
+
+/// Renders the default mapper name for a LUKS container.
+///
+/// # Parameters
+/// * `device` - the `/dev/disk/by-uuid/<uuid>` path of the LUKS container.
+///
+/// # Returns
+/// `luks-<uuid>`, the spelling [`add_entry_no_transaction`] hardcoded before
+/// [`LuksEntry::name`] made it a parameter.
+///
+/// # Errors
+/// [`mx::ErrorKind::InvalidUuid`] when `device` is not a `/dev/disk/by-uuid/`
+/// path.
+pub fn default_luks_name(device: &str) -> mx::Result<String> {
+    let uuid = device
+        .strip_prefix("/dev/disk/by-uuid/")
+        .ok_or(mx::ErrorKind::InvalidUuid)?;
+    Ok(format!("luks-{}", uuid))
+}
+
 /// Declares one mount point in an already-open `fstab.nix`.
 ///
 /// # Parameters
@@ -35,38 +70,41 @@ const FILE_SYSTEM_PATH: &str = "fstab.nix";
 /// * `fs_type` - filesystem type as NixOS names it (`ext4`, `btrfs`, …).
 /// * `option` - mount options, written as the option list; an empty slice
 ///   leaves NixOS' defaults.
-/// * `encrypted` - when true, also declares
-///   `boot.initrd.luks.devices."luks-<uuid>"` for `device` and mounts the
-///   resulting `/dev/mapper/luks-<uuid>` instead of `device` itself.
+/// * `luks` - `Some` for an encrypted volume: also declares
+///   `boot.initrd.luks.devices."<luks.name>"` for `device` and mounts the
+///   resulting `/dev/mapper/<luks.name>` instead of `device` itself, with
+///   `crypttabExtraOpts` when `luks.tpm2`. `None` mounts `device` directly.
 ///
 /// # Post-conditions
 /// Any options previously declared for `mount_point` are reset before the new
 /// ones are added, so the resulting list holds exactly `option`.
 ///
 /// # Errors
-/// [`mx::ErrorKind::InvalidUuid`] when `encrypted` is true and `device` is not
-/// a `/dev/disk/by-uuid/` path, plus any error from editing the file.
+/// [`mx::ErrorKind::InvalidUuid`] when `luks` is `Some` and `device` is not a
+/// `/dev/disk/by-uuid/` path, plus any error from editing the file.
 pub fn add_entry_no_transaction(
     fstab: &mut NixFile,
     mount_point: &str,
     device: &str,
     fs_type: &str,
     option: &[&str],
-    encrypted: bool,
+    luks: Option<&LuksEntry<'_>>,
 ) -> mx::Result<()> {
     let root_option = format!("fileSystems.\"{}\"", mount_point);
-    if encrypted {
-        let uuid = device
-            .strip_prefix("/dev/disk/by-uuid/")
-            .ok_or(mx::ErrorKind::InvalidUuid)?;
-        let luks_name = format!("luks-{}", uuid);
-        let luks_path = format!("/dev/mapper/{}", luks_name);
-        let luks_option = format!("boot.initrd.luks.devices.\"{}\"", luks_name);
-        mxOption::new(&format!("{}.device", luks_option))
+    if let Some(luks) = luks {
+        if !device.starts_with("/dev/disk/by-uuid/") {
+            return Err(mx::ErrorKind::InvalidUuid);
+        }
+        let luks_path = format!("/dev/mapper/{}", luks.name);
+        mxOption::new(&format!("{}.device", luks_option(luks.name)))
             .set(fstab, format!("\"{}\"", device).as_str())?;
 
         mxOption::new(format!("{}.device", root_option).as_str())
             .set(fstab, format!("\"{}\"", luks_path).as_str())?;
+
+        if luks.tpm2 {
+            set_luks_tpm2_no_transaction(fstab, luks.name)?;
+        }
     } else {
         mxOption::new(format!("{}.device", root_option).as_str())
             .set(fstab, format!("\"{}\"", device).as_str())?;
@@ -86,12 +124,70 @@ pub fn add_entry_no_transaction(
     Ok(())
 }
 
+/// Dotted option path of one `boot.initrd.luks.devices` entry.
+///
+/// # Parameters
+/// * `luks_name` - mapper name, used verbatim as the attribute key.
+///
+/// # Returns
+/// `boot.initrd.luks.devices."<luks_name>"`, quotes included, ready to be
+/// suffixed with `.device` or `.crypttabExtraOpts`.
+fn luks_option(luks_name: &str) -> String {
+    format!("boot.initrd.luks.devices.\"{}\"", luks_name)
+}
+
+/// Adds `tpm2-device=auto` to a LUKS entry's `crypttabExtraOpts` in an
+/// already-open `fstab.nix`.
+///
+/// Split out of [`add_entry_no_transaction`] because an `fstab.nix` generated
+/// by `nixos-generate-config` already carries the entry's `.device` — it
+/// detects the open mapper and writes it under the live `dm/name` — but never
+/// emits `crypttabExtraOpts`. An installer that lets the generator describe
+/// the encrypted root therefore only has this one attribute left to add, and
+/// must *not* declare `.device` a second time: two definitions of the same
+/// `types.str` option make the NixOS module system fail, even at equal
+/// values.
+///
+/// # Parameters
+/// * `fstab` - the open configuration file to edit.
+/// * `luks_name` - mapper name of an entry already declared in the file, or
+///   one this call brings into being with `crypttabExtraOpts` as its only
+///   attribute.
+///
+/// # Pre-conditions
+/// The installed system enables `boot.initrd.systemd.enable` and
+/// `boot.initrd.systemd.tpm2.enable`; neither is written here.
+///
+/// # Post-conditions
+/// `boot.initrd.luks.devices."<luks_name>".crypttabExtraOpts` contains
+/// `"tpm2-device=auto"` exactly once — the list is unique-valued, so a second
+/// call is a no-op.
+///
+/// Not durable against [`def_filesystem_from_unix_fstab_no_transaction`],
+/// which replaces the whole file with generator output and so drops this
+/// attribute.
+///
+/// # Returns
+/// `Ok(())` once the edit is applied to `fstab`'s in-memory buffer.
+///
+/// # Errors
+/// [`mx::ErrorKind::OptionIsNotList`] if `crypttabExtraOpts` already holds a
+/// non-list value, plus any error `mxList::add` propagates.
+pub fn set_luks_tpm2_no_transaction(fstab: &mut NixFile, luks_name: &str) -> mx::Result<()> {
+    mxList::new(
+        &format!("{}.crypttabExtraOpts", luks_option(luks_name)),
+        true,
+    )
+    .add(fstab, "\"tpm2-device=auto\"")?;
+    Ok(())
+}
+
 /// Declares one mount point and rebuilds the system.
 ///
 /// # Parameters
 /// * `config_dir` - configuration repository to edit (see
 ///   [`crate::CONFIG_DIRECTORY`]).
-/// * `mount_point`, `device`, `fs_type`, `option`, `encrypted` - as in
+/// * `mount_point`, `device`, `fs_type`, `option`, `luks` - as in
 ///   [`add_entry_no_transaction`].
 ///
 /// # Post-conditions
@@ -108,7 +204,7 @@ pub fn add_entry(
     device: &str,
     fs_type: &str,
     option: &[&str],
-    encrypted: bool,
+    luks: Option<&LuksEntry<'_>>,
 ) -> mx::Result<()> {
     transaction::make_transaction(
         &format!("Add {} entry with device: {} in fstab", mount_point, device),
@@ -116,7 +212,33 @@ pub fn add_entry(
         FILE_SYSTEM_PATH,
         BuildCommand::Switch,
         UpdateInput::Keep,
-        |file| add_entry_no_transaction(file, mount_point, device, fs_type, option, encrypted),
+        |file| add_entry_no_transaction(file, mount_point, device, fs_type, option, luks),
+    )
+}
+
+/// Adds `tpm2-device=auto` to a LUKS entry's `crypttabExtraOpts` and rebuilds
+/// the system.
+///
+/// # Parameters
+/// * `config_dir` - configuration repository to edit.
+/// * `luks_name` - as in [`set_luks_tpm2_no_transaction`].
+///
+/// # Post-conditions
+/// On success the new `crypttabExtraOpts` is part of the active generation; on
+/// error the previous `fstab.nix` is restored by the rollback. A call that
+/// changes nothing commits nothing and rebuilds nothing.
+///
+/// # Errors
+/// Any error from [`set_luks_tpm2_no_transaction`], plus
+/// [`mx::ErrorKind::BuildError`] if the rebuild fails.
+pub fn set_luks_tpm2(config_dir: &str, luks_name: &str) -> mx::Result<()> {
+    transaction::make_transaction(
+        &format!("Enroll TPM2 unlock for {} in fstab", luks_name),
+        config_dir,
+        FILE_SYSTEM_PATH,
+        BuildCommand::Switch,
+        UpdateInput::Keep,
+        |file| set_luks_tpm2_no_transaction(file, luks_name),
     )
 }
 
@@ -516,5 +638,178 @@ mod tests {
     #[test]
     fn yields_nothing_when_outputs_match() {
         assert_eq!(extract_fs_block(NO_FS, NO_FS), "");
+    }
+}
+
+#[cfg(test)]
+mod luks_tests {
+    use super::{
+        LuksEntry, add_entry_no_transaction, default_luks_name, set_luks_tpm2_no_transaction,
+    };
+    use crate::core::transaction::Transaction;
+    use crate::core::transaction::transaction::{BuildCommand, TransactionPermission};
+    use std::fs;
+    use tempfile::TempDir;
+
+    /// `fstab.nix` as `nixos-generate-config` leaves it for an encrypted root:
+    /// the LUKS entry is already there, keyed on the live mapper name, and
+    /// carries no `crypttabExtraOpts`.
+    const GENERATED: &str = "\
+{config, lib, pkgs, ...}:
+{
+  fileSystems.\"/\" =
+    { device = \"/dev/mapper/modulixroot\";
+      fsType = \"ext4\";
+    };
+
+  boot.initrd.luks.devices.\"modulixroot\".device = \"/dev/disk/by-uuid/cafe\";
+
+  swapDevices = [ ];
+}
+";
+
+    /// Runs `edit` against a real `fstab.nix` seeded with `seed`, inside a
+    /// writable transaction that is rolled back, and returns the resulting
+    /// buffer.
+    fn with_fstab(
+        seed: &str,
+        edit: impl FnOnce(&mut crate::core::transaction::file_lock::NixFile),
+    ) -> String {
+        let dir = TempDir::new().expect("failed to create temporary directory");
+        git2::Repository::init(dir.path()).expect("git init failed");
+        fs::write(dir.path().join("fstab.nix"), seed).expect("failed to write fstab.nix");
+        fs::write(
+            dir.path().join("configuration.nix"),
+            "{config, lib, pkgs, ...}:\n{\n  imports = [];\n}\n",
+        )
+        .expect("failed to write configuration.nix");
+
+        let repo_path = format!("{}/", dir.path().to_str().unwrap());
+        let mut tx = Transaction::new(
+            &repo_path,
+            "test",
+            BuildCommand::Boot,
+            TransactionPermission::Writtable,
+        )
+        .expect("Transaction::new failed");
+        tx.add_file("fstab.nix").expect("add_file failed");
+        tx.begin().expect("begin failed");
+
+        let file = tx.get_file_mut("fstab.nix").expect("get_file_mut failed");
+        edit(file);
+        let content = file
+            .get_file_content()
+            .expect("get_file_content failed")
+            .clone();
+        tx.rollback().expect("rollback failed");
+        content
+    }
+
+    #[test]
+    fn default_luks_name_keeps_the_historical_spelling() {
+        assert_eq!(
+            default_luks_name("/dev/disk/by-uuid/cafe").unwrap(),
+            "luks-cafe"
+        );
+        assert!(default_luks_name("/dev/sda2").is_err());
+    }
+
+    #[test]
+    fn add_entry_keys_the_luks_entry_on_the_given_name() {
+        let content = with_fstab("{config, lib, pkgs, ...}:\n{\n}\n", |file| {
+            add_entry_no_transaction(
+                file,
+                "/",
+                "/dev/disk/by-uuid/cafe",
+                "ext4",
+                &[],
+                Some(&LuksEntry {
+                    name: "modulixroot",
+                    tpm2: false,
+                }),
+            )
+            .expect("add_entry_no_transaction failed");
+        });
+
+        // `mxOption::set` renders a brand-new dotted path as nested attribute
+        // sets, so the entry is keyed under `devices` instead of spelled flat.
+        assert!(content.contains("luks = {"));
+        assert!(content.contains("\"modulixroot\" = {"));
+        assert!(content.contains("device = \"/dev/disk/by-uuid/cafe\";"));
+        assert!(!content.contains("luks-cafe"));
+        assert!(content.contains("/dev/mapper/modulixroot"));
+        assert!(!content.contains("crypttabExtraOpts"));
+    }
+
+    #[test]
+    fn add_entry_enrolls_tpm2_only_when_asked() {
+        let content = with_fstab("{config, lib, pkgs, ...}:\n{\n}\n", |file| {
+            add_entry_no_transaction(
+                file,
+                "/",
+                "/dev/disk/by-uuid/cafe",
+                "ext4",
+                &[],
+                Some(&LuksEntry {
+                    name: "modulixroot",
+                    tpm2: true,
+                }),
+            )
+            .expect("add_entry_no_transaction failed");
+        });
+
+        assert!(content.contains("crypttabExtraOpts"));
+        assert!(content.contains("\"tpm2-device=auto\""));
+    }
+
+    #[test]
+    fn add_entry_refuses_a_luks_device_that_is_not_by_uuid() {
+        let content = with_fstab("{config, lib, pkgs, ...}:\n{\n}\n", |file| {
+            let err = add_entry_no_transaction(
+                file,
+                "/",
+                "/dev/sda2",
+                "ext4",
+                &[],
+                Some(&LuksEntry {
+                    name: "modulixroot",
+                    tpm2: false,
+                }),
+            )
+            .expect_err("a non-by-uuid LUKS device must be refused");
+            assert!(matches!(err, crate::mx::ErrorKind::InvalidUuid));
+        });
+
+        assert!(!content.contains("boot.initrd.luks.devices"));
+    }
+
+    #[test]
+    fn tpm2_extends_the_entry_the_generator_already_wrote() {
+        let content = with_fstab(GENERATED, |file| {
+            set_luks_tpm2_no_transaction(file, "modulixroot")
+                .expect("set_luks_tpm2_no_transaction failed");
+        });
+
+        // One single `.device` definition: a second one would make the NixOS
+        // module system fail, which is the whole point of not re-declaring it.
+        assert_eq!(
+            content
+                .matches("boot.initrd.luks.devices.\"modulixroot\".device")
+                .count(),
+            1
+        );
+        assert!(content.contains("\"tpm2-device=auto\""));
+    }
+
+    #[test]
+    fn tpm2_enrollment_is_idempotent() {
+        let content = with_fstab(GENERATED, |file| {
+            for _ in 0..3 {
+                set_luks_tpm2_no_transaction(file, "modulixroot")
+                    .expect("set_luks_tpm2_no_transaction failed");
+            }
+        });
+
+        assert_eq!(content.matches("\"tpm2-device=auto\"").count(), 1);
     }
 }
