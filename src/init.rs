@@ -48,6 +48,8 @@ const FLAKE_FILE: &str = concat!(
   description = "Modulix OS";
   inputs = {
     mxpkgs.url = "github:Modulix-OS/mxpkgs";
+    nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixos-unstable";
+    mxpkgs.inputs.nixpkgs-unstable.follows = "nixpkgs-unstable";
     nixos-hardware.url = "github:NixOS/nixos-hardware";
   };
   outputs = { self, mxpkgs, nixos-hardware, ... }@inputs: {
