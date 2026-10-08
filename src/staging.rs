@@ -310,7 +310,9 @@ pub async fn stage_update(
         }
     };
 
-    stage_candidate(config_dir, candidate, cores).await.map(Some)
+    stage_candidate(config_dir, candidate, cores)
+        .await
+        .map(Some)
 }
 
 /// Stages an already resolved candidate, skipping the probe.
@@ -397,24 +399,88 @@ pub async fn stage_candidate(
     Ok(meta)
 }
 
+/// How a staged update is activated.
+///
+/// Narrower on purpose than the crate's internal `BuildCommand`: only two of
+/// its variants describe activating an already-built system, and the others
+/// range from building nothing into the running system (`build-vm`) to a
+/// reinstall over a fresh root (`nixos-install --root /mnt`). Leaving those out
+/// of this type makes them unrepresentable at the call site, rather than
+/// rejected at run time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Activation {
+    /// Makes the staged system the next boot's default; the running system is
+    /// left alone (`nixos-rebuild boot`).
+    Boot,
+    /// Activates the staged system at once, without a reboot
+    /// (`nixos-rebuild switch`).
+    Switch,
+}
+
+impl Activation {
+    /// Rebuild command this activation runs.
+    ///
+    /// # Returns
+    /// [`BuildCommand::Boot`] for [`Activation::Boot`] and
+    /// [`BuildCommand::Switch`] for [`Activation::Switch`]. In a debug build
+    /// both resolve to `build-vm`, so neither one activates anything.
+    fn build_command(self) -> BuildCommand {
+        match self {
+            Self::Boot => BuildCommand::Boot,
+            Self::Switch => BuildCommand::Switch,
+        }
+    }
+}
+
 /// Applies the staged update by making it the next boot's system.
 ///
-/// The cheap half of an update, meant to run from a shutdown unit: the closure
-/// was realised by [`stage_update`], so `nixos-rebuild boot` only has to write
-/// the bootloader entry and the system profile. **The running system is never
-/// switched** - that is the point: a staged update is applied by rebooting into
-/// it, not by replacing the closure of a live session.
+/// [`apply_staged_with`] with [`Activation::Boot`]: the shutdown unit's entry
+/// point, kept as its own function so the normal path cannot pick an
+/// activation by accident.
 ///
-/// Once the new system is the next boot's default, the candidate lockfile is
-/// committed to `config_dir` with no rebuild attached
-/// ([`make_transaction_commit_only`]), restoring the invariant that the
-/// committed lockfile is the one the system boots.
+/// # Arguments
+/// * `config_dir` - as in [`apply_staged_with`].
+/// * `cores` - as in [`apply_staged_with`].
+///
+/// # Pre-conditions
+/// As [`apply_staged_with`].
+///
+/// # Post-conditions
+/// As [`apply_staged_with`] for [`Activation::Boot`]: **the running system is
+/// never switched** - that is the point, a staged update is applied by
+/// rebooting into it, not by replacing the closure of a live session.
+///
+/// # Returns
+/// As [`apply_staged_with`].
+///
+/// # Errors
+/// As [`apply_staged_with`].
+pub fn apply_staged(config_dir: &str, cores: Option<u32>) -> mx::Result<bool> {
+    apply_staged_with(config_dir, cores, Activation::Boot)
+}
+
+/// Applies the staged update, activating it the way `activation` asks.
+///
+/// The cheap half of an update: the closure was realised by [`stage_update`],
+/// so the rebuild only has to write the bootloader entry and the system
+/// profile. With [`Activation::Boot`] - the shutdown unit's mode, see
+/// [`apply_staged`] - nothing of the live session is touched. With
+/// [`Activation::Switch`] the new system takes effect at once, which is for a
+/// caller who asked for exactly that; an automatic or background update must
+/// not use it.
+///
+/// Once the new system is registered, the candidate lockfile is committed to
+/// `config_dir` with no rebuild attached ([`make_transaction_commit_only`]),
+/// restoring the invariant that the committed lockfile is the one the system
+/// boots.
 ///
 /// # Arguments
 /// * `config_dir` - configuration repository the candidate is promoted into.
 ///   Must be the repository the candidate was staged from.
 /// * `cores` - caps the activation's residual build to this many CPU cores;
 ///   `None` leaves the Nix default.
+/// * `activation` - register the staged system for the next boot, or activate
+///   it immediately.
 ///
 /// # Pre-conditions
 /// `/nix/store` and the bootloader's filesystem must still be mounted, so a
@@ -423,12 +489,13 @@ pub async fn stage_candidate(
 ///
 /// # Post-conditions
 /// On success the staging area is discarded and the configuration repository
-/// carries a commit pinning the applied revisions; the running system is
-/// unchanged until the machine reboots. On a failed activation nothing is
-/// committed and the staging area is **kept**, so the next shutdown can retry
-/// without re-downloading anything. In a debug build `BuildCommand::Boot` maps
-/// to `build-vm`, so this activates nothing - same convention as every other
-/// rebuild in this crate.
+/// carries a commit pinning the applied revisions. With [`Activation::Boot`]
+/// the running system is unchanged until the machine reboots; with
+/// [`Activation::Switch`] it has already been replaced. On a failed activation
+/// nothing is committed and the staging area is **kept**, so the next attempt
+/// can retry without re-downloading anything. In a debug build both
+/// activations map to `build-vm`, so neither changes anything - same
+/// convention as every other rebuild in this crate.
 ///
 /// # Returns
 /// `true` when a staged update was applied, `false` when there was nothing
@@ -436,11 +503,15 @@ pub async fn stage_candidate(
 /// the normal case on most shutdowns and is not an error.
 ///
 /// # Errors
-/// [`mx::ErrorKind::BuildError`] with the activation's standard error if
-/// `nixos-rebuild boot` exits non-zero, [`mx::ErrorKind::IOError`] if the
-/// staged lockfile cannot be read, plus anything
-/// [`make_transaction_commit_only`] reports for the promotion.
-pub fn apply_staged(config_dir: &str, cores: Option<u32>) -> mx::Result<bool> {
+/// [`mx::ErrorKind::BuildError`] with the activation's standard error if the
+/// rebuild exits non-zero, [`mx::ErrorKind::IOError`] if the staged lockfile
+/// cannot be read, plus anything [`make_transaction_commit_only`] reports for
+/// the promotion.
+pub fn apply_staged_with(
+    config_dir: &str,
+    cores: Option<u32>,
+    activation: Activation,
+) -> mx::Result<bool> {
     let Some(meta) = staged_status()? else {
         return Ok(false);
     };
@@ -453,7 +524,7 @@ pub fn apply_staged(config_dir: &str, cores: Option<u32>) -> mx::Result<bool> {
 
     let dir = staging_dir();
     let staged_config = dir.join(STAGED_CONFIG_DIR);
-    run_staged_rebuild(&dir, &staged_config, BuildCommand::Boot, cores)?;
+    run_staged_rebuild(&dir, &staged_config, activation.build_command(), cores)?;
 
     make_transaction_commit_only(
         "apply staged system update",
@@ -475,7 +546,8 @@ pub fn apply_staged(config_dir: &str, cores: Option<u32>) -> mx::Result<bool> {
 /// * `staged_config` - the configuration copy inside `dir`, pointed at with
 ///   `--flake`.
 /// * `command` - [`BuildCommand::Build`] to pre-build,
-///   [`BuildCommand::Boot`] to make the result the next boot's system.
+///   [`BuildCommand::Boot`] to make the result the next boot's system, or
+///   [`BuildCommand::Switch`] to activate it immediately.
 /// * `cores` - forwarded as `--cores`.
 ///
 /// # Pre-conditions
