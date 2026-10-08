@@ -83,6 +83,9 @@ pub mod staging;
 #[cfg(feature = "system-update")]
 pub mod update;
 
+#[cfg(feature = "system-update")]
+pub mod reboot;
+
 mod error;
 
 /// Git repository holding the system's NixOS configuration, and the default

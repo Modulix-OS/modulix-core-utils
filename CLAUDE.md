@@ -184,6 +184,16 @@ All four live in the same transaction as the rest of the seed, so the repo is on
 
 Two related changes in `transaction.rs`: the rebuild is wrapped in `systemd-run --collect --wait --pipe --unit=mx-rebuild-<pid>-<n> --property=KillMode=process` when `INVOCATION_ID` is set, so it runs in its own cgroup and survives a stop of the calling unit (a daemon restarted by its own `switch` used to kill it); and `build_with_lock`'s scratch moved from `/tmp` to `cache_dir()`, because a transient unit does not see the `PrivateTmp` of the caller.
 
+## Reboot still needed? (`reboot.rs`)
+
+**`apply_staged` with `Activation::Switch` can succeed and still owe a reboot — or not.** A `nixos-rebuild switch` replaces the system closure under the live session, but not the kernel, the kernel modules or the initrd the machine is *running*. `reboot_required()` settles that exactly, by comparing `/run/booted-system` with `/run/current-system` on `kernel`, `kernel-modules` and `initrd`: no list of "reboot-worthy" package names to maintain, and so no driver it can miss. `systemd` is deliberately excluded — `switch-to-configuration` re-executes it in place.
+
+- `reboot_required() -> bool` — the verdict. Infallible: an entry missing on one side only counts as changed, missing on both is ignored, so a container or a non-NixOS host answers `false`. `required_between(booted, current)` is the testable body.
+- `changed_since_boot() -> mx::Result<Vec<String>>` — `nix store diff-closures /run/booted-system /run/current-system`, one entry per line. Same tool as mxpkgs' `mx-latest-update`, but between booted and current rather than between the last two profile generations: "what changed since boot" is the question a reboot prompt answers, and it stays right after several switches in one session.
+- `reboot_status() -> RebootStatus` — both, memoised on what `/run/current-system` points at, so the `nix` subprocess runs at most once per activation. Never fails: a `changed_since_boot` error degrades `changed` to an empty list and leaves `required` untouched. **Never infer `required` from `changed`.**
+
+Gated on `system-update`. The daemon serves it as the `Store1.RebootRequired() -> (bas)` read.
+
 ## Adding a new config module
 
 1. Declare the feature in `Cargo.toml` (depend on at least `core-nix-file`).
