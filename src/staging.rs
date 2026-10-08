@@ -22,7 +22,7 @@
 //!
 //! # Why the staged copy is also what gets activated
 //!
-//! [`crate::update::build_with_lock`] builds a `.git`-less checkout, which
+//! [`stage_update`] builds a `.git`-less checkout of the configuration, which
 //! `nix` reads as a `path:` flake where it reads the real repository as
 //! `git+file://`. The flake *source* hashes differently, so the top-level
 //! `nixos-system-*` derivation of a build staged that way is not the one a
@@ -30,6 +30,14 @@
 //! `nixos-rebuild boot` at the very directory [`stage_update`] built, which
 //! makes the activation a store lookup plus a bootloader write rather than a
 //! second build. That is the whole point of pre-building.
+//!
+//! That `path:` resolution is **why [`crate::cache_dir`] must live outside the
+//! configuration repository**, and not merely why the copy carries no `.git`:
+//! given a bare path, `nix` walks the *parents* looking for a git root. While
+//! the cache was `/etc/modulix-os/.cache`, that walk reached the configuration
+//! repository, the staged copy was read as a `git+file://` flake restricted to
+//! tracked files, and every staged build failed with "is not tracked by Git".
+//! See [`crate::DEFAULT_CACHE_DIRECTORY`].
 //!
 //! # Why the `result` symlink is kept
 //!
@@ -60,8 +68,10 @@ use crate::{CONFIG_NAME, mx};
 
 /// Directory, under [`crate::cache_dir`], holding the staged update.
 ///
-/// Inside [`crate::CONFIG_DIRECTORY`] the cache directory is excluded from git
-/// (`.git/info/exclude`), so nothing here can end up committed by accident.
+/// [`crate::cache_dir`] lies outside any git repository, so nothing here can
+/// end up committed by accident - nor be read as part of a `git+file://` flake,
+/// which is what makes the staged build work at all
+/// ([`crate::DEFAULT_CACHE_DIRECTORY`]).
 const STAGING_DIR: &str = "pending-update";
 
 /// Sub-directory of [`STAGING_DIR`] holding the configuration copy that is

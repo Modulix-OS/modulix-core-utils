@@ -538,11 +538,10 @@ pub fn update_with_lock(
 /// Used to stage a throwaway copy of a configuration repository so a build can
 /// run against a modified `flake.lock` without the original repository ever
 /// being touched. Checking `HEAD`'s tree out - rather than copying the working
-/// directory - is what keeps the copy faithful: `nix` resolves a configuration
+/// directory - is what keeps the copy minimal: `nix` resolves a configuration
 /// directory that is a git work tree as a `git+file://` flake, which sees
-/// **tracked files only**, so an untracked sibling (the daemon's own
-/// `.cache/`, tens of megabytes of package index) must not end up in the flake
-/// source.
+/// **tracked files only**, so copying the working directory would put an
+/// untracked sibling in the flake source of a build of the real repository.
 ///
 /// # Arguments
 /// * `src` - git repository to read `HEAD` from; must exist and be readable.
@@ -597,8 +596,11 @@ pub(crate) fn stage_head_tree(src: &path::Path, dst: &path::Path) -> mx::Result<
 /// running system, and the next [`check_update`] would then find nothing to
 /// update while the system is still behind.
 ///
-/// The staged copy has no `.git`, so `nix` reads it as a `path:` flake where it
-/// reads the real repository as `git+file://`. The flake *source* therefore
+/// The staged copy has no `.git`, and [`crate::cache_dir`] holding it lies
+/// outside any git repository, so `nix` reads it as a `path:` flake where it
+/// reads the real repository as `git+file://` (both conditions are needed: on
+/// a bare path `nix` walks the parents looking for a git root, see
+/// [`crate::DEFAULT_CACHE_DIRECTORY`]). The flake *source* therefore
 /// hashes differently and the top-level `nixos-system-*` derivation is rebuilt
 /// by the `Switch`/`Boot` that follows - cheap, and not what this function is
 /// for. What it does share is everything that depends on the inputs' revisions

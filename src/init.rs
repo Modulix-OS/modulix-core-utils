@@ -9,9 +9,9 @@
 //! `crate::REMOTE_CONFIG_URL` is declared in `lib.rs` but never used by
 //! this module — `flake.nix`/`configuration.nix` are rendered from the
 //! `FLAKE_FILE`/`CONFIG_FILE` templates and `nixos-generate-config`,
-//! not downloaded). [`init`] lists [`crate::CACHE_DIRECTORY_NAME`] in the
-//! repo's `.git/info/exclude` so the generated-index cache is never
-//! stashed or committed. Whether a call targets the live system (`/`) or
+//! not downloaded). [`init`] lists `result` and the legacy cache directory in
+//! the repo's `.git/info/exclude` so a build artifact is never stashed or
+//! committed. Whether a call targets the live system (`/`) or
 //! an installation root (e.g. `/mnt`) is entirely up to the `root_path`/
 //! `params.root` argument passed in; this module does not choose it.
 //! Root privileges are required in release builds only where the target
@@ -562,42 +562,49 @@ const BASE_FILES: &[&str] = &[
     user::USER_FILE_PATH,
 ];
 
-/// Creates the cache directory and keeps git from ever seeing it.
+/// Keeps git from ever seeing the build artifacts that may land in the config
+/// repo.
 ///
-/// The indexes are rebuilt artifacts living inside the config repo. Without
-/// the exclude, `Transaction::begin` (which stashes with `INCLUDE_UNTRACKED`)
-/// would stash the whole directory away for the duration of every build —
-/// ignored paths are left alone, untracked ones are not. `result` gets the
-/// same treatment: `nixos-rebuild build-vm` may drop it here.
+/// `Transaction::begin` stashes with `INCLUDE_UNTRACKED`, so any untracked
+/// entry in the repo would be stashed away for the duration of every build -
+/// ignored paths are left alone, untracked ones are not. Two entries need that
+/// protection:
+///
+/// * `result`, the garbage-collection root `nixos-rebuild build`/`build-vm`
+///   drops in its working directory, which is the repo itself for a plain
+///   transaction.
+/// * [`crate::LEGACY_CACHE_DIRECTORY_NAME`], which nothing writes any more -
+///   the cache moved to [`crate::DEFAULT_CACHE_DIRECTORY`], outside the repo,
+///   because `nix` resolved a staged build under it as a `git+file://` flake.
+///   A machine installed before that move still carries the directory, and it
+///   must stay invisible here.
 ///
 /// # Parameters
-/// * `repo_path` - root of the config git repo; the cache directory
-///   ([`crate::CACHE_DIRECTORY_NAME`]) and `.git/info/exclude` are created
+/// * `repo_path` - root of the config git repo; `.git/info/exclude` is created
 ///   under it.
 ///
 /// # Pre-conditions
 /// `repo_path` is an existing, initialized git repository.
 ///
 /// # Post-conditions
-/// `repo_path/CACHE_DIRECTORY_NAME` exists. `repo_path/.git/info/exclude`
-/// exists and contains `CACHE_DIRECTORY_NAME/` and `result`, one per line,
-/// overwriting any previous content of that file.
+/// `repo_path/.git/info/exclude` exists and contains
+/// `LEGACY_CACHE_DIRECTORY_NAME/` and `result`, one per line, overwriting any
+/// previous content of that file. No cache directory is created: every
+/// consumer of [`crate::cache_dir`] creates it on first use, and it no longer
+/// lives under `repo_path`.
 ///
 /// # Returns
-/// `Ok(())` once both the cache directory and the exclude file are written.
+/// `Ok(())` once the exclude file is written.
 ///
 /// # Errors
-/// * `mx::ErrorKind::IOError` - creating either directory, or writing the
-///   exclude file, failed.
-fn init_cache_dir(repo_path: &Path) -> mx::Result<()> {
-    fs::create_dir_all(repo_path.join(crate::CACHE_DIRECTORY_NAME))
-        .map_err(mx::ErrorKind::IOError)?;
-
+/// * `mx::ErrorKind::IOError` - creating `.git/info`, or writing the exclude
+///   file, failed.
+fn init_git_exclude(repo_path: &Path) -> mx::Result<()> {
     let info_dir = repo_path.join(".git/info");
     fs::create_dir_all(&info_dir).map_err(mx::ErrorKind::IOError)?;
     fs::write(
         info_dir.join("exclude"),
-        format!("{}/\nresult\n", crate::CACHE_DIRECTORY_NAME),
+        format!("{}/\nresult\n", crate::LEGACY_CACHE_DIRECTORY_NAME),
     )
     .map_err(mx::ErrorKind::IOError)
 }
@@ -763,7 +770,7 @@ fn write_fstab_extras(fstab: &mut NixFile, params: &InitParams) -> mx::Result<()
 /// not — is always wiped with `remove_dir_recursive` and replaced by a
 /// fresh `git init` (branch `main`); there is no re-adoption path. Then, in
 /// order:
-/// 1. `init_cache_dir` creates `.cache` and excludes it (and `result`) via
+/// 1. `init_git_exclude` excludes `result` (and the legacy `.cache`) via
 ///    `.git/info/exclude`.
 /// 2. `fstab.nix` is rendered from `filesystem::fstab_module`
 ///    and `configuration.nix` from `configuration_nix`.
@@ -855,7 +862,7 @@ fn write_fstab_extras(fstab: &mut NixFile, params: &InitParams) -> mx::Result<()
 /// * `mx::ErrorKind::InvalidFile` - `validate_config_path` rejected the
 ///   resolved path, or a later path-to-`str` conversion failed.
 /// * `mx::ErrorKind::IOError` - directory removal/creation, or any file I/O
-///   in `init_cache_dir`/`seal_base_files`, failed.
+///   in `init_git_exclude`/`seal_base_files`, failed.
 /// * `mx::ErrorKind::GitError` - `git2` failed to init the repo.
 /// * `mx::ErrorKind::FailToLock` - `hold_skip_rebuild_lock` could not
 ///   acquire its lock (non-debug builds only).
@@ -879,7 +886,7 @@ pub fn init(params: &InitParams) -> mx::Result<()> {
     opts.initial_head("main");
     git2::Repository::init_opts(repo_path, &opts).map_err(mx::ErrorKind::GitError)?;
 
-    init_cache_dir(repo_path)?;
+    init_git_exclude(repo_path)?;
 
     let fstab = filesystem::fstab_module(&params.root)?;
     let config = configuration_nix(params);

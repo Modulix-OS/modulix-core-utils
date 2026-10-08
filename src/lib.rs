@@ -95,29 +95,53 @@ pub const CONFIG_DIRECTORY: &str = "/etc/modulix-os/";
 #[cfg(debug_assertions)]
 pub const CONFIG_DIRECTORY: &str = concatcp!(env!("CARGO_MANIFEST_DIR"), "/test/");
 
-/// Name of the generated-index directory inside the config directory.
+/// Legacy name of the cache directory, from when it lived inside the config
+/// repository.
 ///
-/// Kept dot-prefixed and listed in the repo's `.git/info/exclude` by
-/// [`init::init`]: the indexes are rebuilt artifacts, and an untracked
-/// directory inside the config repo would otherwise be stashed away by
-/// every transaction.
-pub const CACHE_DIRECTORY_NAME: &str = ".cache";
+/// Kept for one reason: [`init::init`] still lists it in the repo's
+/// `.git/info/exclude`, so the leftover `.cache` of a machine installed before
+/// the cache moved out stays invisible to every transaction instead of being
+/// stashed away by one. Nothing reads or writes under it any more - see
+/// [`DEFAULT_CACHE_DIRECTORY`].
+pub const LEGACY_CACHE_DIRECTORY_NAME: &str = ".cache";
 
-/// Directory holding the generated indexes (module index, package index).
+/// Default directory holding everything this crate generates or pre-builds:
+/// the module and package indexes, the update probe lockfile, the staged
+/// update and the build scratch areas.
 ///
-/// Defaults to `CACHE_DIRECTORY_NAME` inside [`CONFIG_DIRECTORY`]. Since
-/// `CONFIG_DIRECTORY` is fixed at compile time, `$MX_CACHE_DIR` overrides it
-/// for deployments whose config repo lives elsewhere — notably a debug build
-/// driving a real system, where the compiled-in path is the source fixture.
+/// `/var/cache/modulix-os` in release builds; in debug builds the crate's own
+/// `test/.cache` fixture, so a development run never touches the live system.
+///
+/// **It must not sit inside a git repository, at any depth.** The staged
+/// update is built by pointing `nixos-rebuild --flake` at a `.git`-less copy
+/// of the configuration under this directory, and `nix` resolves a bare path
+/// by walking its *parents* looking for a git root: with the cache under
+/// [`CONFIG_DIRECTORY`] that walk reached the configuration repository, the
+/// copy was read as a `git+file://` flake restricted to tracked files, and
+/// every staged build failed with "is not tracked by Git". Outside any
+/// repository the same bare path is read as a `path:` flake, which is what
+/// [`staging`] and `update::build_with_lock` rely on.
+#[cfg(not(debug_assertions))]
+pub const DEFAULT_CACHE_DIRECTORY: &str = "/var/cache/modulix-os";
+#[cfg(debug_assertions)]
+pub const DEFAULT_CACHE_DIRECTORY: &str = concatcp!(env!("CARGO_MANIFEST_DIR"), "/test/.cache");
+
+/// Directory holding the generated indexes, the staged update and the build
+/// scratch areas.
+///
+/// `$MX_CACHE_DIR` overrides the compiled-in default, which is fixed at build
+/// time - notably for a debug build driving a real system, where the
+/// compiled-in path is the source fixture.
 ///
 /// # Returns
 /// `$MX_CACHE_DIR` when set (used as-is, even if it does not exist yet), else
-/// [`CACHE_DIRECTORY_NAME`] inside [`CONFIG_DIRECTORY`]. Creating the
-/// directory is the caller's job.
+/// [`DEFAULT_CACHE_DIRECTORY`]. Creating the directory is the caller's job.
+/// Whichever of the two is used must lie outside any git repository, for the
+/// reason given on [`DEFAULT_CACHE_DIRECTORY`].
 pub fn cache_dir() -> std::path::PathBuf {
     std::env::var_os("MX_CACHE_DIR")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::Path::new(CONFIG_DIRECTORY).join(CACHE_DIRECTORY_NAME))
+        .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_CACHE_DIRECTORY))
 }
 
 /// Which kind of Git ref the remote URLs below point at.
