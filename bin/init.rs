@@ -1,10 +1,16 @@
 //! `mx-init` — installer entry point for Modulix OS.
 //!
 //! Bootstraps a brand-new NixOS configuration repository (`flake.nix`, `configuration.nix`,
-//! `hardware-configuration.nix`, `fstab.nix`, plus locale and user files) by parsing CLI flags
-//! into a `modulix_core_utils::init::InitParams` and calling
+//! `hardware-configuration.nix`, `hardware.nix`, `fstab.nix`, plus locale and user files) by
+//! parsing CLI flags into a `modulix_core_utils::init::InitParams` and calling
 //! [`modulix_core_utils::init::init`], which writes every file in a single git-committed,
 //! immutable-sealed transaction.
+//!
+//! `hardware.nix` takes no flag: it carries the `mx.hardware.*` options — the two GPU slots,
+//! the PRIME bus ids, `laptop` and `has_fingerprint` — detected automatically from the **live**
+//! machine, which for an installer booted from a live medium is the machine being installed
+//! onto. `pciutils` must be on `PATH` for each GPU's `generation` to be named; without it every
+//! other detected value is still written.
 //!
 //! # Usage
 //!

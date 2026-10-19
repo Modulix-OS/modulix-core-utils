@@ -2,8 +2,14 @@
 //! system: `init_repo` is used by the installer to seed a minimal repo
 //! ahead of hardware detection, and `init` is the installer's actual
 //! engine, writing every base file (flake, configuration, hardware,
-//! fstab, locale, user) in a single transaction and sealing them
-//! immutable.
+//! detected `mx.hardware.*` options, fstab, locale, user) in a single
+//! transaction and sealing them immutable.
+//!
+//! Only [`init`] writes `hardware.nix`. [`init_repo`] deliberately does not:
+//! its own `CONFIG_FILE` template imports nothing but
+//! `hardware-configuration.nix` and `fstab.nix`, and adding the import
+//! without also registering the file in its transaction would leave a
+//! configuration importing a file that does not exist.
 //!
 //! Everything here is local-only: no network fetch happens (in particular
 //! `crate::REMOTE_CONFIG_URL` is declared in `lib.rs` but never used by
@@ -25,6 +31,7 @@ use crate::core::transaction::file_lock::NixFile;
 use crate::core::transaction::transaction::LOCK_SKIP_REBUILD_FILE;
 use crate::core::transaction::transaction::TransactionPermission;
 use crate::core::transaction::transaction::{BuildCommand, UpdateInput};
+use crate::detect_hardware::system_info::gpu_info::HardwareTopology;
 use crate::error::io_message;
 use crate::{
     CONFIG_DIRECTORY, filesystem, hardware_config, install_module, install_package, locale, mx,
@@ -494,9 +501,9 @@ fn config_path(params: &InitParams) -> String {
 /// `Transaction::begin`: `begin` injects newly created files into the `imports`
 /// of `configuration.nix`, but [`init`] then overwrites that file's whole
 /// buffer with this template, which would drop the injection. [`init`] always
-/// creates `locale.nix` and `users.nix`, so listing them is exact; it creates
-/// `package.nix` and `module.nix` only for a non-empty `packages`/`modules`,
-/// which is exactly when they are listed here.
+/// creates `hardware.nix`, `locale.nix` and `users.nix`, so listing them is
+/// exact; it creates `package.nix` and `module.nix` only for a non-empty
+/// `packages`/`modules`, which is exactly when they are listed here.
 ///
 /// # Parameters
 /// * `p` - init parameters; `hostname` and `desktop` are interpolated into
@@ -504,9 +511,9 @@ fn config_path(params: &InitParams) -> String {
 ///
 /// # Returns
 /// The full `configuration.nix` source, importing
-/// `hardware-configuration.nix`, `fstab.nix`, `locale.nix`, `users.nix` and —
-/// when their list is non-empty — `package.nix` and `module.nix`, and setting
-/// `networking.hostName` and `mx.desktop`.
+/// `hardware-configuration.nix`, `hardware.nix`, `fstab.nix`, `locale.nix`,
+/// `users.nix` and — when their list is non-empty — `package.nix` and
+/// `module.nix`, and setting `networking.hostName` and `mx.desktop`.
 fn configuration_nix(p: &InitParams) -> String {
     let mut extra = String::new();
     if !p.packages.is_empty() {
@@ -524,6 +531,7 @@ fn configuration_nix(p: &InitParams) -> String {
 {{
   imports = [
     ./hardware-configuration.nix
+    ./{hardware}
     ./fstab.nix
     ./locale.nix
     ./users.nix
@@ -534,6 +542,7 @@ fn configuration_nix(p: &InitParams) -> String {
   mx.desktop = "{desktop}";
 }}
 "#,
+        hardware = hardware_config::FILE_HARDWARE_PATH,
         extra = extra,
         hostname = p.hostname,
         desktop = p.desktop.as_str(),
@@ -557,6 +566,7 @@ const BASE_FILES: &[&str] = &[
     "flake.lock",
     "configuration.nix",
     "hardware-configuration.nix",
+    hardware_config::FILE_HARDWARE_PATH,
     "fstab.nix",
     locale::LOCALE_FILE_PATH,
     user::USER_FILE_PATH,
@@ -764,12 +774,15 @@ fn write_fstab_extras(fstab: &mut NixFile, params: &InitParams) -> mx::Result<()
 /// needs (flake, base configuration, detected hardware, filesystem table,
 /// locale/keyboard, and one user).
 ///
-/// Resolves the repo path with `config_path` and rejects it with
-/// `validate_config_path` before anything is deleted. Unlike
-/// [`init_repo`], any pre-existing directory at that path — git repo or
-/// not — is always wiped with `remove_dir_recursive` and replaced by a
-/// fresh `git init` (branch `main`); there is no re-adoption path. Then, in
-/// order:
+/// Probes the machine's graphics topology with
+/// `HardwareTopology::detect` first of all — before the path is even
+/// resolved, so a detection failure leaves the existing configuration
+/// untouched rather than wiping it and then failing. Then resolves the repo
+/// path with `config_path` and rejects it with `validate_config_path` before
+/// anything is deleted. Unlike [`init_repo`], any pre-existing directory at
+/// that path — git repo or not — is always wiped with `remove_dir_recursive`
+/// and replaced by a fresh `git init` (branch `main`); there is no
+/// re-adoption path. Then, in order:
 /// 1. `init_git_exclude` excludes `result` (and the legacy `.cache`) via
 ///    `.git/info/exclude`.
 /// 2. `fstab.nix` is rendered from `filesystem::fstab_module`
@@ -787,14 +800,17 @@ fn write_fstab_extras(fstab: &mut NixFile, params: &InitParams) -> mx::Result<()
 ///    builds — so a debug run never touches the host system regardless of
 ///    which variant is named here).
 /// 5. A single `Transaction` (`TransactionPermission::Writtable`) is opened
-///    over `flake.nix`, `hardware-configuration.nix`, `fstab.nix`,
+///    over `flake.nix`, `hardware-configuration.nix`,
+///    `hardware_config::FILE_HARDWARE_PATH`, `fstab.nix`,
 ///    `locale::LOCALE_FILE_PATH`, `user::USER_FILE_PATH` and — only when the
 ///    matching list is non-empty — `install_package::FILE_PACKAGE_PATH` and
 ///    `install_module::FILE_MODULE_PATH`
 ///    (`configuration.nix` is auto-added by `Transaction::begin`); within it,
 ///    `flake.nix`/`configuration.nix`/`fstab.nix` get their rendered content,
 ///    the hardware file is filled by
-///    `hardware_config::write_hardware_config_no_transaction`, the locale
+///    `hardware_config::write_hardware_config_no_transaction`, `hardware.nix`
+///    by `hardware_config::write_hardware_options_no_transaction` from the
+///    topology probed up front, the locale
 ///    file by `locale::set_locale_no_transaction` then
 ///    `locale::set_keyboard_no_transaction`, and the user file by
 ///    `user::add_no_transaction` (`params.username`, empty initial password,
@@ -833,11 +849,19 @@ fn write_fstab_extras(fstab: &mut NixFile, params: &InitParams) -> mx::Result<()
 /// read `params.root`. No other process holds the skip-rebuild lock
 /// (relevant outside debug mode).
 ///
+/// The hardware probe reads the **live** machine and ignores `params.root`,
+/// as `DriverConfig::new` already does: an installer running from a live
+/// medium is on the hardware it is installing onto. Installing onto a disk
+/// that will then be moved elsewhere therefore seeds the installing machine's
+/// `hardware.nix`, which `hardware_config::redetect_hardware_options` fixes on
+/// first boot. `lspci` on `PATH` is what names each GPU's generation; without
+/// it every `generation` is left unset and nothing else is lost.
+///
 /// # Post-conditions
 /// On success: the resolved config directory is a freshly initialized git
 /// repo on branch `main`, containing `flake.nix`, `configuration.nix`,
-/// `hardware-configuration.nix`, `fstab.nix`, the locale and user files,
-/// `package.nix`/`module.nix` when their list was non-empty, and
+/// `hardware-configuration.nix`, `hardware.nix`, `fstab.nix`, the locale and
+/// user files, `package.nix`/`module.nix` when their list was non-empty, and
 /// `flake.lock`, all committed as `"modulix init"`; every file in
 /// `BASE_FILES` present on disk is immutable; `.cache` exists and is
 /// listed in `.git/info/exclude` together with `result`. Outside debug mode,
@@ -866,14 +890,20 @@ fn write_fstab_extras(fstab: &mut NixFile, params: &InitParams) -> mx::Result<()
 /// * `mx::ErrorKind::GitError` - `git2` failed to init the repo.
 /// * `mx::ErrorKind::FailToLock` - `hold_skip_rebuild_lock` could not
 ///   acquire its lock (non-debug builds only).
-/// * Any error from `filesystem::fstab_module`,
+/// * Any error from `HardwareTopology::detect`, `filesystem::fstab_module`,
 ///   `hardware_config::write_hardware_config_no_transaction`,
+///   `hardware_config::write_hardware_options_no_transaction`,
 ///   `locale::set_locale_no_transaction`,
 ///   `locale::set_keyboard_no_transaction`, `user::add_no_transaction`,
 ///   `Transaction::new`, `Transaction::add_file`, `Transaction::begin`,
 ///   `Transaction::get_file_mut`, `NixFile::get_mut_file_content`, or
 ///   `Transaction::commit`.
 pub fn init(params: &InitParams) -> mx::Result<()> {
+    // Before anything is deleted: nothing this probe reads depends on the
+    // config directory, so failing here must leave the existing configuration
+    // untouched rather than wipe it first.
+    let hardware = HardwareTopology::detect()?;
+
     let path_config = config_path(params);
     validate_config_path(&path_config)?;
     let repo_path = Path::new(path_config.as_str());
@@ -917,6 +947,7 @@ pub fn init(params: &InitParams) -> mx::Result<()> {
     let mut files = vec![
         "flake.nix",
         HARDWARE_FILE,
+        hardware_config::FILE_HARDWARE_PATH,
         "fstab.nix",
         locale::LOCALE_FILE_PATH,
         user::USER_FILE_PATH,
@@ -957,6 +988,20 @@ pub fn init(params: &InitParams) -> mx::Result<()> {
         Ok(file) => {
             if let Err(e) =
                 hardware_config::write_hardware_config_no_transaction(&params.root, file)
+            {
+                tx.rollback()?;
+                return Err(e);
+            }
+        }
+        Err(e) => {
+            tx.rollback()?;
+            return Err(e);
+        }
+    }
+
+    match tx.get_file_mut(hardware_config::FILE_HARDWARE_PATH) {
+        Ok(file) => {
+            if let Err(e) = hardware_config::write_hardware_options_no_transaction(file, &hardware)
             {
                 tx.rollback()?;
                 return Err(e);
@@ -1071,7 +1116,7 @@ pub fn init(params: &InitParams) -> mx::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Desktop, InitParams, configuration_nix};
+    use super::{BASE_FILES, Desktop, InitParams, configuration_nix, hardware_config};
 
     /// `InitParams` with every optional list empty, as a starting point the
     /// tests below only change one field of.
@@ -1102,6 +1147,25 @@ mod tests {
         assert!(!rendered.contains("./package.nix"));
         assert!(!rendered.contains("./module.nix"));
         assert!(rendered.contains("./users.nix"));
+    }
+
+    /// `init` always writes `hardware.nix`, so the import is unconditional -
+    /// and it has to land inside the `imports` list, not after it.
+    #[test]
+    fn the_hardware_options_file_is_always_imported() {
+        let rendered = configuration_nix(&params());
+        let import = format!("./{}", hardware_config::FILE_HARDWARE_PATH);
+        let position = rendered.find(&import).expect("import missing");
+        let closing = rendered.find("];").expect("imports list unterminated");
+        assert!(position < closing, "outside the imports list:\n{rendered}");
+    }
+
+    /// The import list and the sealing list have to name the same file: an
+    /// imported file left mutable is a configuration editable outside a
+    /// transaction.
+    #[test]
+    fn the_hardware_options_file_is_sealed() {
+        assert!(BASE_FILES.contains(&hardware_config::FILE_HARDWARE_PATH));
     }
 
     #[test]
