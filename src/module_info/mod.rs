@@ -42,6 +42,13 @@ type Url = str;
 ///   overlay entry (see [`IndexOverlayEntry::summary`]).
 /// * `keyword` - inline extra search terms, in the absence of a localized
 ///   overlay entry (see [`IndexOverlayEntry::keyword`]).
+/// * `icon_name` - inline name of the icon to look up in the user's icon
+///   theme, for a module whose icon cannot come from Flathub. Unlike
+///   `metadata.json`'s own `icon_name`, this one needs no network round-trip:
+///   the index is read from disk (see [`read_local_index`]), so it also works
+///   offline and before [`ModuleInfo::resolve`] has run. Must name an icon the
+///   installed theme actually provides. Not localizable, hence absent from
+///   [`IndexOverlayEntry`].
 /// * `modules` - keys of the sub-modules this entry is a meta-module for;
 ///   `None`/empty for a leaf module. Walked by [`expand_targets`].
 #[derive(Debug, Deserialize)]
@@ -59,6 +66,8 @@ struct IndexEntry {
     summary: Option<String>,
     #[serde(default)]
     keyword: Option<Vec<String>>,
+    #[serde(default)]
+    icon_name: Option<String>,
     #[serde(default)]
     modules: Option<Vec<String>>,
 }
@@ -91,7 +100,8 @@ struct IndexOverlayEntry {
 /// # Fields
 /// * `icon` - URL of the module's icon, when it declares a remote one.
 /// * `icon_name` - name of the icon in the user's icon theme, preferred over
-///   `icon` when both are set (see [`ModuleInfo::icon_name`]).
+///   `icon` when both are set, but itself overridden by the index entry's own
+///   [`IndexEntry::icon_name`] (see [`ModuleInfo::icon_name`]).
 /// * `description` - long, multi-paragraph description; falls back to the
 ///   inline summary when absent (see [`ModuleInfo::description`]).
 /// * `keyword` - extra search terms, in the absence of an inline
@@ -129,6 +139,9 @@ struct ModuleMetadata {
 ///   overlay, falling back to the index entry's `summary`.
 /// * `inline_keyword` - extra search terms resolved the same way from the
 ///   overlay, falling back to the index entry's `keyword`.
+/// * `inline_icon_name` - themed icon name copied from the index entry's
+///   `icon_name`; available without any fetch, so [`AppInfoGui::icon_name`]
+///   answers even on an unresolved module.
 /// * `plugins` - nixpkgs namespace the module pulls its plugins from, copied
 ///   from the index entry's `plugins`.
 /// * `sub_modules` - keys of this module's sub-modules, copied from the
@@ -148,6 +161,8 @@ pub struct ModuleInfo {
     inline_summary: Option<String>,
     #[cfg(feature = "app-info-gui")]
     inline_keyword: Option<Vec<String>>,
+    #[cfg(feature = "app-info-gui")]
+    inline_icon_name: Option<String>,
     plugins: Option<String>,
     sub_modules: Vec<String>,
     #[cfg(feature = "app-info-gui")]
@@ -329,7 +344,8 @@ pub async fn resolve_with_children(name: &str) -> mx::Result<Vec<String>> {
 ///
 /// # Returns
 /// Every module whose `flathub_id` equals `app_id`, each still unresolved
-/// (its `flatpak`/`metadata` cell empty); empty when none match.
+/// (its `flatpak`/`metadata` cell empty), so only the index-side fields —
+/// including [`IndexEntry::icon_name`] — answer; empty when none match.
 ///
 /// # Errors
 /// Whatever `fetch_index` returns.
@@ -504,7 +520,9 @@ impl ModuleInfo {
     /// Builds a [`ModuleInfo`] from an index entry and its optional localized
     /// overlay, resolving `inline_name`/`inline_summary`/`inline_keyword` to
     /// the overlay's value when set, else the entry's own (see
-    /// [`IndexOverlayEntry`]). `flatpak`/`metadata` start empty, unresolved.
+    /// [`IndexOverlayEntry`]). `inline_icon_name` always comes from the base
+    /// entry, the overlay carrying no icon. `flatpak`/`metadata` start empty,
+    /// unresolved.
     ///
     /// # Parameters
     /// * `name` - the module's key in the index, stored as `self.name`.
@@ -530,6 +548,8 @@ impl ModuleInfo {
             inline_keyword: overlay
                 .and_then(|o| o.keyword.clone())
                 .or_else(|| entry.keyword.clone()),
+            #[cfg(feature = "app-info-gui")]
+            inline_icon_name: entry.icon_name.clone(),
             plugins: entry.plugins.clone(),
             sub_modules: entry.modules.clone().unwrap_or_default(),
             #[cfg(feature = "app-info-gui")]
@@ -745,13 +765,18 @@ impl AppInfoGui for ModuleInfo {
     }
 
     /// # Returns
-    /// `metadata.icon_name` when `metadata` was resolved (see
-    /// [`ModuleInfo::resolve`]) and carries one; otherwise, when `flathub_id`
-    /// is set, the theme icon name of the first nixpkgs package Flathub's
-    /// `app_id` maps to (via [`crate::package_info::packages_for_app_id`] then
-    /// [`crate::package_info::icon_name_for_package`]); `None` if neither
-    /// source has an answer.
+    /// `inline_icon_name` (the index entry's `icon_name`) when set — the only
+    /// source that needs neither a fetch nor a prior [`ModuleInfo::resolve`];
+    /// else `metadata.icon_name` when `metadata` was resolved and carries one;
+    /// otherwise, when `flathub_id` is set, the theme icon name of the first
+    /// nixpkgs package Flathub's `app_id` maps to (via
+    /// [`crate::package_info::packages_for_app_id`] then
+    /// [`crate::package_info::icon_name_for_package`]); `None` if no source
+    /// has an answer.
     fn icon_name(&self) -> Option<&str> {
+        if let Some(icon_name) = self.inline_icon_name.as_deref() {
+            return Some(icon_name);
+        }
         if let Some(Some(metadata)) = self.metadata.get()
             && let Some(icon_name) = metadata.icon_name.as_deref()
         {
@@ -857,6 +882,7 @@ mod tests {
             name: None,
             summary: None,
             keyword: None,
+            icon_name: None,
             modules: (!children.is_empty())
                 .then(|| children.iter().map(|s| s.to_string()).collect()),
         }
@@ -979,6 +1005,14 @@ mod tests {
                     "{key}: meta sub-module `{child}` is absent from the index"
                 );
             }
+            if entry.flathub_id.is_none() {
+                let icon_name = entry.icon_name.as_deref().unwrap_or_default();
+                assert!(
+                    !icon_name.is_empty(),
+                    "{key}: a module without `flathub_id` must carry an `icon_name`, \
+                     its only icon source"
+                );
+            }
         }
     }
 
@@ -1000,6 +1034,55 @@ mod tests {
         let english = ModuleInfo::from_entry("services.llm", &base, None);
         assert_eq!(english.display_name(), "Local AI");
         assert_eq!(english.summary(), "Local LLM runtime");
+    }
+
+    #[cfg(feature = "app-info-gui")]
+    #[test]
+    fn inline_icon_name_answers_without_resolving() {
+        let mut base = entry("services/vm", &[]);
+        base.icon_name = Some("virt-manager".to_string());
+
+        let module = ModuleInfo::from_entry("services.vm", &base, None);
+        assert_eq!(module.icon_name(), Some("virt-manager"));
+        assert_eq!(module.icon(), None);
+    }
+
+    #[cfg(feature = "app-info-gui")]
+    #[test]
+    fn missing_inline_icon_name_falls_back_to_metadata() {
+        let base = entry("services/vm", &[]);
+        let module = ModuleInfo::from_entry("services.vm", &base, None);
+        assert_eq!(module.icon_name(), None);
+
+        module
+            .metadata
+            .set(Some(ModuleMetadata {
+                icon: None,
+                icon_name: Some("from-metadata".to_string()),
+                description: None,
+                keyword: None,
+            }))
+            .expect("metadata cell is still empty");
+        assert_eq!(module.icon_name(), Some("from-metadata"));
+    }
+
+    #[cfg(feature = "app-info-gui")]
+    #[test]
+    fn inline_icon_name_wins_over_metadata() {
+        let mut base = entry("services/vm", &[]);
+        base.icon_name = Some("virt-manager".to_string());
+
+        let module = ModuleInfo::from_entry("services.vm", &base, None);
+        module
+            .metadata
+            .set(Some(ModuleMetadata {
+                icon: None,
+                icon_name: Some("from-metadata".to_string()),
+                description: None,
+                keyword: None,
+            }))
+            .expect("metadata cell is still empty");
+        assert_eq!(module.icon_name(), Some("virt-manager"));
     }
 
     #[test]
