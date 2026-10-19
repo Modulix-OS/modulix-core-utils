@@ -224,30 +224,6 @@ impl DriverConfig {
         Self::get_computer_hardware_module_family(&modules[begin..end], computer_info, vga_info)
     }
 
-    /// Restricts a sorted range to the entries sharing a given prefix.
-    ///
-    /// # Parameters
-    /// * `range` - sorted module names.
-    /// * `prefix` - prefix the sub-range must share (e.g. `common-gpu-nvidia`).
-    ///
-    /// # Returns
-    /// The matching contiguous sub-range. A prefix that matches nothing yields a
-    /// range starting at index 0, since the search falls back to the start rather
-    /// than to an empty slice.
-    #[cfg(feature = "match-exact-gpu-gen")]
-    fn restrict_range<'a>(range: &'a [String], prefix: &str) -> &'a [String] {
-        let b = range
-            .iter()
-            .position(|s| s.starts_with(prefix))
-            .unwrap_or(0);
-        let e = range[b..]
-            .iter()
-            .position(|s| !s.starts_with(prefix))
-            .map(|p| p + b)
-            .unwrap_or(range.len());
-        &range[b..e]
-    }
-
     /// Picks the `common-*` modules a machine without a dedicated module needs.
     ///
     /// # Parameters
@@ -268,45 +244,14 @@ impl DriverConfig {
         let mut all_module: Vec<String> = vec![];
 
         if vga_info.has_nvidia_device() {
-            #[cfg(feature = "match-exact-gpu-gen")]
-            {
-                let nvidia_modules = Self::restrict_range(common, "common-gpu-nvidia");
-                match vga_info.get_nvidia_generation() {
-                    Ok(arch) => all_module.push(
-                        nvidia_modules
-                            .iter()
-                            .find(|s| s.split('-').nth(3).map_or(false, |seg| seg == arch))
-                            .cloned()
-                            .unwrap_or_else(|| String::from("common-gpu-nvidia")),
-                    ),
-                    Err(_) => all_module.push(String::from("common-gpu-nvidia")),
-                }
-            }
-            #[cfg(not(feature = "match-exact-gpu-gen"))]
-            {
-                all_module.push(String::from("common-gpu-nvidia"));
-            }
+            all_module.push(String::from("common-gpu-nvidia"));
             if vga_info.has_nvidia_laptop() {
                 all_module.push(String::from("common-gpu-nvidia-prime"));
             }
         }
 
         if vga_info.match_archtecture_codename("amd") {
-            #[cfg(feature = "match-exact-gpu-gen")]
-            {
-                let amd_modules = Self::restrict_range(common, "common-gpu-amd");
-                if let Some(s) = amd_modules.iter().find(|s| {
-                    s.split('-')
-                        .skip(3)
-                        .all(|p| vga_info.match_archtecture_codename(p))
-                }) {
-                    all_module.push(s.clone());
-                }
-            }
-            #[cfg(not(feature = "match-exact-gpu-gen"))]
-            {
-                all_module.push(String::from("common-gpu-amd"));
-            }
+            all_module.push(String::from("common-gpu-amd"));
         }
 
         if vga_info.match_archtecture_codename("intel") {
