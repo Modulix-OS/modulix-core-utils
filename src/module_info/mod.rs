@@ -331,33 +331,49 @@ pub async fn resolve_with_children(name: &str) -> mx::Result<Vec<String>> {
     Ok(expand_targets(fetch_index().await?, name))
 }
 
-/// Modules whose `flathub_id` equals `app_id` (the index is already cached by
+/// Modules sharing a grouping key with an app (the index is already cached by
 /// `fetch_index`). Used to prepend the Modulix module row(s) to the
 /// `alternate-of` version-selector for an app that also has a module. Does
 /// **not** call [`ModuleInfo::resolve`] (a network round-trip per module): the
 /// version-selector row only needs `origin_ui` + the packaging format, not an
 /// icon or description.
 ///
+/// Matching mirrors [`ModuleInfo::group_key`]: a module with a `flathub_id`
+/// matches on it alone; a Flathub-less one matches through its `nix_info`
+/// attribute — directly, through the attribute's curated AppStream id, or
+/// through its `pname` in the package index. That last, costlier lookup only
+/// runs when `gid` carries no `.`, since a dotted key is an AppStream id and
+/// could never be a `pname` (same heuristic as the store's own pname-group
+/// branch).
+///
 /// # Parameters
-/// * `app_id` - the Flathub application id to match against each module's
-///   `flathub_id` index entry.
+/// * `gid` - the grouping key to match against, i.e. an AppStream
+///   application id or a bare `pname`.
 ///
 /// # Returns
-/// Every module whose `flathub_id` equals `app_id`, each still unresolved
+/// Every module whose grouping key equals `gid`, each still unresolved
 /// (its `flatpak`/`metadata` cell empty), so only the index-side fields —
 /// including [`IndexEntry::icon_name`] — answer; empty when none match.
 ///
 /// # Errors
 /// Whatever `fetch_index` returns.
 #[cfg(feature = "app-info-gui")]
-pub async fn modules_for_app_id(app_id: &str) -> mx::Result<Vec<ModuleInfo>> {
+pub async fn modules_for_group_id(gid: &str) -> mx::Result<Vec<ModuleInfo>> {
     let index = fetch_index().await?;
     let overlay = fetch_index_overlay().await;
-    Ok(index
-        .iter()
-        .filter(|(_, entry)| entry.flathub_id.as_deref() == Some(app_id))
-        .map(|(name, entry)| ModuleInfo::from_entry(name, entry, overlay.get(name)))
-        .collect())
+    let index_lookup = !gid.contains('.');
+    let mut matches = Vec::new();
+    for (name, entry) in index.iter() {
+        let module = ModuleInfo::from_entry(name, entry, overlay.get(name));
+        let matched = match module.indexless_group_key() {
+            Some(key) => key == gid,
+            None => index_lookup && module.group_key().await.as_deref() == Some(gid),
+        };
+        if matched {
+            matches.push(module);
+        }
+    }
+    Ok(matches)
 }
 
 /// Fetches a module's `metadata.json` from `REMOTE_MODULE_URL`, merging in the
@@ -572,6 +588,55 @@ impl ModuleInfo {
     /// nixpkgs attribute used for nix-side metadata (`mainProgram`…), if any.
     pub fn nix_info(&self) -> Option<&str> {
         self.nix_info.as_deref()
+    }
+
+    /// Identity this module shares with the nix package it wraps — the key
+    /// the store groups rows by, and what the GNOME Software plugin turns
+    /// into a `GsApp` id, so a module and the nix package behind it collapse
+    /// to one row.
+    ///
+    /// Falls back to the nix side precisely because an [`AppInfoGui::id`]
+    /// only exists for a module Flathub also carries: without this, a
+    /// Flathub-less module (DaVinci Resolve…) and its own nix package were
+    /// two unrelated ids, hence two rows for the same program.
+    ///
+    /// Resolves nothing (no `resolve()`, no network): the Flathub id and
+    /// `nix_info` both come from the index, and the `pname` lookup reads the
+    /// local package index only.
+    ///
+    /// # Returns
+    /// `flathub_id` when set; else, for a module declaring `nix_info`, that
+    /// attribute's AppStream id from the curated table, else its `pname`
+    /// from the package index, else the attribute itself; `None` for a
+    /// module wrapping neither (a meta-module, a service…), which therefore
+    /// keeps grouping by its own index key.
+    #[cfg(feature = "app-info-gui")]
+    pub async fn group_key(&self) -> Option<String> {
+        if let Some(key) = self.indexless_group_key() {
+            return Some(key);
+        }
+        let attr = self.nix_info.as_deref()?;
+        Some(
+            crate::package_info::pname_for_package(attr)
+                .await
+                .unwrap_or_else(|| attr.to_string()),
+        )
+    }
+
+    /// The part of [`ModuleInfo::group_key`] that needs no package index: the
+    /// Flathub id, else the curated AppStream id of the `nix_info` attribute.
+    ///
+    /// # Returns
+    /// That key, or `None` both when the module wraps nothing at all and when
+    /// its `nix_info` attribute is absent from the curated table — the caller
+    /// tells the two apart by looking at `nix_info` itself.
+    #[cfg(feature = "app-info-gui")]
+    fn indexless_group_key(&self) -> Option<String> {
+        if let Some(flathub_id) = self.flathub_id.as_deref() {
+            return Some(flathub_id.to_string());
+        }
+        let attr = self.nix_info.as_deref()?;
+        crate::package_info::package_basic_info::get_app_id(attr).map(str::to_string)
     }
 
     /// nixpkgs namespace the module pulls its plugins from, if any.
@@ -1136,5 +1201,60 @@ mod tests {
             metadata.description.is_some(),
             "fr metadata overlay should provide a description"
         );
+    }
+
+    /// Builds a [`ModuleInfo`] carrying only the two fields the grouping key
+    /// is derived from, for the `indexless_group_key` tests.
+    ///
+    /// # Parameters
+    /// * `nix_info` - the module's `nix_info` index field.
+    /// * `flathub_id` - the module's `flathub_id` index field.
+    ///
+    /// # Returns
+    /// The constructed, unresolved module, keyed `programs.test`.
+    #[cfg(feature = "app-info-gui")]
+    fn module(nix_info: Option<&str>, flathub_id: Option<&str>) -> ModuleInfo {
+        let index_entry = IndexEntry {
+            nix_info: nix_info.map(str::to_string),
+            flathub_id: flathub_id.map(str::to_string),
+            ..entry("programs/test", &[])
+        };
+        ModuleInfo::from_entry("programs.test", &index_entry, None)
+    }
+
+    #[cfg(feature = "app-info-gui")]
+    #[test]
+    fn flathub_id_wins_the_grouping_key() {
+        let module = module(Some("steam"), Some("com.valvesoftware.Steam"));
+        assert_eq!(
+            module.indexless_group_key().as_deref(),
+            Some("com.valvesoftware.Steam")
+        );
+    }
+
+    #[cfg(feature = "app-info-gui")]
+    #[test]
+    fn a_flathubless_module_groups_by_its_attributes_app_id() {
+        let module = module(Some("steam"), None);
+        assert_eq!(
+            module.indexless_group_key().as_deref(),
+            Some("com.valvesoftware.Steam")
+        );
+    }
+
+    #[cfg(feature = "app-info-gui")]
+    #[test]
+    fn an_attribute_outside_the_table_needs_the_package_index() {
+        let module = module(Some("davinci-resolve"), None);
+        assert_eq!(module.indexless_group_key(), None);
+        assert_eq!(module.nix_info(), Some("davinci-resolve"));
+    }
+
+    #[cfg(feature = "app-info-gui")]
+    #[test]
+    fn a_module_wrapping_nothing_has_no_grouping_key() {
+        let module = module(None, None);
+        assert_eq!(module.indexless_group_key(), None);
+        assert_eq!(module.nix_info(), None);
     }
 }

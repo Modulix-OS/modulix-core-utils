@@ -410,6 +410,24 @@ pub fn icon_name_for_package(pkg_name: &str) -> Option<&'static str> {
     package_basic_info::get_icon_name(pkg_name)
 }
 
+/// `pname` of a nixpkgs attribute, from the on-disk package index (e.g.
+/// `nvtopPackages.full` → `"nvtop"`).
+///
+/// Unlike [`name_for_package`], which answers with the curated AppStream
+/// display name, this is the derivation's own `pname` — the key same-app nix
+/// variants are grouped by when no AppStream id is known.
+///
+/// # Parameters
+/// * `pkg_name` - the nixpkgs attribute path.
+///
+/// # Returns
+/// Its `pname`, or `None` when no index is servable or the attribute is
+/// absent from it (see [`crate::package_index::pname_for_attr`]).
+#[cfg(feature = "app-info-gui")]
+pub async fn pname_for_package(pkg_name: &str) -> Option<String> {
+    package_index::pname_for_attr(pkg_name).await
+}
+
 /// SPDX expression for a nixpkgs attribute's `meta.license`, or `None` when
 /// the attribute has no license metadata or cannot be evaluated (broken
 /// attribute, eval timeout — see `nix_eval::run_json`).

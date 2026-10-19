@@ -132,6 +132,28 @@ pub async fn is_ready() -> bool {
     get().await.is_some()
 }
 
+/// The `pname` of one nixpkgs attribute, read straight out of the index.
+///
+/// The counterpart of the scored `search` for an exact attribute: no scoring, no
+/// allocation beyond the returned `String`, one linear pass over the row
+/// table (O(rows), a few milliseconds on a full nixpkgs dump). Never falls
+/// back to a live `nix search` — callers on the interactive path degrade to
+/// the attribute itself instead of paying a subprocess.
+///
+/// # Parameters
+/// * `attr` - the nixpkgs attribute path, compared exactly.
+///
+/// # Returns
+/// Its `pname`, or `None` when no fresh index is servable (see `get`) or
+/// the attribute is absent from it.
+pub async fn pname_for_attr(attr: &str) -> Option<String> {
+    let index = get().await?;
+    (0..index.len())
+        .filter_map(|i| index.row(i))
+        .find(|row| row.attr == attr)
+        .map(|row| row.pname.to_string())
+}
+
 /// Build (or rebuild) the on-disk index if `get` currently has nothing to
 /// serve, then make it immediately visible to this process — no restart
 /// needed. Best-effort: errors are logged, never propagated, since the only
