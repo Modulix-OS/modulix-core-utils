@@ -97,8 +97,8 @@ impl CpuInfo {
     /// Its vendor and codename.
     ///
     /// # Errors
-    /// Any error from [`CpuInfo::cpu_info`], [`CpuInfo::cpu_constructor`] or
-    /// [`CpuInfo::cpu_codename`]; an unrecognised vendor is reported before an
+    /// Any error from the `cpuid` probe or from parsing its output:
+    /// an unrecognised vendor is reported before an
     /// unparseable codename.
     pub fn new() -> mx::Result<CpuInfo> {
         let cpu_info = Self::cpu_info()?;
