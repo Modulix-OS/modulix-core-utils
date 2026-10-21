@@ -279,8 +279,8 @@ impl DriverConfig {
     /// otherwise the `common-*` set is used.
     ///
     /// # Pre-conditions
-    /// Needs `cpuid`, `lspci` and `lsusb` on `PATH`, DMI under `sysfs`, and
-    /// network access for `nix` to evaluate `nixos-hardware` from GitHub.
+    /// Needs `cpuid` and `lspci` on `PATH`, DMI and the USB bus under `sysfs`,
+    /// and network access for `nix` to evaluate `nixos-hardware` from GitHub.
     ///
     /// # Errors
     /// Any error from the probes: notably

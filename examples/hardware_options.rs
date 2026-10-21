@@ -9,7 +9,8 @@
 //! ```
 //!
 //! `lspci` must be on `PATH` for the `generation` fields to be named; without
-//! it every other field is still detected. The nix devShell provides it.
+//! it every other field is still detected (the fingerprint reader is read from
+//! `sysfs`, so it needs nothing on `PATH`). The nix devShell provides `lspci`.
 
 use modulix_core_utils::detect_hardware::system_info::gpu_info::HardwareTopology;
 

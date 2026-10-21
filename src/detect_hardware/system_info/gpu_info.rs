@@ -859,8 +859,8 @@ impl HardwareTopology {
     /// the live machine is the target.
     ///
     /// # Post-conditions
-    /// `lspci`, `lsusb`, a DRM node, DMI and the `amdgpu` memory attributes
-    /// are all optional: each one missing costs exactly the field it feeds and
+    /// `lspci`, a DRM node, DMI, the USB bus under `sysfs` and the `amdgpu`
+    /// memory attributes are all optional: each one missing costs exactly the field it feeds and
     /// leaves the rest detected. Only an unlistable `/sys/bus/pci/devices` is
     /// fatal.
     ///

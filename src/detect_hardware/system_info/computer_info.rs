@@ -3,10 +3,12 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 use crate::error::io_error_at;
 use crate::mx;
+
+/// The `sysfs` mount point the probes read.
+const SYSFS_ROOT: &str = "/sys";
 
 /// The machine's identity plus the devices worth knowing about when picking
 /// modules.
@@ -27,6 +29,24 @@ impl ComputerInfo {
     /// Vendor strings rewritten to the spelling `nixos-hardware` uses.
     const HARDWARE_VENDOR_REPLACMENT: [(&'static str, &'static str); 2] =
         [("Hewlett-Packard", "hp"), ("Hewlett Packard", "hp")];
+
+    /// USB vendor ids whose USB devices are fingerprint readers, lowercase and
+    /// without the `0x` prefix, as `sysfs` spells `idVendor`.
+    ///
+    /// Only vendors that ship no other kind of USB device belong here, since a
+    /// match on the id alone is enough to answer `true`. Elan (`04f3`) and
+    /// Synaptics (`06cb`) are deliberately absent: both also ship USB touchpads
+    /// and keyboards, so their readers are recognised through the product
+    /// string instead.
+    const FINGERPRINT_USB_VENDORS: [&'static str; 7] = [
+        "27c6", // Goodix
+        "138a", // Validity Sensors
+        "08ff", // AuthenTec
+        "147e", // Upek
+        "1c7a", // LighTuning
+        "298d", // Next Biometrics
+        "16d1", // Suprema
+    ];
 
     /// Per-vendor product-family rewrites, for the families whose DMI spelling
     /// does not match the module name.
@@ -172,28 +192,70 @@ impl ComputerInfo {
         return false;
     }
 
-    /// Whether the machine has a fingerprint reader.
+    /// Whether the machine has a fingerprint reader, read from the live
+    /// `sysfs`.
     ///
     /// # Returns
-    /// `true` when a `lsusb` line mentions `fingerprint`, case-insensitively.
-    /// `false` when none does, and also when `lsusb` cannot be run - so a
-    /// missing `usbutils` silently reads as "no reader". Only USB readers are
-    /// seen; a reader on another bus is missed.
+    /// As in [`ComputerInfo::has_fingerprint_device_in`], over `/sys`.
     pub fn has_fingerprint_device() -> bool {
-        let output = match Command::new("lsusb").output() {
-            Ok(out) => out,
+        Self::has_fingerprint_device_in(Path::new(SYSFS_ROOT))
+    }
+
+    /// Whether a USB fingerprint reader is enumerated under a `sysfs` tree.
+    ///
+    /// Reads `sysfs` rather than running `lsusb`, so the verdict does not
+    /// depend on `usbutils` being on `PATH`: a missing `lsusb` used to read as
+    /// "no reader" on every caller that was not wrapped with it. The device
+    /// descriptor strings `sysfs` exposes are the ones `lsusb` prints.
+    ///
+    /// # Parameters
+    /// * `sysfs` - the `sysfs` mount point, so a test can hand this a fixture
+    ///   tree instead of the running kernel.
+    ///
+    /// # Returns
+    /// `true` when an entry of `{sysfs}/bus/usb/devices` either names a
+    /// fingerprint reader in its `product`/`manufacturer` string, or carries an
+    /// `idVendor` from [`ComputerInfo::FINGERPRINT_USB_VENDORS`]. `false`
+    /// otherwise, and also when that directory is absent or unreadable - an
+    /// unreadable `sysfs` is reported as "no device", not as an error. Only USB
+    /// readers are seen; a reader on another bus (SPI, I2C) is missed.
+    pub(crate) fn has_fingerprint_device_in(sysfs: &Path) -> bool {
+        let devices = match sysfs.join("bus/usb/devices").read_dir() {
+            Ok(read_dir) => read_dir,
             Err(_) => return false,
         };
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let lines: Vec<&str> = stdout.trim().split('\n').collect();
+        for entry in devices.flatten() {
+            let path = entry.path();
 
-        for line in lines {
-            if line.to_lowercase().contains("fingerprint") {
+            if ["product", "manufacturer"].iter().any(|attr| {
+                Self::read_sysfs_attr(&path.join(attr))
+                    .is_some_and(|value| value.to_lowercase().contains("fingerprint"))
+            }) {
+                return true;
+            }
+
+            if Self::read_sysfs_attr(&path.join("idVendor")).is_some_and(|vendor| {
+                Self::FINGERPRINT_USB_VENDORS.contains(&vendor.to_lowercase().as_str())
+            }) {
                 return true;
             }
         }
-        return false;
+
+        false
+    }
+
+    /// Reads one `sysfs` attribute file.
+    ///
+    /// # Parameters
+    /// * `path` - the attribute file.
+    ///
+    /// # Returns
+    /// Its contents, trimmed of the trailing newline `sysfs` emits; `None` when
+    /// the file is absent, unreadable or empty once trimmed.
+    fn read_sysfs_attr(path: &Path) -> Option<String> {
+        let value = fs::read_to_string(path).ok()?.trim().to_string();
+        if value.is_empty() { None } else { Some(value) }
     }
 
     /// Whether the machine is a laptop.
@@ -310,3 +372,7 @@ impl ComputerInfo {
         return false;
     }
 }
+
+#[cfg(test)]
+#[path = "computer_info_tests.rs"]
+mod tests;
