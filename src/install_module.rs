@@ -6,9 +6,10 @@
 //! `transaction::make_transaction` (or its read-only counterpart), so a
 //! module or plugin change is applied, committed and rebuilt (or rolled
 //! back on error) as one atomic step. `module_name` values that name a
-//! meta-module (one with `modules` children in the remote index) are
-//! expanded to themselves plus every child via
-//! [`crate::module_info::resolve_with_children`] before being applied.
+//! pack (an index row carrying a `modules` list) are expanded to the
+//! modules that list names — the pack key itself excluded, since a pack
+//! exists only in the index and owns no `mx.*` option — via
+//! [`crate::module_info::resolve_install_targets`] before being applied.
 
 use crate::{
     core::{list::List as mxList, option::Option as mxOption, transaction::file_lock::NixFile},
@@ -174,8 +175,8 @@ pub fn remove_plugin_no_transaction(
 /// * `config_dir` - root directory of the NixOS configuration.
 /// * `description` - human-readable label attached to the resulting commit.
 /// * `targets` - module names to edit, in order; typically the output of
-///   [`crate::module_info::resolve_with_children`] (a module plus its
-///   children, for a meta-module).
+///   [`crate::module_info::resolve_install_targets`] (the listed modules,
+///   for a pack).
 /// * `edit` - one of the `*_no_transaction` functions above, applied to
 ///   each target in turn.
 ///
@@ -232,15 +233,16 @@ async fn edit_modules(
     .map_err(|_| mx::ErrorKind::ThreadError)?
 }
 
-/// Enables `module_name`, and every child module if it is a meta-module, in
-/// one transaction.
+/// Enables `module_name`, or the modules a pack lists, in one transaction.
 ///
 /// # Parameters
 /// * `config_dir` - root directory of the NixOS configuration.
 /// * `module_name` - dotted module name, resolved against the remote module
-///   index via [`crate::module_info::resolve_with_children`]. If it names a
-///   meta-module, the meta-module itself and every child it lists are all
-///   enabled together.
+///   index via [`crate::module_info::resolve_install_targets`]. If it names
+///   a pack, every module that pack leads to is enabled together and the
+///   pack key itself is never written: it has no `mx.*` option of its own,
+///   and the shared config blocks of mxpkgs (`mx.programs.dev`…) enable
+///   themselves off the modules that need them.
 ///
 /// # Post-conditions
 /// See `edit_modules`: at most one commit and one `nixos-rebuild switch`
@@ -252,12 +254,12 @@ async fn edit_modules(
 /// rebuild.
 ///
 /// # Errors
-/// Whatever [`crate::module_info::resolve_with_children`] returns (e.g. an
+/// Whatever [`crate::module_info::resolve_install_targets`] returns (e.g. an
 /// `HttpError` fetching the remote index) or whatever `edit_modules`
 /// returns.
 #[cfg(feature = "install-module")]
 pub async fn install(config_dir: &str, module_name: &str) -> mx::Result<()> {
-    let targets = crate::module_info::resolve_with_children(module_name).await?;
+    let targets = crate::module_info::resolve_install_targets(module_name).await?;
     edit_modules(
         config_dir,
         format!("Install module {module_name}"),
@@ -267,13 +269,15 @@ pub async fn install(config_dir: &str, module_name: &str) -> mx::Result<()> {
     .await
 }
 
-/// Disables `module_name`, and every child module if it is a meta-module, in
-/// one transaction.
+/// Disables `module_name`, or the modules a pack lists, in one transaction.
 ///
 /// # Parameters
 /// * `config_dir` - root directory of the NixOS configuration.
 /// * `module_name` - dotted module name, resolved the same way as in
-///   [`install`].
+///   [`install`]. For a pack, `module_name` itself is appended to the
+///   resolved modules: [`install`] never writes it, but an older release
+///   did, and deleting that stale `mx.<pack>.enable = true` is what hands
+///   the option back to its own default.
 ///
 /// # Post-conditions
 /// See `edit_modules`: at most one commit and one `nixos-rebuild switch`
@@ -287,11 +291,14 @@ pub async fn install(config_dir: &str, module_name: &str) -> mx::Result<()> {
 /// rebuild.
 ///
 /// # Errors
-/// Whatever [`crate::module_info::resolve_with_children`] or
+/// Whatever [`crate::module_info::resolve_install_targets`] or
 /// `edit_modules` return.
 #[cfg(feature = "install-module")]
 pub async fn uninstall(config_dir: &str, module_name: &str) -> mx::Result<()> {
-    let targets = crate::module_info::resolve_with_children(module_name).await?;
+    let mut targets = crate::module_info::resolve_install_targets(module_name).await?;
+    if !targets.iter().any(|target| target == module_name) {
+        targets.push(module_name.to_string());
+    }
     edit_modules(
         config_dir,
         format!("Uninstall module {module_name}"),
@@ -307,7 +314,7 @@ pub async fn uninstall(config_dir: &str, module_name: &str) -> mx::Result<()> {
 /// * `config_dir` - root directory of the NixOS configuration.
 /// * `module_name` - dotted module name whose plugin list is edited; also
 ///   the module that gets enabled. Unlike [`install`], this name is used as
-///   given — no meta-module expansion.
+///   given — no pack expansion.
 /// * `plugin_namespace` - nixpkgs namespace the plugin is read from.
 /// * `plugin_name` - attribute name of the plugin inside that namespace.
 ///
@@ -487,6 +494,45 @@ pub fn list_enabled_module_names(config_dir: &str) -> mx::Result<Vec<String>> {
     )
 }
 
+/// Names of the modules currently enabled, plus every pack the
+/// configuration covers entirely.
+///
+/// [`list_enabled_module_names`] only sees what `module.nix` declares, and a
+/// pack is never declared there; a caller that reports installed state to a
+/// user (a store row for `programs.desktop`, say) needs the pack rows back,
+/// which [`crate::module_info::installed_packs`] derives from the declared
+/// modules.
+///
+/// # Parameters
+/// * `config_dir` - root directory of the NixOS configuration.
+///
+/// # Post-conditions
+/// [`list_enabled_module_names`] runs on a blocking thread. The remote
+/// module index is consulted, but through `fetch_index`'s process-wide
+/// memoization, so at most one fetch happens per daemon lifetime; a failure
+/// to obtain it is not fatal — the declared names are then returned alone,
+/// without any pack.
+///
+/// # Returns
+/// The declared module names in `module.nix` order, followed by the covered
+/// pack keys in sorted order.
+///
+/// # Errors
+/// [`mx::ErrorKind::ThreadError`] if the blocking task panics or is
+/// cancelled; otherwise whatever [`list_enabled_module_names`] returns.
+#[cfg(feature = "install-module")]
+pub async fn list_enabled_module_names_with_packs(config_dir: &str) -> mx::Result<Vec<String>> {
+    let dir = config_dir.to_string();
+    let mut names = tokio::task::spawn_blocking(move || list_enabled_module_names(&dir))
+        .await
+        .map_err(|_| mx::ErrorKind::ThreadError)??;
+    let enabled: std::collections::HashSet<String> = names.iter().cloned().collect();
+    if let Ok(packs) = crate::module_info::installed_packs(&enabled).await {
+        names.extend(packs);
+    }
+    Ok(names)
+}
+
 /// Attributes currently listed under `mx.<module_name>.plugins`, as the raw
 /// `pkgs.<namespace>.<plugin>` tokens written by `install_plugin_no_transaction`.
 ///
@@ -595,26 +641,23 @@ pub fn list_installed_plugins(config_dir: &str) -> mx::Result<Vec<(String, Strin
 /// * `config_dir` - root directory of the NixOS configuration.
 ///
 /// # Post-conditions
-/// [`list_enabled_module_names`] runs on a blocking thread. Each enabled
-/// name is then resolved with [`ModuleInfo::new`]; a name that fails to
-/// resolve (e.g. [`mx::ErrorKind::PackageNotFound`] because it was removed
-/// from the remote index since being enabled) is silently dropped instead
-/// of failing the whole listing.
+/// Names come from [`list_enabled_module_names_with_packs`], so a fully
+/// covered pack is listed too even though it is never declared in
+/// `module.nix`. Each name is then resolved with [`ModuleInfo::new`]; a name
+/// that fails to resolve (e.g. [`mx::ErrorKind::PackageNotFound`] because it
+/// was removed from the remote index since being enabled) is silently
+/// dropped instead of failing the whole listing.
 ///
 /// # Returns
 /// One [`ModuleInfo`] per locally-enabled module that is also still present
-/// in the remote index, in the order [`list_enabled_module_names`] returned
-/// them.
+/// in the remote index, in the order
+/// [`list_enabled_module_names_with_packs`] returned them.
 ///
 /// # Errors
-/// [`mx::ErrorKind::ThreadError`] if the blocking task panics or is
-/// cancelled; otherwise whatever [`list_enabled_module_names`] returns.
+/// Whatever [`list_enabled_module_names_with_packs`] returns.
 #[cfg(feature = "install-module")]
 pub async fn list_installed_modules(config_dir: &str) -> mx::Result<Vec<ModuleInfo>> {
-    let config_dir = config_dir.to_string();
-    let names = tokio::task::spawn_blocking(move || list_enabled_module_names(&config_dir))
-        .await
-        .map_err(|_| mx::ErrorKind::ThreadError)??;
+    let names = list_enabled_module_names_with_packs(config_dir).await?;
     let mut modules = Vec::with_capacity(names.len());
     for name in names {
         if let Ok(module) = ModuleInfo::new(&name).await {

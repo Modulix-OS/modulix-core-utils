@@ -49,8 +49,9 @@ type Url = str;
 ///   offline and before [`ModuleInfo::resolve`] has run. Must name an icon the
 ///   installed theme actually provides. Not localizable, hence absent from
 ///   [`IndexOverlayEntry`].
-/// * `modules` - keys of the sub-modules this entry is a meta-module for;
-///   `None`/empty for a leaf module. Walked by [`expand_targets`].
+/// * `modules` - keys of the modules this entry installs as a pack;
+///   `None`/empty for an ordinary, directly installable module. Walked by
+///   [`expand_targets`].
 #[derive(Debug, Deserialize)]
 struct IndexEntry {
     path: String,
@@ -144,8 +145,8 @@ struct ModuleMetadata {
 ///   answers even on an unresolved module.
 /// * `plugins` - nixpkgs namespace the module pulls its plugins from, copied
 ///   from the index entry's `plugins`.
-/// * `sub_modules` - keys of this module's sub-modules, copied from the
-///   index entry's `modules` (empty for a leaf module).
+/// * `sub_modules` - keys of the modules this entry installs as a pack,
+///   copied from the index entry's `modules` (empty for an ordinary module).
 /// * `flatpak` - lazily-resolved Flathub payload, populated on first
 ///   `get_flatpak`/[`ModuleInfo::resolve`] call when `flathub_id` is set;
 ///   `None` once resolved if the fetch failed.
@@ -282,9 +283,18 @@ async fn fetch_index_overlay() -> &'static HashMap<String, IndexOverlayEntry> {
         .unwrap_or(&EMPTY_INDEX_OVERLAY)
 }
 
-/// Expands a module key into itself plus every sub-module reachable through
-/// [`IndexEntry::modules`], breadth-first, so enabling a meta-module (e.g.
-/// `programs.games`) also targets its children (`programs.games.steam`, …).
+/// Expands a module key into the modules it installs, walking
+/// [`IndexEntry::modules`] breadth-first, so a pack key (e.g.
+/// `programs.games`) targets the modules it lists
+/// (`programs.games.steam`, …) and not the pack key itself.
+///
+/// A key carrying `modules` is a **pack**: an index-only row whose install
+/// means "install this list", with no option of its own to write. Where a
+/// `mx.<pack>.enable` option happens to exist in mxpkgs, it is a shared
+/// config block that the listed modules auto-enable on their own (`default =
+/// cfg.steam.enable || …`) — writing it would be redundant on install and
+/// sticky on uninstall, keeping that shared config active after the last
+/// listed module is gone.
 ///
 /// # Parameters
 /// * `index` - the module index to walk `modules` links in.
@@ -296,9 +306,10 @@ async fn fetch_index_overlay() -> &'static HashMap<String, IndexOverlayEntry> {
 /// at most once via `seen`).
 ///
 /// # Returns
-/// `name` followed by its descendants in breadth-first, first-seen order,
-/// each key appearing exactly once. `vec![name.to_string()]` when `name` is
-/// unknown to `index` or is a leaf module.
+/// Every installable module reachable from `name`, in breadth-first
+/// first-seen order and each appearing exactly once; a pack key (non-empty
+/// `modules` list) is walked but never returned. `vec![name.to_string()]`
+/// when `name` is unknown to `index` or is not a pack.
 fn expand_targets(index: &HashMap<String, IndexEntry>, name: &str) -> Vec<String> {
     let mut ordered = Vec::new();
     let mut seen = HashSet::new();
@@ -307,28 +318,78 @@ fn expand_targets(index: &HashMap<String, IndexEntry>, name: &str) -> Vec<String
         if !seen.insert(current.clone()) {
             continue;
         }
-        if let Some(children) = index.get(&current).and_then(|e| e.modules.as_ref()) {
-            queue.extend(children.iter().cloned());
+        let listed = index
+            .get(&current)
+            .and_then(|e| e.modules.as_ref())
+            .filter(|listed| !listed.is_empty());
+        match listed {
+            Some(listed) => queue.extend(listed.iter().cloned()),
+            None => ordered.push(current),
         }
-        ordered.push(current);
     }
     ordered
 }
 
-/// Resolves a module key to the full set of module keys it targets: itself
-/// plus every sub-module, for a meta-module (see `expand_targets`).
+/// Resolves a module key to the module keys to actually write: for a pack,
+/// the modules it lists rather than the pack itself (see `expand_targets`).
 ///
 /// # Parameters
 /// * `name` - the module key to resolve; need not exist in the index.
 ///
 /// # Returns
-/// `name` followed by its descendants, in breadth-first order (see
-/// `expand_targets`); just `[name]` if `name` is a leaf or unknown module.
+/// The installable modules reachable from `name`, in breadth-first order
+/// (see `expand_targets`); just `[name]` when `name` is not a pack or is
+/// unknown to the index.
 ///
 /// # Errors
 /// Whatever `fetch_index` returns.
-pub async fn resolve_with_children(name: &str) -> mx::Result<Vec<String>> {
+pub async fn resolve_install_targets(name: &str) -> mx::Result<Vec<String>> {
     Ok(expand_targets(fetch_index().await?, name))
+}
+
+/// Packs of `index` that `enabled` covers entirely, i.e. every module they
+/// list is in the set.
+///
+/// # Parameters
+/// * `index` - the module index to read `modules` lists from.
+/// * `enabled` - keys of the modules currently enabled.
+///
+/// # Returns
+/// Every pack key of `index` whose listed modules are all in `enabled`,
+/// sorted; empty when `enabled` covers no pack completely.
+fn covered_packs(index: &HashMap<String, IndexEntry>, enabled: &HashSet<String>) -> Vec<String> {
+    let mut packs: Vec<String> = index
+        .iter()
+        .filter(|(_, entry)| entry.modules.iter().flatten().next().is_some())
+        .filter_map(|(name, _)| {
+            let targets = expand_targets(index, name);
+            (!targets.is_empty() && targets.iter().all(|target| enabled.contains(target)))
+                .then(|| name.clone())
+        })
+        .collect();
+    packs.sort();
+    packs
+}
+
+/// Packs that `enabled` covers entirely (see `covered_packs`).
+///
+/// A pack exists only in the index and is never declared in `module.nix`
+/// (see `expand_targets`), so its installed state cannot be read from the
+/// configuration: it is derived from the modules the configuration does
+/// declare, which is what lets a pack row such as `programs.desktop` still
+/// report as installed.
+///
+/// # Parameters
+/// * `enabled` - keys of the modules currently enabled.
+///
+/// # Returns
+/// The covered pack keys of the remote index, sorted; empty when `enabled`
+/// covers no pack completely.
+///
+/// # Errors
+/// Whatever `fetch_index` returns.
+pub async fn installed_packs(enabled: &HashSet<String>) -> mx::Result<Vec<String>> {
+    Ok(covered_packs(fetch_index().await?, enabled))
 }
 
 /// Modules sharing a grouping key with an app (the index is already cached by
@@ -608,7 +669,7 @@ impl ModuleInfo {
     /// `flathub_id` when set; else, for a module declaring `nix_info`, that
     /// attribute's AppStream id from the curated table, else its `pname`
     /// from the package index, else the attribute itself; `None` for a
-    /// module wrapping neither (a meta-module, a service…), which therefore
+    /// module wrapping neither (a pack row, a service…), which therefore
     /// keeps grouping by its own index key.
     #[cfg(feature = "app-info-gui")]
     pub async fn group_key(&self) -> Option<String> {
@@ -953,8 +1014,8 @@ mod tests {
         }
     }
 
-    /// A small fixture index: the `programs.games` meta-module and its four
-    /// leaf children (`steam`, `lutris`, `heroic`, `umu`), used by the
+    /// A small fixture index: the `programs.games` pack and the four modules
+    /// it lists (`steam`, `lutris`, `heroic`, `umu`), used by the
     /// `expand_targets` tests.
     ///
     /// # Returns
@@ -993,12 +1054,11 @@ mod tests {
     }
 
     #[test]
-    fn meta_expands_to_itself_and_children() {
+    fn pack_expands_to_its_listed_modules() {
         let index = sample_index();
         assert_eq!(
             expand_targets(&index, "programs.games"),
             vec![
-                "programs.games",
                 "programs.games.steam",
                 "programs.games.lutris",
                 "programs.games.heroic",
@@ -1008,7 +1068,37 @@ mod tests {
     }
 
     #[test]
-    fn leaf_expands_to_itself_only() {
+    fn an_empty_module_list_is_not_a_pack() {
+        let mut index = sample_index();
+        let mut empty_pack = entry("programs/empty", &[]);
+        empty_pack.modules = Some(Vec::new());
+        index.insert("programs.empty".to_string(), empty_pack);
+        assert_eq!(
+            expand_targets(&index, "programs.empty"),
+            vec!["programs.empty"]
+        );
+    }
+
+    #[test]
+    fn nested_pack_expands_to_installable_modules_only() {
+        let mut index = sample_index();
+        index.insert(
+            "programs".to_string(),
+            entry("programs", &["programs.games"]),
+        );
+        assert_eq!(
+            expand_targets(&index, "programs"),
+            vec![
+                "programs.games.steam",
+                "programs.games.lutris",
+                "programs.games.heroic",
+                "programs.games.umu",
+            ]
+        );
+    }
+
+    #[test]
+    fn plain_module_expands_to_itself_only() {
         let index = sample_index();
         assert_eq!(
             expand_targets(&index, "programs.games.steam"),
@@ -1048,6 +1138,52 @@ mod tests {
     }
 
     #[test]
+    fn a_pack_is_covered_only_once_every_listed_module_is_enabled() {
+        let index = sample_index();
+        let partial: HashSet<String> = ["programs.games.steam".to_string()].into_iter().collect();
+        assert!(covered_packs(&index, &partial).is_empty());
+
+        let full: HashSet<String> = [
+            "programs.games.steam",
+            "programs.games.lutris",
+            "programs.games.heroic",
+            "programs.games.umu",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(covered_packs(&index, &full), vec!["programs.games"]);
+    }
+
+    #[test]
+    fn nested_packs_are_both_covered() {
+        let mut index = sample_index();
+        index.insert(
+            "programs".to_string(),
+            entry("programs", &["programs.games"]),
+        );
+        let full: HashSet<String> = [
+            "programs.games.steam",
+            "programs.games.lutris",
+            "programs.games.heroic",
+            "programs.games.umu",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            covered_packs(&index, &full),
+            vec!["programs", "programs.games"]
+        );
+    }
+
+    #[test]
+    fn no_enabled_module_covers_no_pack() {
+        let index = sample_index();
+        assert!(covered_packs(&index, &HashSet::new()).is_empty());
+    }
+
+    #[test]
     fn sibling_mxpkgs_index_matches_schema() {
         use std::path::Path;
 
@@ -1067,7 +1203,16 @@ mod tests {
             for child in entry.modules.iter().flatten() {
                 assert!(
                     index.contains_key(child),
-                    "{key}: meta sub-module `{child}` is absent from the index"
+                    "{key}: pack-listed module `{child}` is absent from the index"
+                );
+            }
+            if entry.modules.iter().flatten().next().is_some() {
+                let targets = expand_targets(&index, key);
+                assert!(
+                    !targets.is_empty() && !targets.contains(key),
+                    "{key}: a pack must expand to the modules it lists, never to \
+                     itself — a pack has no `mx.{key}.enable` of its own to write; \
+                     got {targets:?}"
                 );
             }
             if entry.flathub_id.is_none() {
