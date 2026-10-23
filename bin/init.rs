@@ -12,6 +12,14 @@
 //! onto. `pciutils` must be on `PATH` for each GPU's `generation` to be named; without it every
 //! other detected value is still written.
 //!
+//! `boot.nix` takes no flag either, and is written only when there is something to put in it:
+//! every EFI system partition of the machine is scanned for the boot loaders of the other
+//! operating systems installed on it, and each one found becomes a Limine chainload entry
+//! (`mx.bootloader.extraEntries`), which also raises the boot menu timeout to 5 seconds. The
+//! scan needs `lsblk` on `PATH` and root — the partitions it does not find mounted it mounts
+//! read-only itself. A scan that fails is reported on stderr and the install carries on without
+//! the entries.
+//!
 //! # Usage
 //!
 //! `mx-init [OPTIONS]`. Every option is optional; each falls back to the default listed below

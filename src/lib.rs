@@ -18,6 +18,9 @@ pub mod package_info;
 #[cfg(feature = "package-info")]
 pub mod package_index;
 
+#[cfg(feature = "boot-config")]
+pub mod boot_config;
+
 #[cfg(feature = "config-store")]
 mod config_store;
 
@@ -43,6 +46,9 @@ pub mod desktop_environment;
 
 #[cfg(feature = "detect-hardware")]
 pub mod detect_hardware;
+
+#[cfg(feature = "detect-os")]
+pub mod detect_os;
 
 #[cfg(feature = "filesystem")]
 pub mod filesystem;

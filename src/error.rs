@@ -40,6 +40,8 @@ use std::{fmt, io, result, string};
 /// * `RequestSenderError` - the shared HTTP client could not be built;
 ///   payload is the reason.
 /// * `NixCommandError` - a `nix` invocation failed; payload is its stderr.
+/// * `CommandError` - a non-`nix` external command (`lsblk`, …) could not be
+///   run or exited non-zero; payload names it and carries the reason.
 /// * `InvalidArgument` - the caller passed an unusable argument; payload is
 ///   the explanation.
 /// * `FromUtf8Error` - a command's output is not valid UTF-8.
@@ -74,6 +76,7 @@ pub enum ErrorKind {
     BuildError(String),
     RequestSenderError(String),
     NixCommandError(String),
+    CommandError(String),
     InvalidArgument(String),
     FromUtf8Error(string::FromUtf8Error),
     IOError(io::Error),
@@ -136,6 +139,7 @@ impl fmt::Display for ErrorKind {
                 }
                 Self::BuildError(s) => s,
                 Self::NixCommandError(s) => s.as_str(),
+                Self::CommandError(s) => s.as_str(),
                 Self::FromUtf8Error(e) => {
                     s = e.to_string();
                     s.as_str()

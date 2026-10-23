@@ -32,10 +32,11 @@ use crate::core::transaction::transaction::LOCK_SKIP_REBUILD_FILE;
 use crate::core::transaction::transaction::TransactionPermission;
 use crate::core::transaction::transaction::{BuildCommand, UpdateInput};
 use crate::detect_hardware::system_info::gpu_info::HardwareTopology;
+use crate::detect_os::OtherOs;
 use crate::error::io_message;
 use crate::{
-    CONFIG_DIRECTORY, filesystem, hardware_config, install_module, install_package, locale, mx,
-    user,
+    CONFIG_DIRECTORY, boot_config, detect_os, filesystem, hardware_config, install_module,
+    install_package, locale, mx, user,
 };
 use std::path::{Component, Path};
 use std::{fs, process};
@@ -503,18 +504,24 @@ fn config_path(params: &InitParams) -> String {
 /// buffer with this template, which would drop the injection. [`init`] always
 /// creates `hardware.nix`, `locale.nix` and `users.nix`, so listing them is
 /// exact; it creates `package.nix` and `module.nix` only for a non-empty
-/// `packages`/`modules`, which is exactly when they are listed here.
+/// `packages`/`modules`, and `boot.nix` only when another operating system was
+/// detected, which is exactly when they are listed here.
 ///
 /// # Parameters
 /// * `p` - init parameters; `hostname` and `desktop` are interpolated into
-///   the template, and `packages`/`modules` decide the two optional imports.
+///   the template, and `packages`/`modules` decide two of the optional
+///   imports.
+/// * `with_boot_entries` - whether the detection found another operating
+///   system, i.e. whether `boot.nix` is written at all. Passed in rather than
+///   read off `p`, since the detection is not an init parameter.
 ///
 /// # Returns
 /// The full `configuration.nix` source, importing
 /// `hardware-configuration.nix`, `hardware.nix`, `fstab.nix`, `locale.nix`,
-/// `users.nix` and — when their list is non-empty — `package.nix` and
-/// `module.nix`, and setting `networking.hostName` and `mx.desktop`.
-fn configuration_nix(p: &InitParams) -> String {
+/// `users.nix` and — when there is something to put in them — `package.nix`,
+/// `module.nix` and `boot.nix`, and setting `networking.hostName` and
+/// `mx.desktop`.
+fn configuration_nix(p: &InitParams, with_boot_entries: bool) -> String {
     let mut extra = String::new();
     if !p.packages.is_empty() {
         extra.push_str("    ./");
@@ -524,6 +531,11 @@ fn configuration_nix(p: &InitParams) -> String {
     if !p.modules.is_empty() {
         extra.push_str("    ./");
         extra.push_str(install_module::FILE_MODULE_PATH);
+        extra.push('\n');
+    }
+    if with_boot_entries {
+        extra.push_str("    ./");
+        extra.push_str(boot_config::FILE_BOOT_PATH);
         extra.push('\n');
     }
     format!(
@@ -561,6 +573,12 @@ fn configuration_nix(p: &InitParams) -> String {
 /// files a user keeps editing after the install, through transactions of
 /// their own, and `NixFile::create_file`/`commit` already seal them. Adding
 /// them here would seal nothing extra.
+///
+/// `boot.nix` is in the list, unlike those two, because it is generated from
+/// what the EFI partitions hold, exactly like `hardware.nix`: it is rewritten
+/// by a redetection, never hand-maintained. [`seal_base_files`] skips an entry
+/// that does not exist, so listing it costs nothing on a machine where no
+/// other operating system was found.
 const BASE_FILES: &[&str] = &[
     "flake.nix",
     "flake.lock",
@@ -570,6 +588,7 @@ const BASE_FILES: &[&str] = &[
     "fstab.nix",
     locale::LOCALE_FILE_PATH,
     user::USER_FILE_PATH,
+    boot_config::FILE_BOOT_PATH,
 ];
 
 /// Keeps git from ever seeing the build artifacts that may land in the config
@@ -752,6 +771,42 @@ fn validate_config_path(path_config: &str) -> mx::Result<()> {
 /// Any error from `filesystem::set_luks_container_no_transaction`,
 /// `filesystem::set_luks_tpm2_no_transaction` or
 /// `filesystem::set_resume_device_no_transaction`.
+/// Scans the machine's EFI partitions for the other operating systems
+/// installed on it.
+///
+/// Never fails: a boot menu entry is a convenience, and refusing to install a
+/// system because `lsblk` is missing or an EFI partition would not mount would
+/// be out of all proportion. A failed scan is reported on stderr and treated
+/// as "found nothing", which only costs the extra entries.
+///
+/// # Parameters
+/// * `params` - init parameters; only `root` is read, to locate the EFI
+///   partition of the system being installed.
+///
+/// # Pre-conditions
+/// Called before the config directory is wiped, like the hardware probe: it
+/// reads nothing under it. The target's EFI partition is expected mounted at
+/// `<root>/boot`, which is where the installer puts it.
+///
+/// # Post-conditions
+/// Nothing is written anywhere; no partition is left mounted.
+///
+/// # Returns
+/// The entries to declare in `boot.nix`, empty when nothing else is installed
+/// or when the scan could not run.
+fn detect_other_os(params: &InitParams) -> Vec<OtherOs> {
+    let root = params.root.trim_end_matches('/');
+    let esp_mount = format!("{root}/boot");
+
+    match detect_os::detect(&esp_mount) {
+        Ok(entries) => entries,
+        Err(e) => {
+            eprintln!("init: no boot entry for the other operating systems: {e}");
+            Vec::new()
+        }
+    }
+}
+
 fn write_fstab_extras(fstab: &mut NixFile, params: &InitParams) -> mx::Result<()> {
     for luks in &params.luks {
         if let Some(container) = &luks.container {
@@ -903,6 +958,7 @@ pub fn init(params: &InitParams) -> mx::Result<()> {
     // config directory, so failing here must leave the existing configuration
     // untouched rather than wipe it first.
     let hardware = HardwareTopology::detect()?;
+    let other_os = detect_other_os(params);
 
     let path_config = config_path(params);
     validate_config_path(&path_config)?;
@@ -919,7 +975,7 @@ pub fn init(params: &InitParams) -> mx::Result<()> {
     init_git_exclude(repo_path)?;
 
     let fstab = filesystem::fstab_module(&params.root)?;
-    let config = configuration_nix(params);
+    let config = configuration_nix(params, !other_os.is_empty());
 
     let _skip_rebuild = if params.debug {
         None
@@ -957,6 +1013,9 @@ pub fn init(params: &InitParams) -> mx::Result<()> {
     }
     if !params.modules.is_empty() {
         files.push(install_module::FILE_MODULE_PATH);
+    }
+    if !other_os.is_empty() {
+        files.push(boot_config::FILE_BOOT_PATH);
     }
     for f in files {
         tx.add_file(f)?;
@@ -1089,6 +1148,21 @@ pub fn init(params: &InitParams) -> mx::Result<()> {
         }
     }
 
+    if !other_os.is_empty() {
+        match tx.get_file_mut(boot_config::FILE_BOOT_PATH) {
+            Ok(file) => {
+                if let Err(e) = boot_config::write_boot_entries_no_transaction(file, &other_os) {
+                    tx.rollback()?;
+                    return Err(e);
+                }
+            }
+            Err(e) => {
+                tx.rollback()?;
+                return Err(e);
+            }
+        }
+    }
+
     // After the content loop above, which replaces `fstab.nix` wholesale with
     // the generator's output — the entries these options attach to are in
     // there.
@@ -1116,7 +1190,7 @@ pub fn init(params: &InitParams) -> mx::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BASE_FILES, Desktop, InitParams, configuration_nix, hardware_config};
+    use super::{BASE_FILES, Desktop, InitParams, boot_config, configuration_nix, hardware_config};
 
     /// `InitParams` with every optional list empty, as a starting point the
     /// tests below only change one field of.
@@ -1143,7 +1217,7 @@ mod tests {
 
     #[test]
     fn empty_lists_import_neither_optional_file() {
-        let rendered = configuration_nix(&params());
+        let rendered = configuration_nix(&params(), false);
         assert!(!rendered.contains("./package.nix"));
         assert!(!rendered.contains("./module.nix"));
         assert!(rendered.contains("./users.nix"));
@@ -1153,7 +1227,7 @@ mod tests {
     /// and it has to land inside the `imports` list, not after it.
     #[test]
     fn the_hardware_options_file_is_always_imported() {
-        let rendered = configuration_nix(&params());
+        let rendered = configuration_nix(&params(), false);
         let import = format!("./{}", hardware_config::FILE_HARDWARE_PATH);
         let position = rendered.find(&import).expect("import missing");
         let closing = rendered.find("];").expect("imports list unterminated");
@@ -1168,11 +1242,32 @@ mod tests {
         assert!(BASE_FILES.contains(&hardware_config::FILE_HARDWARE_PATH));
     }
 
+    /// `boot.nix` only exists when the scan found another system, so its
+    /// import must follow the detection and not the parameters.
+    #[test]
+    fn a_detected_system_adds_the_boot_import() {
+        let import = format!("./{}", boot_config::FILE_BOOT_PATH);
+
+        assert!(!configuration_nix(&params(), false).contains(&import));
+
+        let rendered = configuration_nix(&params(), true);
+        let position = rendered.find(&import).expect("import missing");
+        let closing = rendered.find("];").expect("imports list unterminated");
+        assert!(position < closing, "outside the imports list:\n{rendered}");
+    }
+
+    /// Same rule as `hardware.nix`: a generated file that is imported must be
+    /// sealed, or the configuration is editable outside a transaction.
+    #[test]
+    fn the_boot_entries_file_is_sealed() {
+        assert!(BASE_FILES.contains(&boot_config::FILE_BOOT_PATH));
+    }
+
     #[test]
     fn a_package_list_adds_its_import() {
         let mut p = params();
         p.packages = vec!["firefox".to_string()];
-        let rendered = configuration_nix(&p);
+        let rendered = configuration_nix(&p, false);
         assert!(rendered.contains("./package.nix"));
         assert!(!rendered.contains("./module.nix"));
     }
@@ -1181,7 +1276,7 @@ mod tests {
     fn a_module_list_adds_its_import() {
         let mut p = params();
         p.modules = vec!["services.flatpak".to_string()];
-        let rendered = configuration_nix(&p);
+        let rendered = configuration_nix(&p, false);
         assert!(rendered.contains("./module.nix"));
         assert!(!rendered.contains("./package.nix"));
     }
@@ -1191,7 +1286,7 @@ mod tests {
         let mut p = params();
         p.packages = vec!["firefox".to_string()];
         p.modules = vec!["services.flatpak".to_string()];
-        let rendered = configuration_nix(&p);
+        let rendered = configuration_nix(&p, false);
 
         let close = rendered.find("];").expect("the imports list must close");
         assert!(rendered.find("./package.nix").unwrap() < close);
