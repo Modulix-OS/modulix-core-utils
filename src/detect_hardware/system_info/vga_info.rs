@@ -76,6 +76,20 @@ impl VgaInfo {
         })
     }
 
+    /// Builds a [`VgaInfo`] from canned descriptions, for tests.
+    ///
+    /// # Parameters
+    /// * `vga_device` - the descriptions `lspci` would have printed, already
+    ///   trimmed the way [`VgaInfo::get_vga_devices`] trims them.
+    ///
+    /// # Returns
+    /// A [`VgaInfo`] holding exactly those descriptions, without running
+    /// `lspci`.
+    #[cfg(test)]
+    pub(crate) fn from_descriptions(vga_device: Vec<String>) -> VgaInfo {
+        VgaInfo { vga_device }
+    }
+
     /// Whether the machine has an NVIDIA GPU.
     ///
     /// # Returns
@@ -86,8 +100,16 @@ impl VgaInfo {
             .any(|description| description.to_lowercase().contains("nvidia"))
     }
 
-    /// Whether the NVIDIA GPU is a mobile one, which is what decides the
-    /// hybrid-graphics (Optimus) modules.
+    /// Whether an NVIDIA GPU *names itself* a mobile one.
+    ///
+    /// This reads the `lspci` description and nothing else, so it is a hint,
+    /// not a verdict: a desktop card whose marketing name happens to match
+    /// says `true`, and a mobile card whose description omits the keyword says
+    /// `false`. Callers deciding on the hybrid-graphics (Optimus) modules must
+    /// corroborate it with the real chassis and the presence of an integrated
+    /// GPU - see `DriverConfig::get_common_hardware_module` - because enabling
+    /// PRIME without bus ids makes the generated configuration fail to
+    /// evaluate.
     ///
     /// # Returns
     /// `true` when an NVIDIA description says `laptop` or `mobile`, or carries

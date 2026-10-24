@@ -26,6 +26,32 @@ pub struct ComputerInfo {
     disk: Vec<String>,
 }
 impl ComputerInfo {
+    /// Builds a [`ComputerInfo`] from canned DMI values, for tests.
+    ///
+    /// # Parameters
+    /// * `vendor` - the DMI system vendor, already lowercased and normalised.
+    /// * `product_family` - the DMI product family, already lowercased and
+    ///   normalised.
+    /// * `product_name` - the DMI product name.
+    /// * `disk` - the block-device names.
+    ///
+    /// # Returns
+    /// A [`ComputerInfo`] holding exactly those values, without reading DMI.
+    #[cfg(test)]
+    pub(crate) fn from_parts(
+        vendor: &str,
+        product_family: &str,
+        product_name: &str,
+        disk: Vec<String>,
+    ) -> ComputerInfo {
+        ComputerInfo {
+            vendor: vendor.to_string(),
+            product_family: product_family.to_string(),
+            product_name: product_name.to_string(),
+            disk,
+        }
+    }
+
     /// Vendor strings rewritten to the spelling `nixos-hardware` uses.
     const HARDWARE_VENDOR_REPLACMENT: [(&'static str, &'static str); 2] =
         [("Hewlett-Packard", "hp"), ("Hewlett Packard", "hp")];

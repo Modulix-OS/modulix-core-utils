@@ -14,6 +14,7 @@ use crate::mx;
 use super::hardware_driver::HardwareModule;
 use super::system_info::computer_info::ComputerInfo;
 use super::system_info::cpu_info::CpuInfo;
+use super::system_info::gpu_info::machine_is_laptop;
 use super::system_info::vga_info::VgaInfo;
 
 /// The hardware-driven part of a configuration: which modules to import and
@@ -230,6 +231,9 @@ impl DriverConfig {
     /// * `vga_info` - the detected GPUs, which decide the `common-gpu-*` modules.
     /// * `computer_info` - the detected machine, which decides the `common-pc-*`
     ///   ones.
+    /// * `is_laptop` - whether the machine is a portable one, as
+    ///   [`machine_is_laptop`] reports it; passed in rather than probed so a
+    ///   test can pick it.
     ///
     /// # Returns
     /// The module names, possibly several: one per GPU vendor present, plus
@@ -240,12 +244,27 @@ impl DriverConfig {
     /// evaluation failure of the rebuilt configuration. GPU vendors other than
     /// NVIDIA are matched on the description text, so an NVIDIA card in an Intel
     /// machine can pull `common-gpu-intel` in through the integrated GPU.
-    fn get_common_hardware_module(vga_info: &VgaInfo, computer_info: &ComputerInfo) -> Vec<String> {
+    ///
+    /// `common-gpu-nvidia-prime` turns PRIME offload on, which NixOS rejects
+    /// without bus ids, so it is asked for only when the three conditions
+    /// [`crate::detect_hardware::system_info::gpu_info::HardwareTopology::prime_bus_ids`]
+    /// also requires hold: a portable chassis, an NVIDIA card naming itself
+    /// mobile, and an Intel or AMD integrated GPU to pair it with. A desktop
+    /// never gets the module, whatever its card is called.
+    fn get_common_hardware_module(
+        vga_info: &VgaInfo,
+        computer_info: &ComputerInfo,
+        is_laptop: bool,
+    ) -> Vec<String> {
         let mut all_module: Vec<String> = vec![];
 
         if vga_info.has_nvidia_device() {
             all_module.push(String::from("common-gpu-nvidia"));
-            if vga_info.has_nvidia_laptop() {
+            if vga_info.has_nvidia_laptop()
+                && is_laptop
+                && (vga_info.match_archtecture_codename("intel")
+                    || vga_info.match_archtecture_codename("amd"))
+            {
                 all_module.push(String::from("common-gpu-nvidia-prime"));
             }
         }
@@ -258,7 +277,7 @@ impl DriverConfig {
             all_module.push(String::from("common-gpu-intel"));
         }
 
-        if ComputerInfo::is_laptop() {
+        if is_laptop {
             all_module.push(String::from("common-pc-laptop"));
         } else {
             all_module.push(String::from("common-pc"));
@@ -302,7 +321,9 @@ impl DriverConfig {
                 &vga_info,
             ) {
                 Some(s) => vec![s.to_string()],
-                None => Self::get_common_hardware_module(&vga_info, &computer_info),
+                None => {
+                    Self::get_common_hardware_module(&vga_info, &computer_info, machine_is_laptop())
+                }
             },
             fingerprint: ComputerInfo::has_fingerprint_device(),
             iio_sensor: ComputerInfo::has_iio_device(),
@@ -336,5 +357,67 @@ impl DriverConfig {
     /// rotation and light sensor need a service.
     pub fn get_iio_sensor(&self) -> bool {
         self.iio_sensor
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A machine with no disk and no DMI match, so only the GPU and chassis
+    /// decide the modules.
+    fn computer() -> ComputerInfo {
+        ComputerInfo::from_parts("", "", "", vec![])
+    }
+
+    #[test]
+    fn desktop_nvidia_does_not_get_the_prime_module() {
+        let vga = VgaInfo::from_descriptions(vec![String::from(
+            "VGA compatible controller: NVIDIA Corporation GP107 [GeForce GTX 1050 Ti] (rev a1)",
+        )]);
+
+        let modules = DriverConfig::get_common_hardware_module(&vga, &computer(), false);
+
+        assert!(modules.contains(&String::from("common-gpu-nvidia")));
+        assert!(!modules.contains(&String::from("common-gpu-nvidia-prime")));
+        assert!(modules.contains(&String::from("common-pc")));
+    }
+
+    #[test]
+    fn a_mobile_named_card_on_a_desktop_chassis_does_not_get_the_prime_module() {
+        let vga = VgaInfo::from_descriptions(vec![String::from(
+            "VGA compatible controller: NVIDIA Corporation GA107M [GeForce RTX 3050 Mobile]",
+        )]);
+
+        let modules = DriverConfig::get_common_hardware_module(&vga, &computer(), false);
+
+        assert!(!modules.contains(&String::from("common-gpu-nvidia-prime")));
+    }
+
+    #[test]
+    fn a_laptop_without_an_integrated_gpu_does_not_get_the_prime_module() {
+        let vga = VgaInfo::from_descriptions(vec![String::from(
+            "3D controller: NVIDIA Corporation GA107M [GeForce RTX 3050 Mobile]",
+        )]);
+
+        let modules = DriverConfig::get_common_hardware_module(&vga, &computer(), true);
+
+        assert!(!modules.contains(&String::from("common-gpu-nvidia-prime")));
+        assert!(modules.contains(&String::from("common-pc-laptop")));
+    }
+
+    #[test]
+    fn a_hybrid_laptop_gets_the_prime_module() {
+        let vga = VgaInfo::from_descriptions(vec![
+            String::from(
+                "VGA compatible controller: Intel Corporation Alder Lake-P GT2 [Iris Xe Graphics]",
+            ),
+            String::from("3D controller: NVIDIA Corporation GA107M [GeForce RTX 3050 Mobile]"),
+        ]);
+
+        let modules = DriverConfig::get_common_hardware_module(&vga, &computer(), true);
+
+        assert!(modules.contains(&String::from("common-gpu-nvidia-prime")));
+        assert!(modules.contains(&String::from("common-gpu-intel")));
     }
 }

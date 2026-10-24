@@ -847,6 +847,21 @@ fn has_system_battery(sysfs: &Path) -> bool {
     false
 }
 
+/// Tells whether the running machine is a laptop.
+///
+/// # Returns
+/// [`detect_laptop`] applied to the live `sysfs`, i.e. the DMI chassis type
+/// when it is conclusive and the presence of a system battery otherwise. This
+/// is the same verdict [`HardwareTopology::detect`] stores in its `laptop`
+/// field, exposed on its own for the callers that need the fact without a
+/// full GPU probe.
+///
+/// # Pre-conditions
+/// Reads the live machine under `/sys`, never an installation root.
+pub fn machine_is_laptop() -> bool {
+    detect_laptop(Path::new(SYSFS_ROOT))
+}
+
 impl HardwareTopology {
     /// Probes the running machine.
     ///
