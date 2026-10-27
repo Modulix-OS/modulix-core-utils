@@ -10,7 +10,7 @@ use std::fs;
 
 use tempfile::TempDir;
 
-use super::{FILE_HARDWARE_PATH, write_hardware_options_no_transaction};
+use super::{HARDWARE_OPTION_PATH, write_hardware_options_no_transaction};
 use crate::core::option::Option as mxOption;
 use crate::core::transaction::Transaction;
 use crate::core::transaction::file_lock::NixFile;
@@ -26,7 +26,7 @@ const EMPTY: &str = "{config, lib, pkgs, ...}:\n{\n}\n";
 fn with_hardware(seed: &str, edit: impl FnOnce(&mut NixFile)) -> String {
     let dir = TempDir::new().expect("failed to create temporary directory");
     git2::Repository::init(dir.path()).expect("git init failed");
-    fs::write(dir.path().join(FILE_HARDWARE_PATH), seed).expect("failed to write hardware.nix");
+    fs::write(dir.path().join(HARDWARE_OPTION_PATH), seed).expect("failed to write hardware.nix");
     fs::write(
         dir.path().join("configuration.nix"),
         "{config, lib, pkgs, ...}:\n{\n  imports = [];\n}\n",
@@ -41,10 +41,10 @@ fn with_hardware(seed: &str, edit: impl FnOnce(&mut NixFile)) -> String {
         TransactionPermission::Writtable,
     )
     .expect("Transaction::new failed");
-    tx.add_file(FILE_HARDWARE_PATH).expect("add_file failed");
+    tx.add_file(HARDWARE_OPTION_PATH).expect("add_file failed");
     tx.begin().expect("begin failed");
 
-    let file = tx.get_file_mut(FILE_HARDWARE_PATH).expect("get_file_mut");
+    let file = tx.get_file_mut(HARDWARE_OPTION_PATH).expect("get_file_mut");
     edit(file);
     let content = file
         .get_file_content()

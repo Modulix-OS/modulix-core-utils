@@ -554,7 +554,7 @@ fn configuration_nix(p: &InitParams, with_boot_entries: bool) -> String {
   mx.desktop = "{desktop}";
 }}
 "#,
-        hardware = hardware_config::FILE_HARDWARE_PATH,
+        hardware = hardware_config::HARDWARE_OPTION_PATH,
         extra = extra,
         hostname = p.hostname,
         desktop = p.desktop.as_str(),
@@ -584,7 +584,7 @@ const BASE_FILES: &[&str] = &[
     "flake.lock",
     "configuration.nix",
     "hardware-configuration.nix",
-    hardware_config::FILE_HARDWARE_PATH,
+    hardware_config::HARDWARE_OPTION_PATH,
     "fstab.nix",
     locale::LOCALE_FILE_PATH,
     user::USER_FILE_PATH,
@@ -856,7 +856,7 @@ fn write_fstab_extras(fstab: &mut NixFile, params: &InitParams) -> mx::Result<()
 ///    which variant is named here).
 /// 5. A single `Transaction` (`TransactionPermission::Writtable`) is opened
 ///    over `flake.nix`, `hardware-configuration.nix`,
-///    `hardware_config::FILE_HARDWARE_PATH`, `fstab.nix`,
+///    `hardware_config::HARDWARE_OPTION_PATH`, `fstab.nix`,
 ///    `locale::LOCALE_FILE_PATH`, `user::USER_FILE_PATH` and — only when the
 ///    matching list is non-empty — `install_package::FILE_PACKAGE_PATH` and
 ///    `install_module::FILE_MODULE_PATH`
@@ -996,14 +996,10 @@ pub fn init(params: &InitParams) -> mx::Result<()> {
         TransactionPermission::Writtable,
     )?;
 
-    /// Name of the hardware config file registered in the transaction below,
-    /// factored out so [`Transaction::add_file`] and
-    /// [`Transaction::get_file_mut`] stay in sync.
-    const HARDWARE_FILE: &str = "hardware-configuration.nix";
     let mut files = vec![
         "flake.nix",
-        HARDWARE_FILE,
-        hardware_config::FILE_HARDWARE_PATH,
+        hardware_config::HARDWARE_CONFIG_PATH,
+        hardware_config::HARDWARE_OPTION_PATH,
         "fstab.nix",
         locale::LOCALE_FILE_PATH,
         user::USER_FILE_PATH,
@@ -1043,7 +1039,7 @@ pub fn init(params: &InitParams) -> mx::Result<()> {
         }
     }
 
-    match tx.get_file_mut(HARDWARE_FILE) {
+    match tx.get_file_mut(hardware_config::HARDWARE_CONFIG_PATH) {
         Ok(file) => {
             if let Err(e) =
                 hardware_config::write_hardware_config_no_transaction(&params.root, file)
@@ -1058,7 +1054,7 @@ pub fn init(params: &InitParams) -> mx::Result<()> {
         }
     }
 
-    match tx.get_file_mut(hardware_config::FILE_HARDWARE_PATH) {
+    match tx.get_file_mut(hardware_config::HARDWARE_OPTION_PATH) {
         Ok(file) => {
             if let Err(e) = hardware_config::write_hardware_options_no_transaction(file, &hardware)
             {
@@ -1228,7 +1224,7 @@ mod tests {
     #[test]
     fn the_hardware_options_file_is_always_imported() {
         let rendered = configuration_nix(&params(), false);
-        let import = format!("./{}", hardware_config::FILE_HARDWARE_PATH);
+        let import = format!("./{}", hardware_config::HARDWARE_OPTION_PATH);
         let position = rendered.find(&import).expect("import missing");
         let closing = rendered.find("];").expect("imports list unterminated");
         assert!(position < closing, "outside the imports list:\n{rendered}");
@@ -1239,7 +1235,7 @@ mod tests {
     /// transaction.
     #[test]
     fn the_hardware_options_file_is_sealed() {
-        assert!(BASE_FILES.contains(&hardware_config::FILE_HARDWARE_PATH));
+        assert!(BASE_FILES.contains(&hardware_config::HARDWARE_OPTION_PATH));
     }
 
     /// `boot.nix` only exists when the scan found another system, so its

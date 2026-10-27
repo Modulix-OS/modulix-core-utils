@@ -12,9 +12,9 @@ use crate::{
         option::Option as mxOption,
         param::NixParam,
         transaction::{
-            self,
+            self, Transaction,
             file_lock::NixFile,
-            transaction::{BuildCommand, UpdateInput},
+            transaction::{BuildCommand, TransactionPermission, UpdateInput},
         },
     },
     detect_hardware::{
@@ -27,7 +27,7 @@ use crate::{
 
 /// Configuration file, relative to the config directory, holding the generated
 /// hardware configuration.
-const HARDWARE_CONFIG_PATH: &str = "hardware-configuration.nix";
+pub const HARDWARE_CONFIG_PATH: &str = "hardware-configuration.nix";
 
 /// Regenerates `hardware-configuration.nix` in an already-open file.
 ///
@@ -109,7 +109,7 @@ pub fn write_hardware_config_no_transaction(
 /// On success the regenerated hardware configuration is part of the active
 /// generation; on error the previous file is restored by the rollback. Blocks
 /// for the whole `nixos-rebuild switch`.
-pub fn write_hardware(root_path: &str, config_dir: &str) -> mx::Result<()> {
+pub fn write_hardware_config(root_path: &str, config_dir: &str) -> mx::Result<()> {
     transaction::make_transaction(
         "Reset hardware config",
         config_dir,
@@ -125,7 +125,7 @@ pub fn write_hardware(root_path: &str, config_dir: &str) -> mx::Result<()> {
 ///
 /// Public because [`crate::init`] has to name it in `configuration.nix`'s
 /// `imports` and in its sealing list, like `crate::locale::LOCALE_FILE_PATH`.
-pub const FILE_HARDWARE_PATH: &str = "hardware.nix";
+pub const HARDWARE_OPTION_PATH: &str = "hardware.nix";
 
 /// Option paths below which this module owns every declaration.
 const SLOT_DEDICATED: &str = "mx.hardware.gpu.dedicated";
@@ -319,7 +319,7 @@ pub fn write_hardware_options(config_dir: &str, topology: &HardwareTopology) -> 
     transaction::make_transaction(
         "Update detected hardware options",
         config_dir,
-        FILE_HARDWARE_PATH,
+        HARDWARE_OPTION_PATH,
         BuildCommand::Switch,
         UpdateInput::Keep,
         |file| write_hardware_options_no_transaction(file, topology),
@@ -349,6 +349,46 @@ pub fn write_hardware_options(config_dir: &str, topology: &HardwareTopology) -> 
 /// [`write_hardware_options`].
 pub fn redetect_hardware_options(config_dir: &str) -> mx::Result<()> {
     write_hardware_options(config_dir, &HardwareTopology::detect()?)
+}
+
+pub fn redetect_hardware_config(config_dir: &str) -> mx::Result<()> {
+    write_hardware_config("/", config_dir)
+}
+
+fn write_all(transaction: &mut Transaction) -> mx::Result<()> {
+    let topology = HardwareTopology::detect()?;
+
+    let config_file = transaction.get_file_mut(HARDWARE_CONFIG_PATH)?;
+    write_hardware_config_no_transaction("/", config_file)?;
+
+    let option_file = transaction.get_file_mut(HARDWARE_OPTION_PATH)?;
+    write_hardware_options_no_transaction(option_file, &topology)?;
+
+    Ok(())
+}
+
+pub fn redetect_all_hardware(config_dir: &str) -> mx::Result<()> {
+    let mut transaction = Transaction::new(
+        config_dir,
+        "Redetect all hardware settings",
+        BuildCommand::Switch,
+        TransactionPermission::Writtable,
+    )?;
+    transaction.add_file(HARDWARE_CONFIG_PATH)?;
+    transaction.add_file(HARDWARE_OPTION_PATH)?;
+    transaction.begin()?;
+
+    if let Err(e) = write_all(&mut transaction) {
+        let _ = transaction.rollback();
+        return Err(e);
+    }
+    match transaction.commit(UpdateInput::Keep) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            transaction.rollback()?;
+            Err(e)
+        }
+    }
 }
 
 #[cfg(test)]
