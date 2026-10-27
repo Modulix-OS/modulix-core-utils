@@ -107,4 +107,16 @@ impl HardwareModule {
     pub fn get_common_module(&self) -> &[String] {
         &self.module_common
     }
+
+    #[cfg(test)]
+    pub(crate) fn from_names(names: &[&str]) -> HardwareModule {
+        let (module_common, module_computer): (Vec<String>, Vec<String>) = names
+            .iter()
+            .map(|n| n.to_string())
+            .partition(|n| n.starts_with("common-"));
+        HardwareModule {
+            module_computer,
+            module_common,
+        }
+    }
 }

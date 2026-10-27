@@ -16,6 +16,7 @@ use super::system_info::computer_info::ComputerInfo;
 use super::system_info::cpu_info::CpuInfo;
 use super::system_info::gpu_info::machine_is_laptop;
 use super::system_info::vga_info::VgaInfo;
+use std::collections::HashSet;
 
 /// The hardware-driven part of a configuration: which modules to import and
 /// which optional services the machine calls for.
@@ -33,6 +34,15 @@ pub struct DriverConfig {
     cpu_info: CpuInfo,
 }
 
+/// Lower-cased alphanumeric words of `s`, digit-only words dropped
+/// (`"Surface Pro 7+"` -> `{"surface", "pro"}`).
+fn tokens(s: &str) -> HashSet<String> {
+    s.split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.len() > 1 || !t.chars().all(|c| c.is_ascii_digit()))
+        .map(str::to_lowercase)
+        .collect()
+}
+
 impl DriverConfig {
     /// Narrows a range of candidate module names one dash-separated segment at a
     /// time, recursing until a single name is left.
@@ -40,7 +50,7 @@ impl DriverConfig {
     /// # Parameters
     /// * `hardware_module` - candidates still in the running, sorted, all
     ///   sharing the first `depth` segments.
-    /// * `computer_info` - the detected machine, matched against the segments.
+    /// * `words` - lower-cased words of the detected product name and family.
     /// * `vga_info` - the detected GPUs, used for the `nvidia`/`amdgpu` segments.
     /// * `depth` - index of the segment to discriminate on.
     ///
@@ -52,7 +62,7 @@ impl DriverConfig {
     /// it is treated as a leaf/default candidate for its range.
     fn get_computer_hardware_module_rec<'a>(
         hardware_module: &'a [String],
-        computer_info: &ComputerInfo,
+        words: &HashSet<String>,
         vga_info: &VgaInfo,
         depth: usize,
     ) -> Option<&'a str> {
@@ -97,18 +107,14 @@ impl DriverConfig {
                         end = Some(i);
                     }
                 }
-                _ if parts.len() == depth + 1 => {
+                _ if parts.len() == depth + 1 && !words.contains(segment) => {
                     def = Some(i);
                     if begin.is_some() {
                         end = Some(i);
                     }
                 }
                 _ => match match_module {
-                    None if segment.split('-').all(|s| {
-                        computer_info.get_product_name().contains(s)
-                            || computer_info.get_product_family().contains(s)
-                    }) =>
-                    {
+                    None if words.contains(segment) => {
                         match_module = Some(segment);
                         begin = Some(i);
                     }
@@ -125,7 +131,7 @@ impl DriverConfig {
             if let Some(c) = common_b {
                 return Self::get_computer_hardware_module_rec(
                     &hardware_module[c..common_e.unwrap()],
-                    computer_info,
+                    words,
                     vga_info,
                     depth + 1,
                 );
@@ -144,7 +150,7 @@ impl DriverConfig {
         }
 
         let range = &hardware_module[begin.unwrap()..end.unwrap_or(hardware_module.len())];
-        Self::get_computer_hardware_module_rec(range, computer_info, vga_info, depth + 1)
+        Self::get_computer_hardware_module_rec(range, words, vga_info, depth + 1)
     }
 
     /// Restricts a vendor's modules to the ones whose family segment matches the
@@ -163,6 +169,7 @@ impl DriverConfig {
         computer_info: &ComputerInfo,
         vga_info: &VgaInfo,
     ) -> Option<&'a str> {
+        let family_tokens = tokens(computer_info.get_product_family());
         let mut match_family: Option<&str> = None;
         let mut begin: Option<usize> = None;
         let mut end: Option<usize> = None;
@@ -174,7 +181,7 @@ impl DriverConfig {
             };
 
             match match_family {
-                None if computer_info.get_product_family().contains(family) => {
+                None if family_tokens.contains(family) => {
                     match_family = Some(family);
                     begin = Some(i);
                 }
@@ -189,7 +196,9 @@ impl DriverConfig {
         begin?;
 
         let range = &hardware_module[begin.unwrap()..end.unwrap_or(hardware_module.len())];
-        Self::get_computer_hardware_module_rec(range, computer_info, vga_info, 2)
+        let mut words = family_tokens;
+        words.extend(tokens(computer_info.get_product_name()));
+        Self::get_computer_hardware_module_rec(range, &words, vga_info, 2)
     }
 
     /// Looks for the machine-specific `nixos-hardware` module of this machine.
@@ -210,10 +219,11 @@ impl DriverConfig {
     ) -> Option<&'a str> {
         let modules = hardware_module.get_computer_module();
 
+        let vendor_tokens = tokens(computer_info.get_vendor());
         let vendor = modules
             .iter()
             .map(|s| s.split('-').next().unwrap_or(""))
-            .find(|&v| computer_info.get_vendor().contains(v))?;
+            .find(|v| vendor_tokens.contains(*v))?;
 
         let begin = modules.iter().position(|s| s.starts_with(vendor))?;
         let end = modules[begin..]
@@ -419,5 +429,90 @@ mod tests {
 
         assert!(modules.contains(&String::from("common-gpu-nvidia-prime")));
         assert!(modules.contains(&String::from("common-gpu-intel")));
+    }
+
+    const CATALOGUE: &[&str] = &[
+        "common-cpu-intel",
+        "lenovo-thinkpad-x1",
+        "microsoft-surface-common",
+        "microsoft-surface-go",
+        "microsoft-surface-laptop-amd",
+        "microsoft-surface-laptop-intel",
+        "microsoft-surface-pro-intel",
+        "system76-darp6",
+    ];
+
+    /// DMI of the machine under test: `sys_vendor`, `product_family`,
+    /// `product_name` (Surface Pro 6, SKU `Surface_Pro_6_1796_Consumer`).
+    fn surface_pro_6() -> ComputerInfo {
+        ComputerInfo::from_parts("Microsoft Corporation", "Surface", "Surface Pro 6", vec![])
+    }
+
+    fn no_gpu() -> VgaInfo {
+        VgaInfo::from_descriptions(vec![])
+    }
+
+    #[test]
+    fn tokens_are_lowercase_words_without_bare_numbers() {
+        let t = tokens("Surface Pro 7+");
+        assert_eq!(
+            t,
+            HashSet::from([String::from("surface"), String::from("pro")])
+        );
+
+        let t = tokens("Microsoft Corporation");
+        assert!(t.contains("microsoft"));
+    }
+
+    #[test]
+    fn surface_pro_6_picks_pro_intel_not_common() {
+        let catalogue = HardwareModule::from_names(CATALOGUE);
+
+        let got =
+            DriverConfig::get_computer_hardware_module(&catalogue, &surface_pro_6(), &no_gpu());
+
+        assert_eq!(got, Some("microsoft-surface-pro-intel"));
+    }
+
+    #[test]
+    fn surface_pro_6_never_resolves_to_the_common_module() {
+        let catalogue = HardwareModule::from_names(CATALOGUE);
+
+        let got =
+            DriverConfig::get_computer_hardware_module(&catalogue, &surface_pro_6(), &no_gpu());
+
+        assert_ne!(got, Some("microsoft-surface-common"));
+    }
+
+    #[test]
+    fn surface_go_picks_the_go_leaf() {
+        let catalogue = HardwareModule::from_names(CATALOGUE);
+        let computer =
+            ComputerInfo::from_parts("Microsoft Corporation", "Surface", "Surface Go 2", vec![]);
+
+        let got = DriverConfig::get_computer_hardware_module(&catalogue, &computer, &no_gpu());
+
+        assert_eq!(got, Some("microsoft-surface-go"));
+    }
+
+    #[test]
+    fn unknown_surface_product_falls_back_to_the_common_module() {
+        let catalogue = HardwareModule::from_names(CATALOGUE);
+        let computer =
+            ComputerInfo::from_parts("Microsoft Corporation", "Surface", "Surface Hub", vec![]);
+
+        let got = DriverConfig::get_computer_hardware_module(&catalogue, &computer, &no_gpu());
+
+        assert_eq!(got, Some("microsoft-surface-common"));
+    }
+
+    #[test]
+    fn unknown_vendor_yields_no_machine_module() {
+        let catalogue = HardwareModule::from_names(CATALOGUE);
+        let computer = ComputerInfo::from_parts("Acme Inc.", "Widget", "Widget 3", vec![]);
+
+        let got = DriverConfig::get_computer_hardware_module(&catalogue, &computer, &no_gpu());
+
+        assert_eq!(got, None);
     }
 }

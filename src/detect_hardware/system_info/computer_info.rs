@@ -77,9 +77,13 @@ impl ComputerInfo {
     /// Per-vendor product-family rewrites, for the families whose DMI spelling
     /// does not match the module name.
     const FAMILY_EXCEPTION_RULES: [(&'static str, &[(&'static str, &'static str)]); 1] = [(
-        "framework",
-        &[("13in laptop", "13inch"), ("16in laptop", "16inch")],
-    )];
+    "framework",
+    &[
+        ("12in laptop", "12-inch"),
+        ("13in laptop", "13-inch"),
+        ("16in laptop", "16-inch"),
+    ],
+)];
 
     /// Reads the machine's vendor from DMI.
     ///
@@ -93,12 +97,14 @@ impl ComputerInfo {
     /// cannot be read, as happens on a machine without DMI.
     fn grep_vendor() -> mx::Result<String> {
         let vendor = fs::read_to_string("/sys/devices/virtual/dmi/id/sys_vendor")
-            .map_err(|e| io_error_at("/sys/devices/virtual/dmi/id/sys_vendor", e))?;
+            .map_err(|e| io_error_at("/sys/devices/virtual/dmi/id/sys_vendor", e))?
+            .trim()
+            .to_string();
         match Self::HARDWARE_VENDOR_REPLACMENT
             .iter()
-            .position(|(s, _)| s.contains(&vendor))
+            .find(|(raw, _)| raw.eq_ignore_ascii_case(&vendor))
         {
-            Some(i) => Ok(Self::HARDWARE_VENDOR_REPLACMENT[i].1.to_string()),
+            Some((_, normalised)) => Ok((*normalised).to_string()),
             None => Ok(vendor.to_lowercase()),
         }
     }
@@ -118,20 +124,14 @@ impl ComputerInfo {
     fn grep_product_family(vendor: &str) -> mx::Result<String> {
         let family = fs::read_to_string("/sys/devices/virtual/dmi/id/product_family")
             .map_err(|e| io_error_at("/sys/devices/virtual/dmi/id/product_family", e))?
+            .trim()
             .to_lowercase();
-        let pos_vendor = Self::FAMILY_EXCEPTION_RULES
+        let rewrite = Self::FAMILY_EXCEPTION_RULES
             .iter()
-            .position(|(s, _)| s.eq(&vendor));
-        if let Some(pos) = pos_vendor {
-            let pos_rule = Self::FAMILY_EXCEPTION_RULES[pos]
-                .1
-                .iter()
-                .position(|(s, _)| s.eq(&family));
-            if let Some(posr) = pos_rule {
-                return Ok(Self::FAMILY_EXCEPTION_RULES[pos].1[posr].1.to_string());
-            }
-        }
-        return Ok(family);
+            .find(|(rule_vendor, _)| *rule_vendor == vendor)
+            .and_then(|(_, rules)| rules.iter().find(|(raw, _)| *raw == family))
+            .map(|(_, rewritten)| (*rewritten).to_string());
+        Ok(rewrite.unwrap_or(family))
     }
 
     /// Reads the machine's product name from DMI.

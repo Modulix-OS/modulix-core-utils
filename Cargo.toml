@@ -7,10 +7,7 @@ edition = "2024"
 # Core
 core-nix-file = ["dep:rnix", "dep:rowan", "unix"]
 core-user-info = ["dep:serde", "serde-json"]
-core-app-info-trait = [
-    "dep:phf",
-    "dep:serde",
-]
+core-app-info-trait = ["dep:phf", "dep:serde"]
 core-nix-eval = ["dep:tokio", "serde-json"]
 
 # Modules
@@ -20,40 +17,23 @@ package-info = [
     "dep:serde",
     "serde-json",
     "dep:tokio",
-    "dep:memmap2"
+    "dep:memmap2",
 ]
-app-info-gui = [
-    "core-app-info-trait",
-    "reqwest"
-]
+app-info-gui = ["core-app-info-trait", "reqwest"]
 config-store = []
 desktop-environment = [
     "config-store",
     "core-user-info",
     "dep:walkdir",
-    "dep:glob"
+    "dep:glob",
 ]
-detect-hardware = [
-    "dep:regex",
-    "dep:serde",
-    "serde-json"
-]
-detect-os = [
-    "dep:serde",
-    "serde-json",
-    "unix"
-]
-boot-config = [
-    "detect-os",
-    "core-nix-file"
-]
+detect-hardware = ["dep:tokio", "dep:regex", "dep:serde", "serde-json"]
+detect-os = ["dep:serde", "serde-json", "unix"]
+boot-config = ["detect-os", "core-nix-file"]
 filesystem = ["core-nix-file"]
 firewall = ["core-nix-file"]
 flake-input = ["core-nix-file"]
-hardware-config = [
-    "detect-hardware",
-    "core-nix-file"
-]
+hardware-config = ["detect-hardware", "core-nix-file"]
 init = [
     "core-nix-file",
     "boot-config",
@@ -62,7 +42,7 @@ init = [
     "locale",
     "user",
     "install-package-file",
-    "install-module-file"
+    "install-module-file",
 ]
 locale = ["core-nix-file"]
 modulix-module = ["core-nix-file"]
@@ -73,7 +53,7 @@ module-info = [
     "dep:serde",
     "serde-json",
     "dep:tokio",
-    "reqwest"
+    "reqwest",
 ]
 install-module-file = ["core-nix-file"]
 install-module = [
@@ -81,7 +61,7 @@ install-module = [
     "module-info",
     "serde-json",
     "dep:tokio",
-    "core-app-info-trait"
+    "core-app-info-trait",
 ]
 install-package-file = ["core-nix-file"]
 install-package = [
@@ -91,10 +71,18 @@ install-package = [
     "dep:xz2",
     "serde-json",
     "dep:tokio",
-    "core-app-info-trait"
+    "core-app-info-trait",
 ]
 user = ["core-nix-file"]
-system-update = ["core-nix-file", "core-nix-eval", "dep:serde", "serde-json", "dep:tokio"]
+system-update = [
+    "core-nix-file",
+    "core-nix-eval",
+    "dep:serde",
+    "serde-json",
+    "dep:tokio",
+]
+
+hostname = ["core-nix-file", "core-nix-eval"]
 
 # wrapped dependencies
 serde-json = ["dep:serde_json"]
@@ -118,7 +106,11 @@ git2 = "0.21.0"
 
 # Optionnal
 glob = { version = "0.3.3", optional = true }
-nix = { version = "0.31.3", features = ["fs", "ioctl", "mount"], optional = true }
+nix = { version = "0.31.3", features = [
+    "fs",
+    "ioctl",
+    "mount",
+], optional = true }
 regex = { version = "1.12.3", optional = true }
 serde = { version = "1.0.228", features = ["derive"], optional = true }
 walkdir = { version = "2.5.0", optional = true }
@@ -130,7 +122,14 @@ rowan = { version = "0.16.1", optional = true }
 reqwest = { version = "0.13.3", features = ["json"], optional = true }
 futures = { version = "0.3.32", optional = true }
 serde_json = { version = "1.0.150", optional = true }
-tokio = { version = "1.52.3", features = ["fs", "macros", "process", "rt-multi-thread", "sync", "time"], optional = true }
+tokio = { version = "1.52.3", features = [
+    "fs",
+    "macros",
+    "process",
+    "rt-multi-thread",
+    "sync",
+    "time",
+], optional = true }
 
 [dev-dependencies]
 tempfile = "3"
