@@ -163,6 +163,9 @@ pub fn cache_dir() -> std::path::PathBuf {
 /// * `Tag` - a release tag, fetched from the `tags` namespace.
 enum GitRefs {
     Branch,
+    /// Only reachable by flipping [`REFS_FOLLOW`], which currently tracks a
+    /// branch - so nothing constructs this variant today.
+    #[allow(dead_code)]
     Tag,
 }
 
@@ -214,6 +217,7 @@ pub const REMOTE_MODULE_URL: &str = concatcp!(
 
 /// `nixosConfigurations` attribute the flake in [`CONFIG_DIRECTORY`] exposes,
 /// i.e. the flake output `nixos-rebuild` is pointed at.
+#[cfg(feature = "core-nix-file")]
 const CONFIG_NAME: &str = "default";
 
 /// Public re-exports of the crate's error vocabulary and of the enums a caller

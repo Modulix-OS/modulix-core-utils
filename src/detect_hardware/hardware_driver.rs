@@ -16,6 +16,7 @@ use crate::mx;
 #[derive(Debug)]
 pub struct HardwareModule {
     module_computer: Vec<String>,
+    #[allow(dead_code)]
     module_common: Vec<String>,
 }
 
@@ -104,6 +105,7 @@ impl HardwareModule {
     ///
     /// # Returns
     /// The names starting with `common-`, borrowed from `self`.
+    #[allow(dead_code)]
     pub fn get_common_module(&self) -> &[String] {
         &self.module_common
     }

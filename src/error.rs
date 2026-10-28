@@ -180,6 +180,11 @@ impl fmt::Display for ErrorKind {
 /// # Returns
 /// [`ErrorKind::IOError`] carrying a new error of the same
 /// [`io::ErrorKind`], whose message is `"<path>: <error>"`.
+#[cfg(any(
+    feature = "core-nix-file",
+    feature = "detect-os",
+    feature = "detect-hardware"
+))]
 pub(crate) fn io_error_at(path: &str, error: io::Error) -> ErrorKind {
     ErrorKind::IOError(io::Error::new(
         error.kind(),
@@ -191,7 +196,7 @@ pub(crate) fn io_error_at(path: &str, error: io::Error) -> ErrorKind {
 ///
 /// `io::Error`'s own `Display` goes through `strerror`, which glibc localises
 /// — the installer runs under a French `LC_MESSAGES` and the message reached
-/// the user in French. A custom payload (what [`io_error_at`] builds) is our
+/// the user in French. A custom payload (what `io_error_at` builds) is our
 /// own English string and is returned as is; everything else is mapped from
 /// `io::ErrorKind`, which is stable and English.
 ///

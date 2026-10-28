@@ -1,4 +1,4 @@
-use modulix_core_utils::{detect_hardware::driver_config::DriverConfig};
+use modulix_core_utils::detect_hardware::driver_config::DriverConfig;
 
 fn main() {
     let driver = DriverConfig::new().unwrap();

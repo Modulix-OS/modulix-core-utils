@@ -77,13 +77,13 @@ impl ComputerInfo {
     /// Per-vendor product-family rewrites, for the families whose DMI spelling
     /// does not match the module name.
     const FAMILY_EXCEPTION_RULES: [(&'static str, &[(&'static str, &'static str)]); 1] = [(
-    "framework",
-    &[
-        ("12in laptop", "12-inch"),
-        ("13in laptop", "13-inch"),
-        ("16in laptop", "16-inch"),
-    ],
-)];
+        "framework",
+        &[
+            ("12in laptop", "12-inch"),
+            ("13in laptop", "13-inch"),
+            ("16in laptop", "16-inch"),
+        ],
+    )];
 
     /// Reads the machine's vendor from DMI.
     ///

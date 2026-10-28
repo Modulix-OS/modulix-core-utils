@@ -2,9 +2,9 @@
 
 use super::TABULATION_SIZE;
 use super::transaction::file_lock::NixFile;
-use crate::core::localise_option::{
-    ExistingOption, SettingsPosition, collect_child_names, collect_enable_paths,
-};
+#[cfg(feature = "install-module")]
+use crate::core::localise_option::collect_enable_paths;
+use crate::core::localise_option::{ExistingOption, SettingsPosition, collect_child_names};
 use crate::mx;
 use std::str;
 
@@ -149,6 +149,7 @@ impl<'a> Option<'a> {
     /// One dotted path per descendant declaring `enable`, relative to this
     /// option and without the `enable` segment; empty when there is none.
     /// Whether each is set to `true` is not checked here.
+    #[cfg(feature = "install-module")]
     pub fn list_enable_descendants(&self, nix_file: &NixFile) -> mx::Result<Vec<String>> {
         let ast = rnix::Root::parse(nix_file.get_file_content()?);
         Ok(collect_enable_paths(&ast.syntax(), self.nix_option))

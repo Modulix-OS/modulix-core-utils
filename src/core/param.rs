@@ -51,6 +51,7 @@ impl PatternInfo {
 /// * `NoPattern` - the file has no parameter pattern; nothing can be added to
 ///   it without writing one first.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum ParamPosition {
     ExistingParam(PatternInfo),
     NoPattern,

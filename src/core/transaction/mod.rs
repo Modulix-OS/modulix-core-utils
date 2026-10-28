@@ -5,7 +5,7 @@
 //! rewrite atomic, [`Transaction`] turns a set of files plus a rebuild into one
 //! git-versioned step, and `build_queue` serialises the rebuilds of concurrent
 //! processes. Domain modules do not drive them by hand: they call
-//! [`make_transaction`] (or [`make_transaction_read_only`]) with a closure.
+//! [`make_transaction`] (or `make_transaction_read_only`) with a closure.
 
 pub(crate) mod build_queue;
 pub mod file_lock;
@@ -126,6 +126,7 @@ where
 ///
 /// # Returns
 /// As in [`make_transaction`].
+#[cfg(feature = "system-update")]
 pub fn make_transaction_update<F, R>(
     description: &str,
     config_dir: &str,
@@ -195,6 +196,7 @@ where
 ///
 /// # Returns
 /// As in [`make_transaction`].
+#[cfg(feature = "system-update")]
 pub fn make_transaction_commit_only<F, R>(
     description: &str,
     config_dir: &str,
@@ -258,6 +260,7 @@ where
 /// The file is left untouched: an attempt to edit it through
 /// `get_mut_file_content` fails with [`mx::ErrorKind::PermissionDenied`]. The
 /// file lock is released either way.
+#[cfg(any(feature = "install-module", feature = "install-package"))]
 pub fn make_transaction_read_only<F, R>(
     description: &str,
     config_dir: &str,

@@ -24,6 +24,7 @@ use std::ops::Range;
 use crate::mx;
 
 /// The attribute that marks a Modulix module as enabled.
+#[cfg(any(feature = "install-module", test))]
 const ENABLE_ATTR: &str = "enable";
 
 /// Converts an `rnix`/`rowan` `TextRange` into a `std::ops::Range<usize>` of
@@ -534,6 +535,7 @@ fn collect_child_names_rec(
 /// single pass over the sorted, deduplicated names: sorting always puts a
 /// path immediately before the paths that extend it, so keeping only the
 /// shortest of each such chain needs no backtracking.
+#[cfg(any(feature = "install-module", test))]
 pub(crate) fn collect_enable_paths(node: &rnix::SyntaxNode, prefix: &str) -> Vec<String> {
     let prefix_segments: Vec<&str> = prefix.split('.').collect();
     let mut names = Vec::new();
@@ -573,6 +575,7 @@ pub(crate) fn collect_enable_paths(node: &rnix::SyntaxNode, prefix: &str) -> Vec
 /// # Returns
 /// Nothing; results accumulate in `out` and may contain duplicates or
 /// nested paths — both are resolved by the caller.
+#[cfg(any(feature = "install-module", test))]
 fn collect_enable_paths_rec(
     node: &rnix::SyntaxNode,
     path: &[String],

@@ -56,6 +56,9 @@ pub enum BuildCommand {
     Boot,
     /// Initial install on a new machine (`nixos-install`).
     /// The build command is empty in release; triggers `build-vm` in debug.
+    /// Only `init` constructs it, and only in a release build - a debug build
+    /// uses [`BuildCommand::Boot`] instead.
+    #[cfg_attr(any(debug_assertions, not(feature = "init")), allow(dead_code))]
     Install,
     /// Builds a VM image (`nixos-rebuild build-vm`), never touches the running
     /// system. Runtime-selected (not a debug-only gate) so a release binary
@@ -66,6 +69,7 @@ pub enum BuildCommand {
     /// path fetched, but neither the running system nor the boot entries change.
     /// Used to pay the download/build cost ahead of a later `Switch`/`Boot`,
     /// which then finds the store already warm.
+    #[cfg_attr(not(feature = "system-update"), allow(dead_code))]
     Build,
 }
 
@@ -83,7 +87,9 @@ pub enum BuildCommand {
 pub enum UpdateInput {
     Keep,
     UpdateAll,
+    #[cfg_attr(not(feature = "flake-input"), allow(dead_code))]
     UpdateSelected(Vec<String>),
+    #[cfg_attr(not(feature = "system-update"), allow(dead_code))]
     UseLock(String),
 }
 
@@ -359,6 +365,7 @@ impl<'a> Transaction<'a> {
     /// * `skip` - when `true`, [`commit_impl`] skips the build queue and the
     ///   rebuild entirely. The commit itself is unaffected, and so is the
     ///   rollback on error.
+    #[cfg(feature = "system-update")]
     pub fn set_skip_rebuild(&mut self, skip: bool) {
         self.skip_rebuild = skip;
     }
@@ -370,6 +377,7 @@ impl<'a> Transaction<'a> {
     /// * `force` - when `true`, an update-only transaction (no file edit)
     ///   still refreshes `flake.lock`; the commit and rebuild still only
     ///   happen if that refresh actually moved the lockfile.
+    #[cfg(feature = "system-update")]
     pub fn set_force_commit(&mut self, force: bool) {
         self.force_commit = force;
     }
@@ -379,6 +387,7 @@ impl<'a> Transaction<'a> {
     /// # Arguments
     /// * `cores` - forwarded as `nixos-rebuild --cores <cores>` /
     ///   `nixos-install --cores <cores>`; `None` leaves the Nix default.
+    #[cfg(feature = "system-update")]
     pub fn set_cores(&mut self, cores: Option<u32>) {
         self.rebuild_cores = cores;
     }
@@ -864,6 +873,7 @@ impl<'a> Transaction<'a> {
     /// # Errors
     /// * `mx::ErrorKind::TransactionNotBegin` – `begin` has not been called yet.
     /// * `mx::ErrorKind::FileNotFound`        – `path` was not added via `add_file`.
+    #[cfg(any(feature = "install-module", feature = "install-package", test))]
     pub fn get_file(&mut self, path: &str) -> mx::Result<&NixFile> {
         if self.git_repo.is_none() {
             return Err(mx::ErrorKind::TransactionNotBegin);
@@ -1041,6 +1051,7 @@ impl<'a> Transaction<'a> {
     /// [`mx::ErrorKind::GitError`] if `repo_path` cannot be opened, if the
     /// stash list cannot be walked, or if a conflicting entry cannot be
     /// dropped.
+    #[cfg(feature = "system-update")]
     pub(crate) fn restore_orphan_stashes(repo_path: &str) -> mx::Result<usize> {
         let mut repo = git2::Repository::open(repo_path).map_err(mx::ErrorKind::GitError)?;
         let mut recovered = 0usize;
