@@ -101,28 +101,28 @@ flathub-info-gen = [
 ]
 
 [dependencies]
-const_format = "0.2.36"
+const_format = "0.2.37"
 git2 = "0.21.0"
 
 # Optionnal
-glob = { version = "0.3.3", optional = true }
+glob = { version = "0.3.4", optional = true }
 nix = { version = "0.31.3", features = [
     "fs",
     "ioctl",
     "mount",
 ], optional = true }
-regex = { version = "1.12.3", optional = true }
-serde = { version = "1.0.228", features = ["derive"], optional = true }
+regex = { version = "1.13.1", optional = true }
+serde = { version = "1.0.229", features = ["derive"], optional = true }
 walkdir = { version = "2.5.0", optional = true }
-phf = { version = "0.13.1", features = ["macros"], optional = true }
+phf = { version = "0.14.0", features = ["macros"], optional = true }
 xz2 = { version = "0.1.7", optional = true }
-rnix = { version = "0.14.0", optional = true }
+rnix = { version = "0.15.0", optional = true }
 memmap2 = { version = "0.9", optional = true }
-rowan = { version = "0.16.1", optional = true }
-reqwest = { version = "0.13.3", features = ["json"], optional = true }
-futures = { version = "0.3.32", optional = true }
-serde_json = { version = "1.0.150", optional = true }
-tokio = { version = "1.52.3", features = [
+rowan = { version = "0.17.0", optional = true }
+reqwest = { version = "0.13.5", features = ["json"], optional = true }
+futures = { version = "0.3.34", optional = true }
+serde_json = { version = "1.0.154", optional = true }
+tokio = { version = "1.54.1", features = [
     "fs",
     "macros",
     "process",
