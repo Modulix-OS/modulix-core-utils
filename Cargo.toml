@@ -1,6 +1,6 @@
 [package]
 name = "modulix-core-utils"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2024"
 
 [features]
@@ -74,7 +74,13 @@ install-package = [
     "core-app-info-trait",
 ]
 user = ["core-nix-file"]
-system-update = ["core-nix-file"]
+system-update = [
+    "core-nix-file",
+    "core-nix-eval",
+    "dep:serde",
+    "serde-json",
+    "dep:tokio",
+]
 
 hostname = ["core-nix-file", "core-nix-eval"]
 

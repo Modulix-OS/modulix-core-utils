@@ -86,6 +86,9 @@ pub mod user;
 #[cfg(feature = "system-update")]
 pub mod update;
 
+#[cfg(feature = "system-update")]
+pub mod reboot;
+
 #[cfg(feature = "hostname")]
 pub mod hostname;
 
