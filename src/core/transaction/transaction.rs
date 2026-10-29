@@ -1,23 +1,16 @@
 //! [`Transaction`]: a set of configuration files plus the rebuild that applies
 //! them, committed to git or rolled back as one unit.
 
-use std::{collections::HashMap, fs, io, path, process};
+use std::{collections::HashMap, path, process};
 
+#[cfg(not(test))]
 use super::build_queue::BuildQueue;
 use super::file_lock::NixFile;
-use crate::error::io_error_at;
 use crate::{
     CONFIG_NAME,
     core::{list::List as mxList, transaction::file_lock::NixFilePermission},
     mx,
 };
-
-/// Sentinel whose presence-and-lockability tells a commit to skip the rebuild.
-///
-/// A test holds the lock on this file for as long as it wants commits to stay
-/// purely textual; a commit that finds the lock taken edits and commits, but
-/// runs no `nixos-rebuild`.
-pub(crate) const LOCK_SKIP_REBUILD_FILE: &str = "/tmp/mx-skip-rebuild.lock";
 
 /// Message [`Transaction::begin`] stamps on the stash entry it creates for a
 /// dirty working tree, so [`Transaction::stash_restore`] only ever pops an
@@ -117,67 +110,18 @@ impl From<&TransactionPermission> for NixFilePermission {
     }
 }
 
-/// File lock used to serialize NixOS builds.
+/// Counts the rebuilds a commit would have run, in test builds only.
 ///
-/// The lock is acquired on creation via [`LockFile::try_lock`] and released
-/// explicitly via [`LockFile::unlock`]. If `unlock` is not called, the lock is
-/// released by the kernel when the process exits (but not when the Rust `File`
-/// is dropped — prefer an explicit `unlock`).
-struct LockFile {
-    /// Handle to the locked file. `None` after an `unlock`.
-    file: Option<fs::File>,
-}
-
-impl LockFile {
-    /// Attempts to take a non-blocking exclusive lock.
-    ///
-    /// The file is opened read-only when it already exists, and only created
-    /// when missing: `flock` does not need a writable descriptor, and these
-    /// sentinels live in `/tmp`, where they are routinely left behind by
-    /// another user (a root run, then a user run, or the reverse) — a
-    /// create-always open would then fail with `EACCES` for no good reason.
-    ///
-    /// # Arguments
-    /// * `path` – Sentinel file to lock; it is created if missing.
-    ///
-    /// # Returns
-    /// * `Ok(Some(lock))` – Lock acquired.
-    /// * `Ok(None)`       – The file is already locked by another process.
-    /// * `Err(_)`         – Unexpected I/O error.
-    ///
-    /// # Post-conditions
-    /// Never blocks. The lock lives until [`LockFile::unlock`] or, failing
-    /// that, until the process exits.
-    pub fn try_lock(path: &str) -> mx::Result<Option<Self>> {
-        let opened = match fs::OpenOptions::new().read(true).open(path) {
-            Ok(f) => Ok(f),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => fs::File::create(path),
-            Err(e) => Err(e),
-        };
-        Ok(Some(LockFile {
-            file: match opened {
-                Ok(f) => match f.try_lock() {
-                    Ok(_) => Some(f),
-                    Err(fs::TryLockError::WouldBlock) => return Ok(None),
-                    Err(_) => return Err(mx::ErrorKind::FailToLock),
-                },
-                Err(e) => return Err(io_error_at(path, e)),
-            },
-        }))
-    }
-
-    /// Releases the lock and closes the handle. No-op if already unlocked.
-    ///
-    /// # Post-conditions
-    /// The sentinel file is left on disk, only unlocked. A failure to unlock is
-    /// swallowed: the kernel releases it at process exit anyway.
-    pub fn unlock(&mut self) {
-        if self.file.is_some() {
-            self.file.as_mut().unwrap().unlock().unwrap_or_default();
-        }
-        self.file = None;
-    }
-}
+/// `commit_impl` spawns no `nixos-rebuild` under `cfg(test)`: the fixture repos
+/// the tests work on are not buildable flakes, and a unit test has no business
+/// activating a system configuration. It bumps this counter instead, so a test
+/// can still assert that a commit did (or did not) reach the rebuild step.
+///
+/// The command is still assembled there, just never spawned, so a test build
+/// keeps type-checking and exercising `build_rebuild_command`.
+#[cfg(test)]
+pub(crate) static REBUILD_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 impl BuildCommand {
     /// Returns the argument passed to `nixos-rebuild` for this command.
@@ -413,6 +357,7 @@ impl<'a> Transaction<'a> {
     /// # Errors
     /// [`mx::ErrorKind::IOError`] if the process cannot be spawned or waited
     /// for; a non-zero exit is reported as `Ok(false)`, not as an error.
+    #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn rebuild_config(
         path_config: &str,
         config_name: &str,
@@ -966,9 +911,19 @@ impl<'a> Transaction<'a> {
         if need_modif {
             self.git_commit(Some("HEAD"), &self.git_user, &self.git_user, &self.info)?;
 
-            if let Some(mut sentinel) = LockFile::try_lock(LOCK_SKIP_REBUILD_FILE)? {
-                sentinel.unlock();
+            #[cfg(test)]
+            {
+                let _ = Self::build_rebuild_command(
+                    &self.git_repo_path,
+                    CONFIG_NAME,
+                    &self.build_type,
+                    self.rebuild_cores,
+                );
+                REBUILD_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
 
+            #[cfg(not(test))]
+            {
                 let ticket = BuildQueue::enqueue()?;
                 ticket.wait_turn()?;
 

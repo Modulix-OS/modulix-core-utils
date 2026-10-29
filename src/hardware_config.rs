@@ -12,9 +12,9 @@ use crate::{
         option::Option as mxOption,
         param::NixParam,
         transaction::{
-            self, Transaction,
+            self, TransactionOp,
             file_lock::NixFile,
-            transaction::{BuildCommand, TransactionPermission, UpdateInput},
+            transaction::{BuildCommand, UpdateInput},
         },
     },
     detect_hardware::{
@@ -351,44 +351,82 @@ pub fn redetect_hardware_options(config_dir: &str) -> mx::Result<()> {
     write_hardware_options(config_dir, &HardwareTopology::detect()?)
 }
 
+/// Re-runs `nixos-generate-config` against the live system and applies the
+/// result.
+///
+/// The `hardware-configuration.nix` counterpart of
+/// [`redetect_hardware_options`]: it regenerates the generator's own output
+/// only, leaving the `mx.hardware.*` options alone. Use
+/// [`redetect_all_hardware`] to refresh both in one commit.
+///
+/// # Parameters
+/// * `config_dir` - configuration repository to edit.
+///
+/// # Pre-conditions
+/// Runs against the live system (`/`), never an installation root, and needs
+/// `nixos-generate-config` on `PATH`.
+///
+/// # Post-conditions
+/// As in [`write_hardware_config`].
+///
+/// # Errors
+/// Any error from [`write_hardware_config`].
 pub fn redetect_hardware_config(config_dir: &str) -> mx::Result<()> {
     write_hardware_config("/", config_dir)
 }
 
-fn write_all(transaction: &mut Transaction) -> mx::Result<()> {
+/// Re-probes the machine and refreshes **both** hardware files in a single
+/// commit and a single rebuild.
+///
+/// What [`redetect_hardware_config`] and [`redetect_hardware_options`] do
+/// separately - two commits and two `nixos-rebuild switch` for one hardware
+/// change - grouped into one transaction, through
+/// [`transaction::make_group_transaction`]: one operation regenerates
+/// `hardware-configuration.nix`, the other writes the `mx.hardware.*` options
+/// from the same probe.
+///
+/// # Parameters
+/// * `config_dir` - configuration repository to edit.
+///
+/// # Pre-conditions
+/// Probes the **live** machine, never an installation root, and needs
+/// `nixos-generate-config` on `PATH`. `lspci` is what names each GPU's
+/// generation; without it every `generation` is left unset, which is harmless
+/// for AMD and Intel but hands a Fermi-to-Volta NVIDIA card the current driver
+/// branch instead of its legacy one. The machine is probed once, before the
+/// transaction opens, so a detection failure leaves the configuration
+/// untouched.
+///
+/// # Post-conditions
+/// On success both files are part of the active generation; on any error the
+/// configuration is back to its previous commit and neither file is left
+/// half-written. A machine whose topology and generated configuration already
+/// match what the files declare produces no commit and therefore no rebuild.
+/// Blocks for the whole `nixos-rebuild switch`.
+///
+/// # Errors
+/// Any error from [`HardwareTopology::detect`],
+/// [`write_hardware_config_no_transaction`],
+/// [`write_hardware_options_no_transaction`] or
+/// [`transaction::make_group_transaction`].
+pub fn redetect_all_hardware(config_dir: &str) -> mx::Result<()> {
     let topology = HardwareTopology::detect()?;
 
-    let config_file = transaction.get_file_mut(HARDWARE_CONFIG_PATH)?;
-    write_hardware_config_no_transaction("/", config_file)?;
-
-    let option_file = transaction.get_file_mut(HARDWARE_OPTION_PATH)?;
-    write_hardware_options_no_transaction(option_file, &topology)?;
-
-    Ok(())
-}
-
-pub fn redetect_all_hardware(config_dir: &str) -> mx::Result<()> {
-    let mut transaction = Transaction::new(
+    transaction::make_group_transaction(
         config_dir,
-        "Redetect all hardware settings",
         BuildCommand::Switch,
-        TransactionPermission::Writtable,
-    )?;
-    transaction.add_file(HARDWARE_CONFIG_PATH)?;
-    transaction.add_file(HARDWARE_OPTION_PATH)?;
-    transaction.begin()?;
-
-    if let Err(e) = write_all(&mut transaction) {
-        let _ = transaction.rollback();
-        return Err(e);
-    }
-    match transaction.commit(UpdateInput::Keep) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            transaction.rollback()?;
-            Err(e)
-        }
-    }
+        UpdateInput::Keep,
+        vec![
+            TransactionOp::new("Reset hardware config", HARDWARE_CONFIG_PATH, |file| {
+                write_hardware_config_no_transaction("/", file)
+            }),
+            TransactionOp::new(
+                "Update detected hardware options",
+                HARDWARE_OPTION_PATH,
+                move |file| write_hardware_options_no_transaction(file, &topology),
+            ),
+        ],
+    )
 }
 
 #[cfg(test)]

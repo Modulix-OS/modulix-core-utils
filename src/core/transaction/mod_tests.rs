@@ -83,26 +83,6 @@ fn create_and_commit(dir: &TempDir, file_name: &str, content: &str) -> std::path
     file_path
 }
 
-/// Holds the skip-rebuild sentinel so that `commit_impl` skips the NixOS rebuild.
-///
-/// Returns the lock file handle — it **must** stay alive for the duration of
-/// the test (dropping it releases the lock).  Holding it also serializes tests
-/// that mutate the shared fixture repo.  Usage:
-/// ```rust
-/// let _guard = disable_rebuild();
-/// make_transaction(...)?;
-/// ```
-fn disable_rebuild() -> fs::File {
-    let f = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open("/tmp/mx-skip-rebuild.lock")
-        .expect("failed to create skip-rebuild lock file");
-    f.lock().expect("failed to lock skip-rebuild lock file");
-    f
-}
-
 mod unit {
     use crate::core::transaction::transaction::UpdateInput;
 
@@ -161,7 +141,6 @@ mod integration {
         let dir = setup_repo();
         let path = repo_path(&dir);
         create_and_commit(&dir, "test.nix", "");
-        let _guard = disable_rebuild();
 
         let result = make_transaction(
             "test commit",
@@ -208,7 +187,6 @@ mod integration {
         let dir = setup_repo();
         let path = repo_path(&dir);
         create_and_commit(&dir, "vec.nix", "line1\nline2\n");
-        let _guard = disable_rebuild();
 
         let result: mx::Result<Vec<String>> = make_transaction(
             "vec return",
@@ -302,7 +280,6 @@ mod integration {
         let dir = setup_repo();
         let path = repo_path(&dir);
         create_and_commit(&dir, "content.nix", "before");
-        let _guard = disable_rebuild();
 
         make_transaction::<_, ()>(
             "write test",
@@ -338,7 +315,6 @@ mod no_regression {
         let dir = setup_repo();
         let path = repo_path(&dir);
         create_and_commit(&dir, "f.nix", "v1");
-        let _guard = disable_rebuild();
 
         make_transaction::<_, ()>(
             "tx1",
@@ -370,7 +346,6 @@ mod no_regression {
         let dir = setup_repo();
         let path = repo_path(&dir);
         create_and_commit(&dir, "f.nix", "original");
-        let _guard = disable_rebuild();
 
         let _ = make_transaction::<_, ()>(
             "fail",
@@ -405,7 +380,6 @@ mod no_regression {
         let dir = setup_repo();
         let path = repo_path(&dir);
         create_and_commit(&dir, "f.nix", "clean");
-        let _guard = disable_rebuild();
 
         let _ = make_transaction::<_, ()>(
             "poison",
@@ -441,7 +415,6 @@ mod no_regression {
         let dir = setup_repo();
         let path = repo_path(&dir);
         create_and_commit(&dir, "res.nix", "data");
-        let _guard = disable_rebuild();
 
         for _ in 0..3 {
             let _ = make_transaction::<_, ()>(
@@ -481,7 +454,6 @@ mod stash {
         let dir = setup_repo();
         let path = repo_path(&dir);
         create_and_commit(&dir, "target.nix", "original");
-        let _guard = disable_rebuild();
 
         let bystander = dir.path().join("bystander.nix");
         fs::write(&bystander, "bystander content").unwrap();
@@ -537,7 +509,6 @@ mod stash {
         let dir = setup_repo();
         let path = repo_path(&dir);
         create_and_commit(&dir, "target.nix", "original");
-        let _guard = disable_rebuild();
         fs::write(dir.path().join("bystander.nix"), "bystander").unwrap();
 
         make_transaction::<_, ()>(
@@ -557,6 +528,181 @@ mod stash {
             fs::read_to_string(dir.path().join("target.nix")).unwrap(),
             "modified",
             "stash pop must not overwrite the committed result"
+        );
+    }
+}
+
+/// Tests for the grouped entry point: several descriptions, several files, one
+/// commit and one rebuild.
+mod group {
+    use super::*;
+    use crate::core::transaction::transaction::{REBUILD_CALLS, UpdateInput};
+    use crate::core::transaction::{TransactionOp, group_message, make_group_transaction};
+    use std::sync::atomic::Ordering;
+
+    /// Number of commits reachable from `HEAD`.
+    fn commit_count(path: &str) -> usize {
+        let repo = git2::Repository::open(path).unwrap();
+        let mut walk = repo.revwalk().unwrap();
+        walk.push_head().unwrap();
+        walk.count()
+    }
+
+    /// Message of the commit at `HEAD`.
+    fn head_message(path: &str) -> String {
+        let repo = git2::Repository::open(path).unwrap();
+        repo.head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .message()
+            .unwrap()
+            .to_string()
+    }
+
+    /// A one-operation group must commit exactly like `make_transaction`.
+    #[test]
+    fn a_single_description_is_the_commit_message_verbatim() {
+        assert_eq!(group_message(&["open port 22"]), "open port 22");
+    }
+
+    #[test]
+    fn several_descriptions_become_a_subject_and_bullets() {
+        assert_eq!(
+            group_message(&["open port 22", "install vim"]),
+            "modulix: 2 configuration changes\n\n- open port 22\n- install vim\n"
+        );
+    }
+
+    /// An empty group must not even open the repository, so a bogus
+    /// `config_dir` cannot fail it.
+    #[test]
+    fn no_operation_performs_no_io() {
+        let dir = setup_repo();
+        let path = repo_path(&dir);
+        let before = commit_count(&path);
+
+        make_group_transaction(&path, noop_build(), UpdateInput::Keep, vec![]).unwrap();
+        make_group_transaction(
+            "/nonexistent_config_dir_xyz/",
+            noop_build(),
+            UpdateInput::Keep,
+            vec![],
+        )
+        .unwrap();
+
+        assert_eq!(commit_count(&path), before);
+    }
+
+    /// The point of the whole thing: N files changed, one commit, one rebuild.
+    #[test]
+    fn several_files_land_in_a_single_commit() {
+        let dir = setup_repo();
+        let path = repo_path(&dir);
+        create_and_commit(&dir, "a.nix", "{}\n");
+        create_and_commit(&dir, "b.nix", "{}\n");
+        let before = commit_count(&path);
+
+        make_group_transaction(
+            &path,
+            noop_build(),
+            UpdateInput::Keep,
+            vec![
+                TransactionOp::new("edit a", "a.nix", |file| {
+                    file.get_mut_file_content()?.push_str("# a\n");
+                    Ok(())
+                }),
+                TransactionOp::new("edit b", "b.nix", |file| {
+                    file.get_mut_file_content()?.push_str("# b\n");
+                    Ok(())
+                }),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(commit_count(&path), before + 1, "one commit for the group");
+        assert!(
+            fs::read_to_string(dir.path().join("a.nix"))
+                .unwrap()
+                .contains("# a")
+        );
+        assert!(
+            fs::read_to_string(dir.path().join("b.nix"))
+                .unwrap()
+                .contains("# b")
+        );
+
+        let message = head_message(&path);
+        assert!(message.starts_with("modulix: 2 configuration changes"));
+        assert!(message.contains("- edit a"));
+        assert!(message.contains("- edit b"));
+        assert!(
+            REBUILD_CALLS.load(Ordering::SeqCst) >= 1,
+            "the commit must have reached the rebuild step"
+        );
+    }
+
+    /// Two operations may name the same file; the second sees the first's
+    /// edit, which is what `init` relies on for `fstab.nix`.
+    #[test]
+    fn two_operations_on_one_file_apply_in_order() {
+        let dir = setup_repo();
+        let path = repo_path(&dir);
+        create_and_commit(&dir, "a.nix", "");
+        let before = commit_count(&path);
+
+        make_group_transaction(
+            &path,
+            noop_build(),
+            UpdateInput::Keep,
+            vec![
+                TransactionOp::new("write the content", "a.nix", |file| {
+                    *file.get_mut_file_content()? = "first\n".to_string();
+                    Ok(())
+                }),
+                TransactionOp::new("append to it", "a.nix", |file| {
+                    file.get_mut_file_content()?.push_str("second\n");
+                    Ok(())
+                }),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(dir.path().join("a.nix")).unwrap(),
+            "first\nsecond\n"
+        );
+        assert_eq!(commit_count(&path), before + 1);
+    }
+
+    /// A failing operation must leave nothing behind: no commit, and the edit
+    /// the earlier operations made never reaches the disk.
+    #[test]
+    fn an_error_in_an_operation_commits_nothing() {
+        let dir = setup_repo();
+        let path = repo_path(&dir);
+        create_and_commit(&dir, "a.nix", "original\n");
+        create_and_commit(&dir, "b.nix", "original\n");
+        let before = commit_count(&path);
+
+        let result = make_group_transaction(
+            &path,
+            noop_build(),
+            UpdateInput::Keep,
+            vec![
+                TransactionOp::new("edit a", "a.nix", |file| {
+                    *file.get_mut_file_content()? = "edited\n".to_string();
+                    Ok(())
+                }),
+                TransactionOp::new("fail on b", "b.nix", |_| Err(mx::ErrorKind::InvalidFile)),
+            ],
+        );
+
+        assert!(matches!(result, Err(mx::ErrorKind::InvalidFile)));
+        assert_eq!(commit_count(&path), before, "no commit for a failed group");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("a.nix")).unwrap(),
+            "original\n"
         );
     }
 }

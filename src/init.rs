@@ -26,11 +26,10 @@
 //! in debug builds every rebuild is forced to `build-vm`
 //! (`BuildCommand::as_str`), so a debug run never touches the host system.
 
-use crate::core::transaction::Transaction;
 use crate::core::transaction::file_lock::NixFile;
-use crate::core::transaction::transaction::LOCK_SKIP_REBUILD_FILE;
 use crate::core::transaction::transaction::TransactionPermission;
 use crate::core::transaction::transaction::{BuildCommand, UpdateInput};
+use crate::core::transaction::{Transaction, TransactionOp, make_group_transaction};
 use crate::detect_hardware::system_info::gpu_info::HardwareTopology;
 use crate::detect_os::OtherOs;
 use crate::error::io_message;
@@ -200,8 +199,8 @@ fn resolve_config_path(root_path: &str, config_dir: Option<&str>) -> String {
 /// both resolve to `build-vm` in debug builds) with
 /// `UpdateInput::UpdateAll`, so `flake.lock` is generated fresh.
 ///
-/// Unlike [`init`], this does not create the `.cache` directory, does not
-/// hold the skip-rebuild lock, and does not call `seal_base_files`
+/// Unlike [`init`], this does not create the `.cache` directory and does not
+/// call `seal_base_files`
 /// afterwards (files are sealed immutable by `Transaction::commit`/
 /// `NixFile::commit` for the files it owns, but `flake.lock` is left as
 /// written by `nix flake update`).
@@ -415,9 +414,8 @@ impl Desktop {
 ///   is set up for hibernation.
 /// * `config_dir` - overrides where the config repo is written (see
 ///   `resolve_config_path`).
-/// * `debug` - debug/test mode: seeds the repo with `nixos-rebuild build-vm`
-///   instead of `nixos-install`/`switch`, and skips the skip-rebuild lock so
-///   the build actually runs.
+/// * `debug` - debug/test mode: the seed commit runs `nixos-rebuild build-vm`
+///   instead of `nixos-install`, so it installs nothing.
 pub struct InitParams {
     pub root: String,
     pub hostname: String,
@@ -453,9 +451,8 @@ pub struct InitParams {
     pub resume_device: Option<String>,
     /// Overrides where the config repo is written (see `resolve_config_path`).
     pub config_dir: Option<String>,
-    /// Debug/test mode: seeds the repo with `nixos-rebuild build-vm` instead of
-    /// `nixos-install`/`switch`, and skips the skip-rebuild lock so the build
-    /// actually runs.
+    /// Debug/test mode: the seed commit runs `nixos-rebuild build-vm` instead
+    /// of `nixos-install`, so it installs nothing.
     pub debug: bool,
 }
 
@@ -671,38 +668,6 @@ fn seal_base_files(path_config: &str) -> mx::Result<()> {
     Ok(())
 }
 
-/// Takes an exclusive lock on `LOCK_SKIP_REBUILD_FILE`, telling every commit
-/// made while the returned handle is alive to skip its `nixos-rebuild` (see
-/// `Transaction::commit_impl`'s build-serialization step).
-///
-/// Used by [`init`] outside of debug/test mode: the real installer
-/// (Calamares / modulixos-installer) holds this lock for the whole install,
-/// so the seed transaction here only writes files and commits — no rebuild
-/// runs until the installer releases the lock and drives its own rebuild.
-///
-/// # Pre-conditions
-/// No other process holds the lock (a concurrent [`init`]/install run, or a
-/// test relying on the same sentinel file).
-///
-/// # Post-conditions
-/// `LOCK_SKIP_REBUILD_FILE` exists and is exclusively locked by the returned
-/// `File` handle; the lock is released when that handle is dropped.
-///
-/// # Returns
-/// The open, locked `File` handle. Callers must keep it alive for as long as
-/// commits should skip their rebuild.
-///
-/// # Errors
-/// * `mx::ErrorKind::IOError` - `LOCK_SKIP_REBUILD_FILE` could not be
-///   created/opened.
-/// * `mx::ErrorKind::FailToLock` - the lock is already held elsewhere.
-fn hold_skip_rebuild_lock() -> mx::Result<fs::File> {
-    let file = fs::File::create(LOCK_SKIP_REBUILD_FILE)
-        .map_err(|e| crate::error::io_error_at(LOCK_SKIP_REBUILD_FILE, e))?;
-    file.try_lock().map_err(|_| mx::ErrorKind::FailToLock)?;
-    Ok(file)
-}
-
 /// Rejects a config path that [`remove_dir_recursive`] must never be handed.
 ///
 /// [`init`] deletes `path_config` outright before recreating it, and runs as
@@ -842,53 +807,41 @@ fn write_fstab_extras(fstab: &mut NixFile, params: &InitParams) -> mx::Result<()
 ///    `.git/info/exclude`.
 /// 2. `fstab.nix` is rendered from `filesystem::fstab_module`
 ///    and `configuration.nix` from `configuration_nix`.
-/// 3. Outside debug mode, `hold_skip_rebuild_lock` is taken and held for
-///    the rest of the call (assigned to `_skip_rebuild`, dropped — and thus
-///    released — when `init` returns), so the transaction below only writes
-///    and commits; the real installer (Calamares / modulixos-installer)
-///    keeps its own lock held and drives the actual rebuild itself. In debug
-///    mode no lock is taken and the build genuinely runs, as `BuildVm` (see
-///    next point).
-/// 4. The build command passed to the `Transaction` is `BuildCommand::Boot`
-///    in release and `BuildCommand::BuildVm` in debug (which, per
-///    `BuildCommand::as_str`, resolves to `build-vm` either way in debug
-///    builds — so a debug run never touches the host system regardless of
-///    which variant is named here).
-/// 5. A single `Transaction` (`TransactionPermission::Writtable`) is opened
-///    over `flake.nix`, `hardware-configuration.nix`,
-///    `hardware_config::HARDWARE_OPTION_PATH`, `fstab.nix`,
-///    `locale::LOCALE_FILE_PATH`, `user::USER_FILE_PATH` and — only when the
-///    matching list is non-empty — `install_package::FILE_PACKAGE_PATH` and
-///    `install_module::FILE_MODULE_PATH`
-///    (`configuration.nix` is auto-added by `Transaction::begin`); within it,
-///    `flake.nix`/`configuration.nix`/`fstab.nix` get their rendered content,
-///    the hardware file is filled by
-///    `hardware_config::write_hardware_config_no_transaction`, `hardware.nix`
-///    by `hardware_config::write_hardware_options_no_transaction` from the
-///    topology probed up front, the locale
-///    file by `locale::set_locale_no_transaction` then
-///    `locale::set_keyboard_no_transaction`, and the user file by
+/// 3. The build command is `BuildCommand::BuildVm` in debug and
+///    `BuildCommand::Install` in release — the install this function seeds the
+///    repository for is run by the commit itself, as
+///    `nixos-install --root /mnt` (per `BuildCommand::as_str` a debug build
+///    resolves either variant to `build-vm`, so a debug run never touches the
+///    host system).
+/// 4. Everything is written by a single
+///    `core::transaction::make_group_transaction` call, one
+///    `core::transaction::TransactionOp` per edit, hence one git commit and
+///    one rebuild for the whole seed: `flake.nix`, `configuration.nix` and
+///    `fstab.nix` get their rendered content; `hardware-configuration.nix` is
+///    filled by `hardware_config::write_hardware_config_no_transaction` and
+///    `hardware_config::HARDWARE_OPTION_PATH` by
+///    `hardware_config::write_hardware_options_no_transaction` from the
+///    topology probed up front; `locale::LOCALE_FILE_PATH` by
+///    `locale::set_locale_no_transaction` then
+///    `locale::set_keyboard_no_transaction`; `user::USER_FILE_PATH` by
 ///    `user::add_no_transaction` (`params.username`, empty initial password,
 ///    `params.full_name`, `DEFAULT_SHELL`, groups `["wheel",
-///    "networkmanager"]`, `is_normal_user = true`). Locale and keyboard are
-///    folded into this same transaction, rather than a separate one, so the
-///    seed repo carries them from the first commit instead of needing a
-///    second transaction and rebuild; the X11 keyboard layout is set here —
-///    not in `configuration.nix` — so it is written whatever `params.desktop`
-///    is, and stays editable afterwards through `locale::set_keyboard`. The
-///    user file is filled for the same reason: one seed transaction, not one
-///    per file. Then, still in the same transaction, `params.packages` go
-///    into `package.nix` via `install_package::install_no_transaction` and
-///    `params.modules` into `module.nix` via
-///    `install_module::install_no_transaction`, and a `params.luks` with
-///    `tpm2` set gets `filesystem::set_luks_tpm2_no_transaction` applied to
-///    `fstab.nix` — after its content write, since that one replaces the whole
-///    buffer. The LUKS entry itself is not written here: the generator already
-///    declared it, and a second definition of the same option would make the
-///    NixOS module system fail. Any failure at this stage calls
-///    `tx.rollback()` and returns the original error.
-/// 6. `tx.commit(UpdateInput::UpdateAll)` commits and refreshes `flake.lock`.
-/// 7. `seal_base_files` re-applies the immutable flag to every file in
+///    "networkmanager"]`, `is_normal_user = true`). The X11 keyboard layout is
+///    set there — not in `configuration.nix` — so it is written whatever
+///    `params.desktop` is, and stays editable afterwards through
+///    `locale::set_keyboard`. Then, conditionally: `params.packages` into
+///    `package.nix` via `install_package::install_no_transaction`,
+///    one operation per `params.modules` entry into `module.nix` via
+///    `install_module::install_no_transaction`, the detected systems into
+///    `boot_config::FILE_BOOT_PATH` via
+///    `boot_config::write_boot_entries_no_transaction`, and the LUKS /
+///    hibernation facts into `fstab.nix` via `write_fstab_extras` — queued
+///    after that file's content write, since that one replaces the whole
+///    buffer. A LUKS entry the generator already declared is not re-declared:
+///    a second definition of the same option would make the NixOS module
+///    system fail. Any failure rolls the whole group back.
+/// 5. The commit refreshes `flake.lock` (`UpdateInput::UpdateAll`).
+/// 6. `seal_base_files` re-applies the immutable flag to every file in
 ///    `BASE_FILES` that exists. `package.nix` and `module.nix` are not in
 ///    that list and do not need to be — see `BASE_FILES`.
 ///
@@ -901,8 +854,9 @@ fn write_fstab_extras(fstab: &mut NixFile, params: &InitParams) -> mx::Result<()
 /// [`crate::CONFIG_DIRECTORY`] / `params.root`); `nixos-generate-config`
 /// (invoked indirectly through
 /// `hardware_config::write_hardware_config_no_transaction`) must be able to
-/// read `params.root`. No other process holds the skip-rebuild lock
-/// (relevant outside debug mode).
+/// read `params.root`. In release builds `params.root` must be `/mnt`, the
+/// root `BuildCommand::Install` installs into, and the caller must not run an
+/// install of its own: the commit runs it.
 ///
 /// The hardware probe reads the **live** machine and ignores `params.root`,
 /// as `DriverConfig::new` already does: an installer running from a live
@@ -919,20 +873,17 @@ fn write_fstab_extras(fstab: &mut NixFile, params: &InitParams) -> mx::Result<()
 /// user files, `package.nix`/`module.nix` when their list was non-empty, and
 /// `flake.lock`, all committed as `"modulix init"`; every file in
 /// `BASE_FILES` present on disk is immutable; `.cache` exists and is
-/// listed in `.git/info/exclude` together with `result`. Outside debug mode,
-/// no `nixos-rebuild`/`nixos-install` has actually run (the skip-rebuild
-/// lock suppresses it) — the caller is expected to drive that separately. In
-/// debug mode, `nixos-rebuild build-vm` has run as part of the commit.
+/// listed in `.git/info/exclude` together with `result`. The commit has run
+/// the rebuild: `nixos-install --root /mnt` in release, `nixos-rebuild
+/// build-vm` in debug.
 ///
-/// On failure: if the failure happens before `tx.begin()` succeeds, the
-/// directory may already have been wiped and recreated (and, if reached,
-/// `.cache`/the exclude file already written) with no commit made. If the
-/// failure happens after `begin()` while filling file contents, the
-/// transaction is explicitly rolled back (`tx.rollback()`) before the error
-/// is returned. If `tx.commit` itself fails, `Transaction::commit_impl`
-/// rolls back internally. In every rollback case the held skip-rebuild lock
-/// (if any) is still released when `_skip_rebuild` drops at function return.
-/// `seal_base_files` is only reached after a successful commit.
+/// On failure: if the failure happens before the group opens its transaction,
+/// the directory may already have been wiped and recreated (and, if reached,
+/// `.cache`/the exclude file already written) with no commit made. Once the
+/// transaction is open, any failing operation — and any failing commit — rolls
+/// the whole group back, so the repository is left at its previous commit with
+/// no file lock held. `seal_base_files` is only reached after a successful
+/// commit.
 ///
 /// # Returns
 /// `Ok(())` once the repo has been created, seeded, committed and sealed.
@@ -943,16 +894,18 @@ fn write_fstab_extras(fstab: &mut NixFile, params: &InitParams) -> mx::Result<()
 /// * `mx::ErrorKind::IOError` - directory removal/creation, or any file I/O
 ///   in `init_git_exclude`/`seal_base_files`, failed.
 /// * `mx::ErrorKind::GitError` - `git2` failed to init the repo.
-/// * `mx::ErrorKind::FailToLock` - `hold_skip_rebuild_lock` could not
-///   acquire its lock (non-debug builds only).
+/// * `mx::ErrorKind::BuildError` - the install/rebuild the commit runs exited
+///   non-zero; the message carries its standard error.
 /// * Any error from `HardwareTopology::detect`, `filesystem::fstab_module`,
 ///   `hardware_config::write_hardware_config_no_transaction`,
 ///   `hardware_config::write_hardware_options_no_transaction`,
 ///   `locale::set_locale_no_transaction`,
 ///   `locale::set_keyboard_no_transaction`, `user::add_no_transaction`,
-///   `Transaction::new`, `Transaction::add_file`, `Transaction::begin`,
-///   `Transaction::get_file_mut`, `NixFile::get_mut_file_content`, or
-///   `Transaction::commit`.
+///   `install_package::install_no_transaction`,
+///   `install_module::install_no_transaction`,
+///   `boot_config::write_boot_entries_no_transaction`, `write_fstab_extras`,
+///   `NixFile::get_mut_file_content`, or
+///   `core::transaction::make_group_transaction`.
 pub fn init(params: &InitParams) -> mx::Result<()> {
     // Before anything is deleted: nothing this probe reads depends on the
     // config directory, so failing here must leave the existing configuration
@@ -977,207 +930,103 @@ pub fn init(params: &InitParams) -> mx::Result<()> {
     let fstab = filesystem::fstab_module(&params.root)?;
     let config = configuration_nix(params, !other_os.is_empty());
 
-    let _skip_rebuild = if params.debug {
-        None
-    } else {
-        Some(hold_skip_rebuild_lock()?)
-    };
-
     let build_command = if params.debug {
         BuildCommand::BuildVm
     } else {
-        BuildCommand::Boot
+        BuildCommand::Install
     };
 
-    let mut tx = Transaction::new(
-        &path_config,
-        "modulix init",
-        build_command,
-        TransactionPermission::Writtable,
-    )?;
+    let packages: Vec<&str> = params.packages.iter().map(String::as_str).collect();
 
-    let mut files = vec![
-        "flake.nix",
-        hardware_config::HARDWARE_CONFIG_PATH,
-        hardware_config::HARDWARE_OPTION_PATH,
-        "fstab.nix",
-        locale::LOCALE_FILE_PATH,
-        user::USER_FILE_PATH,
-    ];
-    if !params.packages.is_empty() {
-        files.push(install_package::FILE_PACKAGE_PATH);
-    }
-    if !params.modules.is_empty() {
-        files.push(install_module::FILE_MODULE_PATH);
-    }
-    if !other_os.is_empty() {
-        files.push(boot_config::FILE_BOOT_PATH);
-    }
-    for f in files {
-        tx.add_file(f)?;
-    }
-
-    tx.begin()?;
-
-    for (name, content) in [
-        ("flake.nix", FLAKE_FILE),
-        ("configuration.nix", config.as_str()),
-        ("fstab.nix", fstab.as_str()),
-    ] {
-        match tx.get_file_mut(name) {
-            Ok(file) => match file.get_mut_file_content() {
-                Ok(c) => *c = content.to_string(),
-                Err(e) => {
-                    tx.rollback()?;
-                    return Err(e);
-                }
-            },
-            Err(e) => {
-                tx.rollback()?;
-                return Err(e);
-            }
-        }
-    }
-
-    match tx.get_file_mut(hardware_config::HARDWARE_CONFIG_PATH) {
-        Ok(file) => {
-            if let Err(e) =
-                hardware_config::write_hardware_config_no_transaction(&params.root, file)
-            {
-                tx.rollback()?;
-                return Err(e);
-            }
-        }
-        Err(e) => {
-            tx.rollback()?;
-            return Err(e);
-        }
-    }
-
-    match tx.get_file_mut(hardware_config::HARDWARE_OPTION_PATH) {
-        Ok(file) => {
-            if let Err(e) = hardware_config::write_hardware_options_no_transaction(file, &hardware)
-            {
-                tx.rollback()?;
-                return Err(e);
-            }
-        }
-        Err(e) => {
-            tx.rollback()?;
-            return Err(e);
-        }
-    }
-
-    match tx.get_file_mut(locale::LOCALE_FILE_PATH) {
-        Ok(file) => {
-            let written = locale::set_locale_no_transaction(
-                file,
-                &params.timezone,
-                &params.locale,
-                &params.console_keymap,
-            )
-            .and_then(|()| {
+    let mut ops = vec![
+        TransactionOp::new("seed flake.nix", "flake.nix", |file| {
+            *file.get_mut_file_content()? = FLAKE_FILE.to_string();
+            Ok(())
+        }),
+        TransactionOp::new("seed configuration.nix", "configuration.nix", move |file| {
+            *file.get_mut_file_content()? = config;
+            Ok(())
+        }),
+        TransactionOp::new("seed fstab.nix", "fstab.nix", move |file| {
+            *file.get_mut_file_content()? = fstab;
+            Ok(())
+        }),
+        TransactionOp::new(
+            "write hardware configuration",
+            hardware_config::HARDWARE_CONFIG_PATH,
+            |file| hardware_config::write_hardware_config_no_transaction(&params.root, file),
+        ),
+        TransactionOp::new(
+            "write detected hardware options",
+            hardware_config::HARDWARE_OPTION_PATH,
+            |file| hardware_config::write_hardware_options_no_transaction(file, &hardware),
+        ),
+        TransactionOp::new(
+            "set locale and keyboard",
+            locale::LOCALE_FILE_PATH,
+            |file| {
+                locale::set_locale_no_transaction(
+                    file,
+                    &params.timezone,
+                    &params.locale,
+                    &params.console_keymap,
+                )?;
                 locale::set_keyboard_no_transaction(file, &params.kb_layout, &params.kb_variant)
-            });
-            if let Err(e) = written {
-                tx.rollback()?;
-                return Err(e);
-            }
-        }
-        Err(e) => {
-            tx.rollback()?;
-            return Err(e);
-        }
+            },
+        ),
+        TransactionOp::new(
+            &format!("create user {}", params.username),
+            user::USER_FILE_PATH,
+            |file| {
+                user::add_no_transaction(
+                    file,
+                    &params.username,
+                    "",
+                    &params.full_name,
+                    DEFAULT_SHELL,
+                    &["wheel", "networkmanager"],
+                    true,
+                )
+            },
+        ),
+    ];
+
+    // Queued after the content write above, which replaces `fstab.nix`
+    // wholesale with the generator's output — the entries these options attach
+    // to are in there.
+    if !params.luks.is_empty() || params.resume_device.is_some() {
+        ops.push(TransactionOp::new(
+            "declare LUKS and hibernation facts",
+            "fstab.nix",
+            |file| write_fstab_extras(file, params),
+        ));
     }
 
-    match tx.get_file_mut(user::USER_FILE_PATH) {
-        Ok(file) => {
-            if let Err(e) = user::add_no_transaction(
-                file,
-                &params.username,
-                "",
-                &params.full_name,
-                DEFAULT_SHELL,
-                &["wheel", "networkmanager"],
-                true,
-            ) {
-                tx.rollback()?;
-                return Err(e);
-            }
-        }
-        Err(e) => {
-            tx.rollback()?;
-            return Err(e);
-        }
+    if !packages.is_empty() {
+        ops.push(TransactionOp::new(
+            "install seed packages",
+            install_package::FILE_PACKAGE_PATH,
+            move |file| install_package::install_no_transaction(file, &packages),
+        ));
     }
 
-    if !params.packages.is_empty() {
-        let packages: Vec<&str> = params.packages.iter().map(String::as_str).collect();
-        match tx.get_file_mut(install_package::FILE_PACKAGE_PATH) {
-            Ok(file) => {
-                if let Err(e) = install_package::install_no_transaction(file, &packages) {
-                    tx.rollback()?;
-                    return Err(e);
-                }
-            }
-            Err(e) => {
-                tx.rollback()?;
-                return Err(e);
-            }
-        }
-    }
-
-    if !params.modules.is_empty() {
-        match tx.get_file_mut(install_module::FILE_MODULE_PATH) {
-            Ok(file) => {
-                for module in &params.modules {
-                    if let Err(e) = install_module::install_no_transaction(file, module) {
-                        tx.rollback()?;
-                        return Err(e);
-                    }
-                }
-            }
-            Err(e) => {
-                tx.rollback()?;
-                return Err(e);
-            }
-        }
+    for module in &params.modules {
+        ops.push(TransactionOp::new(
+            &format!("enable module {}", module),
+            install_module::FILE_MODULE_PATH,
+            move |file| install_module::install_no_transaction(file, module),
+        ));
     }
 
     if !other_os.is_empty() {
-        match tx.get_file_mut(boot_config::FILE_BOOT_PATH) {
-            Ok(file) => {
-                if let Err(e) = boot_config::write_boot_entries_no_transaction(file, &other_os) {
-                    tx.rollback()?;
-                    return Err(e);
-                }
-            }
-            Err(e) => {
-                tx.rollback()?;
-                return Err(e);
-            }
-        }
+        ops.push(TransactionOp::new(
+            "declare the other systems' boot entries",
+            boot_config::FILE_BOOT_PATH,
+            move |file| boot_config::write_boot_entries_no_transaction(file, &other_os),
+        ));
     }
 
-    // After the content loop above, which replaces `fstab.nix` wholesale with
-    // the generator's output — the entries these options attach to are in
-    // there.
-    if !params.luks.is_empty() || params.resume_device.is_some() {
-        match tx.get_file_mut("fstab.nix") {
-            Ok(file) => {
-                if let Err(e) = write_fstab_extras(file, params) {
-                    tx.rollback()?;
-                    return Err(e);
-                }
-            }
-            Err(e) => {
-                tx.rollback()?;
-                return Err(e);
-            }
-        }
-    }
-
-    tx.commit(UpdateInput::UpdateAll)?;
+    make_group_transaction(&path_config, build_command, UpdateInput::UpdateAll, ops)?;
 
     seal_base_files(&path_config)?;
 

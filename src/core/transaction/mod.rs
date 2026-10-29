@@ -5,7 +5,10 @@
 //! rewrite atomic, [`Transaction`] turns a set of files plus a rebuild into one
 //! git-versioned step, and `build_queue` serialises the rebuilds of concurrent
 //! processes. Domain modules do not drive them by hand: they call
-//! [`make_transaction`] (or `make_transaction_read_only`) with a closure.
+//! [`make_transaction`] (or `make_transaction_read_only`) with a closure, and a
+//! caller that has to change several files at once calls
+//! `make_group_transaction`, which packs one operation per edit into a single
+//! commit and a single rebuild.
 
 pub(crate) mod build_queue;
 pub mod file_lock;
@@ -167,6 +170,213 @@ where
             Err(e)
         }
     }
+}
+/// Subject line prefix of the commit a multi-operation group creates.
+#[cfg(any(feature = "init", feature = "hardware-config", test))]
+const GROUP_SUBJECT_PREFIX: &str = "modulix:";
+
+/// Edit a [`TransactionOp`] applies to the file it names, boxed so operations
+/// built from unrelated closures can share one vector.
+///
+/// # Type parameters
+/// * `'f` – lifetime of what the closure borrows from its caller.
+#[cfg(any(feature = "init", feature = "hardware-config", test))]
+type NixFileEdit<'f> = Box<dyn FnOnce(&mut NixFile) -> mx::Result<()> + 'f>;
+
+/// One edit of a grouped transaction: what to say about it, which file it
+/// touches, and the edit itself.
+///
+/// Built with [`TransactionOp::new`] and handed to [`make_group_transaction`],
+/// which packs a whole vector of them into a single git commit and a single
+/// rebuild.
+///
+/// # Fields
+/// * `description` – human-readable label of this single edit; it becomes one
+///   bullet of the group's commit message.
+/// * `file_path` – path, relative to the configuration repository, of the file
+///   the edit applies to. Several operations may name the same file.
+/// * `edit` – the edit itself, run on the open [`NixFile`] once the
+///   transaction has begun.
+///
+/// # Type parameters
+/// * `'f` – lifetime of what the edit closure borrows, so an operation can
+///   capture the caller's data by reference.
+#[cfg(any(feature = "init", feature = "hardware-config", test))]
+pub struct TransactionOp<'f> {
+    description: String,
+    file_path: String,
+    edit: NixFileEdit<'f>,
+}
+
+#[cfg(any(feature = "init", feature = "hardware-config", test))]
+impl<'f> TransactionOp<'f> {
+    /// Describes one edit of a grouped transaction.
+    ///
+    /// # Arguments
+    /// * `description` – label of this edit, used as one bullet of the group's
+    ///   commit message.
+    /// * `file_path` – path of the file to edit, relative to the configuration
+    ///   repository (e.g. `"firewall.nix"`).
+    /// * `edit` – closure applied to the open [`NixFile`]; it edits the
+    ///   in-memory buffer only, the group decides when it reaches the disk.
+    ///
+    /// # Type parameters
+    /// * `F` – the closure type.
+    ///
+    /// # Returns
+    /// The operation, inert until [`make_group_transaction`] runs it.
+    pub fn new<F>(description: &str, file_path: &str, edit: F) -> Self
+    where
+        F: FnOnce(&mut NixFile) -> mx::Result<()> + 'f,
+    {
+        TransactionOp {
+            description: description.to_string(),
+            file_path: file_path.to_string(),
+            edit: Box::new(edit),
+        }
+    }
+}
+
+/// Builds the commit message of a group from its operations' descriptions.
+///
+/// # Arguments
+/// * `descriptions` – one description per operation, in the order they run.
+///
+/// # Returns
+/// The lone description verbatim for a single operation, so a one-operation
+/// group commits exactly like [`make_transaction`]; otherwise a counted
+/// subject followed by one bullet per description. The empty string for an
+/// empty slice, which [`make_group_transaction`] never commits.
+#[cfg(any(feature = "init", feature = "hardware-config", test))]
+fn group_message(descriptions: &[&str]) -> String {
+    match descriptions {
+        [] => String::new(),
+        [only] => (*only).to_string(),
+        many => {
+            let mut message = format!(
+                "{} {} configuration changes\n",
+                GROUP_SUBJECT_PREFIX,
+                many.len()
+            );
+            for description in many {
+                message.push_str("\n- ");
+                message.push_str(description);
+            }
+            message.push('\n');
+            message
+        }
+    }
+}
+
+/// Applies several edits, over as many files as needed, as **one** git commit
+/// and **one** rebuild.
+///
+/// The grouped counterpart of [`make_transaction`]: instead of one file and one
+/// closure, it takes a vector of [`TransactionOp`]s, each carrying its own
+/// description, target file and edit. Every file is locked for the whole group,
+/// every edit is applied in memory, and the commit that follows records all of
+/// them at once — so a caller that changes several configuration domains pays
+/// for a single `nixos-rebuild` instead of one per domain.
+///
+/// # Behavior
+/// 1. Registers each distinct `file_path`, in first-appearance order, then
+///    opens the transaction (`begin`).
+/// 2. Runs each operation in the order given, on the [`NixFile`] it names.
+///    Several operations on one file see each other's edits, later ones
+///    building on earlier ones.
+/// 3. On success → [`Transaction::commit`]; on the first error →
+///    [`Transaction::rollback`], and that error is returned.
+///
+/// # Arguments
+/// * `config_dir` – root directory of the NixOS configuration.
+/// * `build_command` – command to run after the commit (e.g. `nixos-rebuild
+///   switch`), run once for the whole group.
+/// * `updated_input` – how `flake.lock` is refreshed by the commit.
+/// * `ops` – the operations to apply, in order. May name the same file more
+///   than once, and may name `configuration.nix`, which
+///   [`Transaction::begin`] registers anyway.
+///
+/// # Pre-conditions
+/// `config_dir` must be a committable git repository, as for
+/// [`make_transaction`].
+///
+/// # Post-conditions
+/// An empty `ops` performs no I/O at all: no repository is opened, no file is
+/// locked and nothing is committed. Otherwise either every edit is committed,
+/// or none is: an error rolls the configuration back to its previous commit and
+/// leaves no file lock held. Blocks for the whole rebuild, which is serialised
+/// against the other processes' rebuilds.
+///
+/// # Returns
+/// `Ok(())` once the group is committed (and rebuilt, unless nothing actually
+/// changed), or the first `mx::ErrorKind` met.
+///
+/// # Example
+/// ```ignore
+/// make_group_transaction(
+///     "/etc/nixos",
+///     BuildCommand::Switch,
+///     UpdateInput::Keep,
+///     vec![
+///         TransactionOp::new("open port 22", "firewall.nix", |file| {
+///             firewall::add_port_no_transaction(file, 22)
+///         }),
+///         TransactionOp::new("install vim", "package.nix", |file| {
+///             install_package::install_no_transaction(file, &["vim"])
+///         }),
+///     ],
+/// )?;
+/// ```
+#[cfg(any(feature = "init", feature = "hardware-config", test))]
+pub fn make_group_transaction(
+    config_dir: &str,
+    build_command: BuildCommand,
+    updated_input: UpdateInput,
+    ops: Vec<TransactionOp<'_>>,
+) -> mx::Result<()> {
+    if ops.is_empty() {
+        return Ok(());
+    }
+
+    let message = {
+        let descriptions: Vec<&str> = ops.iter().map(|op| op.description.as_str()).collect();
+        group_message(&descriptions)
+    };
+
+    let mut transaction = Transaction::new(
+        config_dir,
+        &message,
+        build_command,
+        TransactionPermission::Writtable,
+    )?;
+
+    {
+        let mut registered: Vec<&str> = Vec::new();
+        for op in &ops {
+            if !registered.contains(&op.file_path.as_str()) {
+                transaction.add_file(&op.file_path)?;
+                registered.push(op.file_path.as_str());
+            }
+        }
+    }
+
+    transaction.begin()?;
+
+    for op in ops {
+        let file = match transaction.get_file_mut(&op.file_path) {
+            Ok(file) => file,
+            Err(e) => {
+                transaction.rollback()?;
+                return Err(e);
+            }
+        };
+        if let Err(e) = (op.edit)(file) {
+            transaction.rollback()?;
+            return Err(e);
+        }
+    }
+
+    transaction.commit(updated_input)
 }
 
 #[cfg(test)]
