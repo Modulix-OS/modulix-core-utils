@@ -28,10 +28,9 @@
 //! # Output
 //! [`generate_file`] unconditionally overwrites `flathub_basic_info.rs` in the
 //! current working directory with freshly rendered `phf` maps - there is no
-//! merge with the previous contents. Since `package_basic_info.rs` only
-//! `include!`s that file when the `flathub-info-gen` feature is *disabled*,
-//! the regenerated file must be committed for the new lookups to take effect
-//! for normal (non-generator) builds.
+//! merge with the previous contents. `build.rs` stages that file into `OUT_DIR`
+//! for `package_basic_info.rs` to `include!`, so the regenerated file must be
+//! committed for the new lookups to take effect in later builds.
 //!
 //! # Generated table shape
 //! - `NIX_INFO: phf::Map<&'static str, NixInfo>` - keyed by nixpkgs attribute
