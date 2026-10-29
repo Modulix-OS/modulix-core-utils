@@ -92,13 +92,6 @@
                 '';
             };
 
-            mx-apply-update = naerskLib.buildPackage {
-                src = ./.;
-                cargoBuildOptions = x: x ++ [ "--features" "system-update" ];
-                buildInputs = with pkgs; [ openssl ];
-                nativeBuildInputs = with pkgs; [ pkg-config ];
-            };
-
             fakehw = mkFakehw pkgs; # fakehw
 
             default = mx-init;

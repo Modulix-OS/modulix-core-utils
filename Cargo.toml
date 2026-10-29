@@ -74,13 +74,7 @@ install-package = [
     "core-app-info-trait",
 ]
 user = ["core-nix-file"]
-system-update = [
-    "core-nix-file",
-    "core-nix-eval",
-    "dep:serde",
-    "serde-json",
-    "dep:tokio",
-]
+system-update = ["core-nix-file"]
 
 hostname = ["core-nix-file", "core-nix-eval"]
 
@@ -143,11 +137,6 @@ required-features = ["flathub-info-gen"]
 name = "mx-init"
 path = "bin/init.rs"
 required-features = ["init"]
-
-[[bin]]
-name = "mx-apply-update"
-path = "bin/apply-update.rs"
-required-features = ["system-update"]
 
 [[exemple]]
 name = "filesystem"

@@ -1,7 +1,7 @@
 //! [`Transaction`]: a set of configuration files plus the rebuild that applies
 //! them, committed to git or rolled back as one unit.
 
-use std::{collections::HashMap, fs, io, path, process, sync::atomic};
+use std::{collections::HashMap, fs, io, path, process};
 
 use super::build_queue::BuildQueue;
 use super::file_lock::NixFile;
@@ -19,28 +19,10 @@ use crate::{
 /// runs no `nixos-rebuild`.
 pub(crate) const LOCK_SKIP_REBUILD_FILE: &str = "/tmp/mx-skip-rebuild.lock";
 
-/// Binary used to run a rebuild in its own transient unit, outside the control
-/// group of the process that asked for it.
-const SYSTEMD_RUN: &str = "systemd-run";
-
-/// Environment variables forwarded to the transient rebuild unit.
-///
-/// A transient unit inherits the service manager's environment, not the
-/// caller's. `PATH` is the one that matters - `nixos-rebuild` needs `nix` and
-/// `git` on it, and in Modulix those come from the daemon unit's `path`
-/// attribute - the others only keep the rebuild behaving as it does in-process.
-const FORWARDED_ENV: [&str; 4] = ["PATH", "NIX_PATH", "NIXPKGS_ALLOW_UNFREE", "HOME"];
-
 /// Message [`Transaction::begin`] stamps on the stash entry it creates for a
-/// dirty working tree, and the marker [`Transaction::restore_orphan_stashes`]
-/// recognises an abandoned one by.
+/// dirty working tree, so [`Transaction::stash_restore`] only ever pops an
+/// entry this crate pushed.
 pub(crate) const STASH_MESSAGE: &str = "mx: auto-stash before transaction";
-
-/// Per-process serial making each transient rebuild unit name unique.
-///
-/// Only has to disambiguate rebuilds of one process: the process id is part of
-/// the name too.
-static REBUILD_UNIT_SEQ: atomic::AtomicU64 = atomic::AtomicU64::new(0);
 
 /// `nixos-rebuild` (or `nixos-install`) command to run after a successful commit.
 ///
@@ -54,10 +36,11 @@ pub enum BuildCommand {
     Switch,
     /// Prepares the next boot without rebooting (`nixos-rebuild boot`).
     Boot,
-    /// Initial install on a new machine (`nixos-install`).
+    /// Initial install on a new machine (`nixos-install --root /mnt`).
     /// The build command is empty in release; triggers `build-vm` in debug.
-    /// Only `init` constructs it, and only in a release build - a debug build
-    /// uses [`BuildCommand::Boot`] instead.
+    /// Only `init`/`init_repo` construct it, and only in a release build - a
+    /// debug build uses [`BuildCommand::BuildVm`] / [`BuildCommand::Boot`]
+    /// instead.
     #[cfg_attr(any(debug_assertions, not(feature = "init")), allow(dead_code))]
     Install,
     /// Builds a VM image (`nixos-rebuild build-vm`), never touches the running
@@ -69,7 +52,9 @@ pub enum BuildCommand {
     /// path fetched, but neither the running system nor the boot entries change.
     /// Used to pay the download/build cost ahead of a later `Switch`/`Boot`,
     /// which then finds the store already warm.
-    #[cfg_attr(not(feature = "system-update"), allow(dead_code))]
+    // Nothing in this crate builds without activating any more; the variant
+    // stays because `as_str` maps it and a consumer may ask for it.
+    #[allow(dead_code)]
     Build,
 }
 
@@ -80,17 +65,15 @@ pub enum BuildCommand {
 /// * `UpdateAll` - `nix flake update`, refreshing every input.
 /// * `UpdateSelected` - refresh only the named inputs, which is what an
 ///   operation touching one input uses.
-/// * `UseLock` - write the carried `flake.lock` content as-is instead of
-///   running `nix flake update` at all. Lets a caller that already computed a
-///   candidate lockfile out-of-band (the daemon's update check) apply exactly
-///   the revisions it announced, without a second network round.
+///
+/// Anything other than `Keep` makes the commit run `nix flake update` even
+/// when no tracked file changed, so an operation that edits nothing (a system
+/// update) still refreshes the lockfile - see [`Transaction::commit_impl`].
 pub enum UpdateInput {
     Keep,
     UpdateAll,
     #[cfg_attr(not(feature = "flake-input"), allow(dead_code))]
     UpdateSelected(Vec<String>),
-    #[cfg_attr(not(feature = "system-update"), allow(dead_code))]
-    UseLock(String),
 }
 
 /// What a transaction is allowed to do with the configuration.
@@ -294,21 +277,10 @@ pub struct Transaction<'a> {
     /// Whether this transaction may edit and commit, or only read.
     permission_transaction: TransactionPermission,
 
-    /// When `true`, [`commit_impl`] runs `run_flake_update` even if no file in
-    /// `list_file` changed, so an operation that edits nothing (a system
-    /// update) can still refresh `flake.lock`. The commit and the rebuild
-    /// still only happen if that refresh actually moved `flake.lock`.
-    force_commit: bool,
-
     /// `--cores` passed to `nixos-rebuild`/`nixos-install`, capping how many
     /// CPU cores a single derivation build may use. `None` leaves the Nix
     /// default (`nix.conf`'s `cores`, itself defaulting to all of them).
     rebuild_cores: Option<u32>,
-
-    /// When `true`, [`commit_impl`] commits but runs no rebuild, for a caller
-    /// that has already activated the configuration it is recording (the
-    /// staged-update promotion) and only needs git to catch up.
-    skip_rebuild: bool,
 }
 
 impl<'a> Transaction<'a> {
@@ -345,41 +317,8 @@ impl<'a> Transaction<'a> {
             old_commit: git2::Oid::ZERO_SHA1,
             stash_oid: None,
             permission_transaction: permission,
-            force_commit: false,
             rebuild_cores: None,
-            skip_rebuild: false,
         })
-    }
-
-    /// Turns the transaction into a commit-only one: the configuration is
-    /// written and committed, but no `nixos-rebuild` runs.
-    ///
-    /// Meant for the caller that already activated the configuration it is
-    /// about to record - the staged-update promotion applies the new system
-    /// with `nixos-rebuild boot` against the pre-built copy, then commits the
-    /// candidate lockfile so the repository matches what will boot. Rebuilding
-    /// there would redo, from the real repository, the work the staged build
-    /// already did.
-    ///
-    /// # Arguments
-    /// * `skip` - when `true`, [`commit_impl`] skips the build queue and the
-    ///   rebuild entirely. The commit itself is unaffected, and so is the
-    ///   rollback on error.
-    #[cfg(feature = "system-update")]
-    pub fn set_skip_rebuild(&mut self, skip: bool) {
-        self.skip_rebuild = skip;
-    }
-
-    /// Forces [`commit_impl`] to run `run_flake_update` even when no tracked
-    /// file changed.
-    ///
-    /// # Arguments
-    /// * `force` - when `true`, an update-only transaction (no file edit)
-    ///   still refreshes `flake.lock`; the commit and rebuild still only
-    ///   happen if that refresh actually moved the lockfile.
-    #[cfg(feature = "system-update")]
-    pub fn set_force_commit(&mut self, force: bool) {
-        self.force_commit = force;
     }
 
     /// Caps the number of CPU cores the rebuild's `nix` build may use.
@@ -434,117 +373,6 @@ impl<'a> Transaction<'a> {
         command
     }
 
-    /// Tells whether `name` resolves to a file in one of the `PATH` entries.
-    ///
-    /// # Arguments
-    /// * `name` – bare binary name, without a directory component.
-    ///
-    /// # Pre-conditions
-    /// None.
-    ///
-    /// # Post-conditions
-    /// Performs read-only filesystem lookups; nothing is spawned and the
-    /// environment is not modified.
-    ///
-    /// # Returns
-    /// `true` when `PATH` is set and one of its entries holds a file called
-    /// `name`, `false` otherwise (including when `PATH` is unset). The
-    /// executable bit is not checked.
-    fn binary_on_path(name: &str) -> bool {
-        match std::env::var_os("PATH") {
-            Some(path) => std::env::split_paths(&path).any(|dir| dir.join(name).is_file()),
-            None => false,
-        }
-    }
-
-    /// Tells whether the rebuild must be moved into its own transient unit.
-    ///
-    /// The caller is a long-lived daemon in Modulix, and a `switch` restarts
-    /// the units whose definition changed - the caller's own included. With the
-    /// rebuild as a plain child, that restart kills the whole control group:
-    /// `nixos-rebuild` and `switch-to-configuration` die halfway through the
-    /// activation. A transient unit has its own control group and survives.
-    ///
-    /// # Pre-conditions
-    /// None.
-    ///
-    /// # Post-conditions
-    /// Read-only: inspects the environment and the `PATH` entries, spawns
-    /// nothing.
-    ///
-    /// # Returns
-    /// `true` when the process runs inside a systemd unit (`INVOCATION_ID` is
-    /// set, which systemd sets for every service it starts) *and*
-    /// [`SYSTEMD_RUN`] is reachable through `PATH`. `false` otherwise, which
-    /// keeps the plain command for the command-line tools (`mx-init`) and for
-    /// the tests.
-    fn should_detach_rebuild() -> bool {
-        std::env::var_os("INVOCATION_ID").is_some() && Self::binary_on_path(SYSTEMD_RUN)
-    }
-
-    /// Wraps `command` in a `systemd-run` invocation so it runs in its own
-    /// transient unit instead of the caller's control group.
-    ///
-    /// `--wait` keeps the call synchronous and propagates the exit status, and
-    /// `--pipe` keeps the child's standard streams wired to ours, so
-    /// [`rebuild_config`]'s stdout/stderr contract is unchanged. `--collect`
-    /// reaps the unit even when it fails, and `KillMode=process` means a later
-    /// stop of the unit does not take the rebuild's own children down.
-    ///
-    /// Only the variables in [`FORWARDED_ENV`] are carried over: a transient
-    /// unit inherits the service manager's environment, not the caller's, so
-    /// `PATH` in particular has to be passed explicitly or `nixos-rebuild`
-    /// would not find `nix` and `git`.
-    ///
-    /// # Arguments
-    /// * `command` – the rebuild command as built by
-    ///   [`build_rebuild_command`]; its program and arguments are copied.
-    /// * `cwd` – working directory for the rebuild, passed as a unit property
-    ///   because a working directory set on the `systemd-run` client would
-    ///   apply to the client only; `None` leaves the manager's default.
-    ///
-    /// # Pre-conditions
-    /// [`should_detach_rebuild`] returned `true`.
-    ///
-    /// # Post-conditions
-    /// Returns an unspawned command; stdio is left at the `process::Command`
-    /// default for the caller to wire. The unit name embeds the process id and
-    /// a per-process serial, so two concurrent rebuilds cannot collide.
-    ///
-    /// # Returns
-    /// The `systemd-run` command wrapping `command`.
-    fn detach_rebuild_command(command: process::Command, cwd: Option<&str>) -> process::Command {
-        let serial = REBUILD_UNIT_SEQ.fetch_add(1, atomic::Ordering::Relaxed);
-
-        let mut detached = process::Command::new(SYSTEMD_RUN);
-        detached
-            .arg("--collect")
-            .arg("--wait")
-            .arg("--pipe")
-            .arg("--quiet")
-            .arg(format!("--unit=mx-rebuild-{}-{}", process::id(), serial))
-            .arg("--property=KillMode=process")
-            .arg("--property=TimeoutStartSec=infinity");
-
-        if let Some(cwd) = cwd {
-            detached.arg(format!("--property=WorkingDirectory={cwd}"));
-        }
-
-        for key in FORWARDED_ENV {
-            if let Some(value) = std::env::var_os(key) {
-                let mut arg = std::ffi::OsString::from("--setenv=");
-                arg.push(key);
-                arg.push("=");
-                arg.push(value);
-                detached.arg(arg);
-            }
-        }
-
-        detached.arg("--").arg(command.get_program());
-        detached.args(command.get_args());
-        detached
-    }
-
     /// Runs the NixOS rebuild in a subprocess and waits for it to finish.
     ///
     /// Depending on the `build_command` variant:
@@ -558,6 +386,12 @@ impl<'a> Transaction<'a> {
     /// Standard output is inherited (visible in the parent terminal); standard
     /// error is captured into `stderr` if provided.
     ///
+    /// The rebuild is a plain child process, in the caller's own control group:
+    /// whatever kills the caller kills the activation halfway through. That is
+    /// only safe because no long-lived unit drives a `switch` here - a caller
+    /// that could be restarted by its own rebuild would have to put it in a
+    /// transient unit of its own.
+    ///
     /// # Arguments
     /// * `path_config`   – Repository holding the flake to build.
     /// * `config_name`   – `nixosConfigurations` attribute to build.
@@ -567,10 +401,6 @@ impl<'a> Transaction<'a> {
     ///   discard it.
     /// * `cores`         – forwarded as `--cores <cores>`; `None` leaves the
     ///   Nix default.
-    /// * `cwd`           – working directory of the child process; `None`
-    ///   inherits the caller's. The `build-vm` and `build` subcommands drop a
-    ///   `result` symlink there, so a caller that must not litter its own
-    ///   directory passes a scratch path.
     ///
     /// # Returns
     /// `Ok(true)` if the process exited successfully (code 0), `Ok(false)` otherwise.
@@ -589,18 +419,9 @@ impl<'a> Transaction<'a> {
         build_command: BuildCommand,
         stderr: Option<&mut String>,
         cores: Option<u32>,
-        cwd: Option<&str>,
     ) -> mx::Result<bool> {
-        let command = Self::build_rebuild_command(path_config, config_name, &build_command, cores);
-        let mut command = if Self::should_detach_rebuild() {
-            Self::detach_rebuild_command(command, cwd)
-        } else {
-            let mut command = command;
-            if let Some(cwd) = cwd {
-                command.current_dir(cwd);
-            }
-            command
-        };
+        let mut command =
+            Self::build_rebuild_command(path_config, config_name, &build_command, cores);
         let mut child = command
             .stdout(process::Stdio::inherit())
             .stderr(process::Stdio::piped())
@@ -1017,123 +838,11 @@ impl<'a> Transaction<'a> {
         Ok(())
     }
 
-    /// Puts back the stash entries an interrupted transaction left behind.
-    ///
-    /// Neither [`Transaction`] nor [`NixFile`] implements `Drop`, so a process
-    /// killed between [`begin`] and the end of [`commit_impl`] - which is what
-    /// happens when a `switch` restarts the daemon that asked for it - leaves
-    /// its auto-stash in the stash list, with the caller's uncommitted work
-    /// inside. Nothing detects that on its own; this is the recovery step, for
-    /// a caller to run at start-up.
-    ///
-    /// # Arguments
-    /// * `repo_path` - configuration repository to inspect.
-    ///
-    /// # Pre-conditions
-    /// No transaction of this or any other process may be open on `repo_path`:
-    /// an entry stashed by a live transaction is indistinguishable from an
-    /// abandoned one, and popping it would restore, mid-transaction, the very
-    /// changes [`begin`] set aside. Call it before serving any request.
-    ///
-    /// # Post-conditions
-    /// Only entries carrying [`STASH_MESSAGE`] are touched, and only while they
-    /// sit on top of the stack - a stash the user pushed themselves is left
-    /// where it is. An entry that cannot be popped (conflict) is dropped, same
-    /// trade-off as [`stash_restore`]: the uncommitted work is lost, the
-    /// repository stays usable. The working tree is otherwise unchanged, and
-    /// `HEAD` never moves.
-    ///
-    /// # Returns
-    /// How many entries were popped or dropped; `0` when there was nothing to
-    /// recover, which is the normal case.
-    ///
-    /// # Errors
-    /// [`mx::ErrorKind::GitError`] if `repo_path` cannot be opened, if the
-    /// stash list cannot be walked, or if a conflicting entry cannot be
-    /// dropped.
-    #[cfg(feature = "system-update")]
-    pub(crate) fn restore_orphan_stashes(repo_path: &str) -> mx::Result<usize> {
-        let mut repo = git2::Repository::open(repo_path).map_err(mx::ErrorKind::GitError)?;
-        let mut recovered = 0usize;
-
-        loop {
-            let mut top_is_ours = false;
-            repo.stash_foreach(|index, message, _oid| {
-                if index == 0 {
-                    top_is_ours = message.contains(STASH_MESSAGE);
-                }
-                false
-            })
-            .map_err(mx::ErrorKind::GitError)?;
-
-            if !top_is_ours {
-                return Ok(recovered);
-            }
-
-            if repo.stash_pop(0, None).is_err() {
-                repo.stash_drop(0).map_err(mx::ErrorKind::GitError)?;
-            }
-            recovered += 1;
-        }
-    }
-
-    /// Writes `content` as the repository's `flake.lock`, in one rewrite.
-    ///
-    /// The `UpdateInput::UseLock` payload path: no `nix` process is spawned, so
-    /// the revisions applied are exactly the ones the caller computed. The file
-    /// is created when it does not exist yet.
-    ///
-    /// # Arguments
-    /// * `content` – full lockfile text, written verbatim.
-    ///
-    /// # `flake.lock` immutability
-    /// Handled exactly as in [`run_flake_update`](Self::run_flake_update): the
-    /// flag is cleared before the write and restored after, but only if it was
-    /// set, and the write's own result is checked before the re-seal's so a
-    /// failure to re-seal never masks it. An absent lockfile has no flag to
-    /// clear and is left unsealed, like the one a bootstrap `nix flake update`
-    /// generates.
-    ///
-    /// # Post-conditions
-    /// `flake.lock` holds `content` byte for byte. Whether that amounts to a
-    /// change is left to [`flake_lock_modified`](Self::flake_lock_modified),
-    /// which the commit consults right after.
-    ///
-    /// # Errors
-    /// [`mx::ErrorKind::IOError`] if the file cannot be written,
-    /// [`mx::ErrorKind::InvalidFile`] if the lockfile path is not UTF-8.
-    fn write_flake_lock(&self, content: &str) -> mx::Result<()> {
-        let lock_path = self.flake_lock_path();
-        let lock_path = lock_path.to_str().ok_or(mx::ErrorKind::InvalidFile)?;
-
-        let existed = self.flake_lock_exists();
-        let was_immutable = if existed {
-            NixFile::is_immutable(lock_path)?
-        } else {
-            false
-        };
-        if existed {
-            NixFile::make_mutable(lock_path)?;
-        }
-
-        let result = fs::write(lock_path, content).map_err(|e| io_error_at(lock_path, e));
-        let resealed = if was_immutable {
-            NixFile::make_immutable(lock_path)
-        } else {
-            Ok(())
-        };
-        result?;
-        resealed
-    }
-
     /// Refreshes `flake.lock`, per `update_input`.
     ///
     /// Generates the lockfile from scratch with a plain `nix flake update` if
     /// it does not exist yet; otherwise runs `nix flake update [inputs…]`
-    /// (`UpdateInput::Keep` runs nothing). `UpdateInput::UseLock` short-circuits
-    /// all of that and writes the carried content through
-    /// [`write_flake_lock`](Self::write_flake_lock), whether the file exists or
-    /// not.
+    /// (`UpdateInput::Keep` runs nothing).
     ///
     /// # Arguments
     /// * `update_input` – how `flake.lock` is refreshed.
@@ -1153,11 +862,6 @@ impl<'a> Transaction<'a> {
     /// [`mx::ErrorKind::IOError`] if `nix` cannot be spawned or waited for,
     /// [`mx::ErrorKind::InvalidFile`] if the lockfile path is not UTF-8.
     fn run_flake_update(&self, update_input: UpdateInput) -> mx::Result<()> {
-        let update_input = match update_input {
-            UpdateInput::UseLock(content) => return self.write_flake_lock(&content),
-            other => other,
-        };
-
         if !self.flake_lock_exists() {
             process::Command::new("nix")
                 .args(["flake", "update"])
@@ -1174,7 +878,7 @@ impl<'a> Transaction<'a> {
                 args.extend(s);
                 args
             }
-            UpdateInput::Keep | UpdateInput::UseLock(_) => vec![],
+            UpdateInput::Keep => vec![],
         };
         if command.is_empty() {
             return Ok(());
@@ -1204,10 +908,10 @@ impl<'a> Transaction<'a> {
     /// Steps:
     /// 1. Commit each [`NixFile`] to disk.
     /// 2. Detect the actually modified files (selective `git add`).
-    /// 3. If at least one file changed, or [`force_commit`](Self::set_force_commit)
-    ///    is set: refresh `flake.lock` via [`run_flake_update`]; a forced
-    ///    refresh that touched no file only proceeds to the commit if that
-    ///    refresh actually moved `flake.lock`.
+    /// 3. If at least one file changed, or `update_input` is anything but
+    ///    `UpdateInput::Keep`: refresh `flake.lock` via [`run_flake_update`];
+    ///    a refresh that touched no file only proceeds to the commit if it
+    ///    actually moved `flake.lock`.
     /// 4. If a commit is warranted: create the Git commit, then enter the FIFO
     ///    build queue and, once at the head, run `nixos-rebuild`.
     /// 5. Close all [`NixFile`]s and release the Git repository.
@@ -1216,7 +920,7 @@ impl<'a> Transaction<'a> {
     /// * `update_input` – How `flake.lock` is refreshed before the commit.
     ///
     /// # Post-conditions
-    /// A commit is only created when a file genuinely changed (or a forced
+    /// A commit is only created when a file genuinely changed (or a requested
     /// refresh moved `flake.lock`), so an operation that changes nothing
     /// leaves no empty commit and runs no rebuild. The rebuild is serialised
     /// against the other processes' rebuilds, so the call can block well
@@ -1251,7 +955,8 @@ impl<'a> Transaction<'a> {
             }
         }
 
-        if need_modif || self.force_commit {
+        let refresh_lock = !matches!(update_input, UpdateInput::Keep);
+        if need_modif || refresh_lock {
             self.run_flake_update(update_input)?;
             if !need_modif {
                 need_modif = self.flake_lock_modified()?;
@@ -1261,12 +966,7 @@ impl<'a> Transaction<'a> {
         if need_modif {
             self.git_commit(Some("HEAD"), &self.git_user, &self.git_user, &self.info)?;
 
-            let skip = if self.skip_rebuild {
-                None
-            } else {
-                LockFile::try_lock(LOCK_SKIP_REBUILD_FILE)?
-            };
-            if let Some(mut sentinel) = skip {
+            if let Some(mut sentinel) = LockFile::try_lock(LOCK_SKIP_REBUILD_FILE)? {
                 sentinel.unlock();
 
                 let ticket = BuildQueue::enqueue()?;
@@ -1279,7 +979,6 @@ impl<'a> Transaction<'a> {
                     self.build_type.clone(),
                     Some(&mut stderr),
                     self.rebuild_cores,
-                    None,
                 )?;
                 if !success {
                     return Err(mx::ErrorKind::BuildError(stderr));

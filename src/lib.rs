@@ -84,13 +84,7 @@ pub mod install_package;
 pub mod user;
 
 #[cfg(feature = "system-update")]
-pub mod staging;
-
-#[cfg(feature = "system-update")]
 pub mod update;
-
-#[cfg(feature = "system-update")]
-pub mod reboot;
 
 #[cfg(feature = "hostname")]
 pub mod hostname;
@@ -117,29 +111,24 @@ pub const CONFIG_DIRECTORY: &str = concatcp!(env!("CARGO_MANIFEST_DIR"), "/test/
 /// [`DEFAULT_CACHE_DIRECTORY`].
 pub const LEGACY_CACHE_DIRECTORY_NAME: &str = ".cache";
 
-/// Default directory holding everything this crate generates or pre-builds:
-/// the module and package indexes, the update probe lockfile, the staged
-/// update and the build scratch areas.
+/// Default directory holding everything this crate generates or mounts out of
+/// the way: the module and package indexes, and the ESP probe mount points.
 ///
 /// `/var/cache/modulix-os` in release builds; in debug builds the crate's own
 /// `test/.cache` fixture, so a development run never touches the live system.
 ///
-/// **It must not sit inside a git repository, at any depth.** The staged
-/// update is built by pointing `nixos-rebuild --flake` at a `.git`-less copy
-/// of the configuration under this directory, and `nix` resolves a bare path
-/// by walking its *parents* looking for a git root: with the cache under
-/// [`CONFIG_DIRECTORY`] that walk reached the configuration repository, the
-/// copy was read as a `git+file://` flake restricted to tracked files, and
-/// every staged build failed with "is not tracked by Git". Outside any
-/// repository the same bare path is read as a `path:` flake, which is what
-/// [`staging`] and `update::build_with_lock` rely on.
+/// **It must not sit inside a git repository, at any depth.** `nix` resolves a
+/// bare path by walking its *parents* looking for a git root, so a flake
+/// directory placed under this one is read as a `git+file://` flake restricted
+/// to tracked files rather than as the `path:` flake it is. While the cache
+/// lived under [`CONFIG_DIRECTORY`] that walk reached the configuration
+/// repository, and nothing untracked written here was visible to `nix`.
 #[cfg(not(debug_assertions))]
 pub const DEFAULT_CACHE_DIRECTORY: &str = "/var/cache/modulix-os";
 #[cfg(debug_assertions)]
 pub const DEFAULT_CACHE_DIRECTORY: &str = concatcp!(env!("CARGO_MANIFEST_DIR"), "/test/.cache");
 
-/// Directory holding the generated indexes, the staged update and the build
-/// scratch areas.
+/// Directory holding the generated indexes and the ESP probe mount points.
 ///
 /// `$MX_CACHE_DIR` overrides the compiled-in default, which is fixed at build
 /// time - notably for a debug build driving a real system, where the
