@@ -284,14 +284,14 @@ impl NixFile {
     /// commits, so nothing on disk changes here.
     ///
     /// # Errors
-    /// [`mx::ErrorKind::PermissionDenied`] on a read-only file, and
-    /// [`mx::ErrorKind::TransactionNotBegin`] when the file is not open.
+    /// [`mx::ErrorKind::TransactionNotBegin`] when the file is not open, and
+    /// [`mx::ErrorKind::PermissionDenied`] on a read-only file.
     pub fn get_mut_file_content(&mut self) -> mx::Result<&mut String> {
-        if !self.writable {
-            return Err(mx::ErrorKind::PermissionDenied);
-        }
         if self.file.is_none() {
             return Err(mx::ErrorKind::TransactionNotBegin);
+        }
+        if !self.writable {
+            return Err(mx::ErrorKind::PermissionDenied);
         }
         Ok(&mut self.file_content)
     }
@@ -431,6 +431,7 @@ impl NixFile {
 
         self.file_content = String::new();
         self.file = None;
+        self.writable = false;
         Ok(())
     }
 
@@ -466,6 +467,7 @@ impl NixFile {
         }
         self.file_content = String::new();
         self.file = None;
+        self.writable = false;
         Ok(())
     }
 

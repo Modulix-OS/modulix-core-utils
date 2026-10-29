@@ -591,7 +591,7 @@ mod integration {
             &path,
             "desc",
             BuildCommand::Install,
-            TransactionPermission::ReadOnly,
+            TransactionPermission::Writtable,
         )
         .unwrap();
         t.add_file("new_module.nix").unwrap();
@@ -620,7 +620,7 @@ mod integration {
             &path,
             "desc",
             BuildCommand::Install,
-            TransactionPermission::ReadOnly,
+            TransactionPermission::Writtable,
         )
         .unwrap();
         t.add_file("new_module.nix").unwrap();

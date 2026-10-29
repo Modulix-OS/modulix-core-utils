@@ -453,7 +453,7 @@ mod no_regression {
         fs::write(format!("{}/f.nix", path), "data").unwrap();
 
         let mut f = NixFile::new(path, "/f.nix");
-        f.begin(NixFilePermission::ReadOnly).unwrap();
+        f.begin(NixFilePermission::Writtable).unwrap();
         f.commit().unwrap();
 
         assert!(matches!(
@@ -474,7 +474,7 @@ mod no_regression {
         fs::write(format!("{}/f.nix", path), &long).unwrap();
 
         let mut f = NixFile::new(path, "/f.nix");
-        f.begin(NixFilePermission::ReadOnly).unwrap();
+        f.begin(NixFilePermission::Writtable).unwrap();
         *f.get_mut_file_content().unwrap() = String::from("tiny");
         f.commit().unwrap();
 
