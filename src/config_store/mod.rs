@@ -123,19 +123,6 @@ impl ConfigStore {
         self.base_dir.join(relative_path).exists()
     }
 
-    /// Deletes a file from the store.
-    ///
-    /// # Parameters
-    /// * `relative_path` - file to delete, relative to the store root.
-    ///
-    /// # Errors
-    /// [`mx::ErrorKind::IOError`] when the file is missing or is a directory;
-    /// deleting an absent file is not silently accepted.
-    pub fn remove(&self, relative_path: impl AsRef<Path>) -> mx::Result<()> {
-        let path = self.base_dir.join(relative_path);
-        fs::remove_file(path).map_err(mx::ErrorKind::IOError)
-    }
-
     /// Root of the store, for callers that must hand an absolute path to an
     /// external tool.
     ///

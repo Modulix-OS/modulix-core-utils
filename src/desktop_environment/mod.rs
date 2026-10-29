@@ -34,6 +34,7 @@ trait DesktopEnvironment: fmt::Display {
     /// # Post-conditions
     /// The home is left untouched; settings that are absent are skipped rather
     /// than reported.
+    #[allow(dead_code)]
     fn save(&self, user: &User) -> mx::Result<()>;
 
     /// Removes this environment's settings from the user's home.
@@ -44,6 +45,7 @@ trait DesktopEnvironment: fmt::Display {
     /// # Post-conditions
     /// Unsaved settings are lost: call [`DesktopEnvironment::save`] first, or
     /// use [`DesktopEnvironment::save_and_clean`].
+    #[allow(dead_code)]
     fn clean(&self, user: &User) -> mx::Result<()>;
 
     /// Saves the settings, then removes them from the user's home.

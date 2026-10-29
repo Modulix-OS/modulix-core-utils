@@ -129,23 +129,3 @@ impl User {
         &self.home_path
     }
 }
-
-/// Runs `f` once per account of the machine.
-///
-/// # Parameters
-/// * `f` - action applied to each user, in the order
-///   [`User::list_all_real_user`] returns them.
-///
-/// # Post-conditions
-/// Stops at the first error and propagates it, so `f` may already have run -
-/// and had its effect - on the earlier users.
-///
-/// # Errors
-/// Any error from [`User::list_all_real_user`] or from `f`.
-pub fn for_all_users(f: impl Fn(&User) -> mx::Result<()>) -> mx::Result<()> {
-    let users = User::list_all_real_user()?;
-    for user in users {
-        f(&user)?;
-    }
-    Ok(())
-}

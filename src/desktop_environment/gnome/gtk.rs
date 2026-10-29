@@ -77,35 +77,3 @@ pub fn clean(user: &User) -> mx::Result<()> {
     }
     Ok(())
 }
-
-/// Moves everything under the user's `.config/gnome` to another directory,
-/// keeping the tree structure.
-///
-/// # Parameters
-/// * `user` - whose `.config/gnome` is emptied.
-/// * `dest` - directory the files are moved into; missing parents are created.
-///
-/// # Post-conditions
-/// A no-op when `.config/gnome` does not exist. Files are renamed, not copied,
-/// so the move fails if `dest` sits on another filesystem. The now-empty
-/// directories are left behind.
-///
-/// # Errors
-/// [`mx::ErrorKind::IOError`] if a directory cannot be created or a file cannot
-/// be renamed. Entries the walk cannot read are skipped silently.
-pub fn move_to(user: &User, dest: &Path) -> mx::Result<()> {
-    let config_dir = Path::new(user.get_user_home()).join(".config");
-    let prefix = config_dir.join("gnome");
-    if !prefix.exists() {
-        return Ok(());
-    }
-    for entry in walkdir::WalkDir::new(&prefix).into_iter().flatten() {
-        if entry.file_type().is_file() {
-            let rel = entry.path().strip_prefix(&prefix).unwrap();
-            let dest = dest.join(rel);
-            fs::create_dir_all(dest.parent().unwrap()).map_err(mx::ErrorKind::IOError)?;
-            fs::rename(entry.path(), dest).map_err(mx::ErrorKind::IOError)?;
-        }
-    }
-    Ok(())
-}
