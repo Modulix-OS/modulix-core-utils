@@ -21,6 +21,9 @@ pub mod package_index;
 #[cfg(feature = "boot-config")]
 pub mod boot_config;
 
+#[cfg(feature = "secure-boot")]
+pub mod secure_boot;
+
 #[cfg(feature = "config-store")]
 mod config_store;
 

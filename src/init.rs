@@ -35,7 +35,7 @@ use crate::detect_os::OtherOs;
 use crate::error::io_message;
 use crate::{
     CONFIG_DIRECTORY, boot_config, detect_os, filesystem, hardware_config, install_module,
-    install_package, locale, mx, user,
+    install_package, locale, mx, secure_boot, user,
 };
 use std::path::{Component, Path};
 use std::{fs, process};
@@ -412,6 +412,8 @@ impl Desktop {
 /// * `luks` - the LUKS containers of the target, root first.
 /// * `resume_device` - swap device hibernation resumes from, when the target
 ///   is set up for hibernation.
+/// * `secure_boot` - whether to enable Secure Boot when the firmware allows
+///   it.
 /// * `config_dir` - overrides where the config repo is written (see
 ///   `resolve_config_path`).
 /// * `debug` - debug/test mode: the seed commit runs `nixos-rebuild build-vm`
@@ -449,6 +451,13 @@ pub struct InitParams {
     /// to find its image: with a systemd initrd NixOS only passes `resume=`
     /// when this option is set.
     pub resume_device: Option<String>,
+    /// Whether to enable Secure Boot when the firmware allows it. Enabling
+    /// is still conditional on the firmware being in Setup Mode, which
+    /// [`init`] probes itself through
+    /// [`crate::secure_boot::firmware_state`] - keys cannot be enrolled in
+    /// any other state, and nixpkgs' limine installer ignores the failure.
+    /// This flag only lets a caller opt out entirely.
+    pub secure_boot: bool,
     /// Overrides where the config repo is written (see `resolve_config_path`).
     pub config_dir: Option<String>,
     /// Debug/test mode: the seed commit runs `nixos-rebuild build-vm` instead
@@ -501,16 +510,18 @@ fn config_path(params: &InitParams) -> String {
 /// buffer with this template, which would drop the injection. [`init`] always
 /// creates `hardware.nix`, `locale.nix` and `users.nix`, so listing them is
 /// exact; it creates `package.nix` and `module.nix` only for a non-empty
-/// `packages`/`modules`, and `boot.nix` only when another operating system was
-/// detected, which is exactly when they are listed here.
+/// `packages`/`modules`, and `boot.nix` only when there is something to put in
+/// it — another operating system was detected, or Secure Boot is being enabled
+/// — which is exactly when they are listed here.
 ///
 /// # Parameters
 /// * `p` - init parameters; `hostname` and `desktop` are interpolated into
 ///   the template, and `packages`/`modules` decide two of the optional
 ///   imports.
-/// * `with_boot_entries` - whether the detection found another operating
-///   system, i.e. whether `boot.nix` is written at all. Passed in rather than
-///   read off `p`, since the detection is not an init parameter.
+/// * `with_boot_file` - whether `boot.nix` is written at all, i.e. whether the
+///   detection found another operating system or Secure Boot is being
+///   enabled. Passed in rather than read off `p`, since neither the detection
+///   nor the firmware state is an init parameter.
 ///
 /// # Returns
 /// The full `configuration.nix` source, importing
@@ -518,7 +529,7 @@ fn config_path(params: &InitParams) -> String {
 /// `users.nix` and — when there is something to put in them — `package.nix`,
 /// `module.nix` and `boot.nix`, and setting `networking.hostName` and
 /// `mx.desktop`.
-fn configuration_nix(p: &InitParams, with_boot_entries: bool) -> String {
+fn configuration_nix(p: &InitParams, with_boot_file: bool) -> String {
     let mut extra = String::new();
     if !p.packages.is_empty() {
         extra.push_str("    ./");
@@ -530,7 +541,7 @@ fn configuration_nix(p: &InitParams, with_boot_entries: bool) -> String {
         extra.push_str(install_module::FILE_MODULE_PATH);
         extra.push('\n');
     }
-    if with_boot_entries {
+    if with_boot_file {
         extra.push_str("    ./");
         extra.push_str(boot_config::FILE_BOOT_PATH);
         extra.push('\n');
@@ -834,8 +845,11 @@ fn write_fstab_extras(fstab: &mut NixFile, params: &InitParams) -> mx::Result<()
 ///    one operation per `params.modules` entry into `module.nix` via
 ///    `install_module::install_no_transaction`, the detected systems into
 ///    `boot_config::FILE_BOOT_PATH` via
-///    `boot_config::write_boot_entries_no_transaction`, and the LUKS /
-///    hibernation facts into `fstab.nix` via `write_fstab_extras` — queued
+///    `boot_config::write_boot_entries_no_transaction`, the Secure Boot
+///    option into that same file via
+///    `secure_boot::set_secure_boot_no_transaction` — a second operation on
+///    `boot.nix`, since each writer resets only its own option — and the LUKS
+///    / hibernation facts into `fstab.nix` via `write_fstab_extras` — queued
 ///    after that file's content write, since that one replaces the whole
 ///    buffer. A LUKS entry the generator already declared is not re-declared:
 ///    a second definition of the same option would make the NixOS module
@@ -903,7 +917,8 @@ fn write_fstab_extras(fstab: &mut NixFile, params: &InitParams) -> mx::Result<()
 ///   `locale::set_keyboard_no_transaction`, `user::add_no_transaction`,
 ///   `install_package::install_no_transaction`,
 ///   `install_module::install_no_transaction`,
-///   `boot_config::write_boot_entries_no_transaction`, `write_fstab_extras`,
+///   `boot_config::write_boot_entries_no_transaction`,
+///   `secure_boot::set_secure_boot_no_transaction`, `write_fstab_extras`,
 ///   `NixFile::get_mut_file_content`, or
 ///   `core::transaction::make_group_transaction`.
 pub fn init(params: &InitParams) -> mx::Result<()> {
@@ -912,6 +927,16 @@ pub fn init(params: &InitParams) -> mx::Result<()> {
     // untouched rather than wipe it first.
     let hardware = HardwareTopology::detect()?;
     let other_os = detect_other_os(params);
+
+    // Keys can only be enrolled while the firmware has no Platform Key, and
+    // the limine installer ignores a failed enrollment, so a firmware that is
+    // not in Setup Mode - or whose state could not be read at all - means the
+    // option is not declared rather than declared and silently ineffective.
+    let secure_boot = params.secure_boot
+        && matches!(
+            secure_boot::firmware_state(),
+            Ok(secure_boot::FirmwareState::SetupMode)
+        );
 
     let path_config = config_path(params);
     validate_config_path(&path_config)?;
@@ -928,7 +953,7 @@ pub fn init(params: &InitParams) -> mx::Result<()> {
     init_git_exclude(repo_path)?;
 
     let fstab = filesystem::fstab_module(&params.root)?;
-    let config = configuration_nix(params, !other_os.is_empty());
+    let config = configuration_nix(params, !other_os.is_empty() || secure_boot);
 
     let build_command = if params.debug {
         BuildCommand::BuildVm
@@ -1026,6 +1051,17 @@ pub fn init(params: &InitParams) -> mx::Result<()> {
         ));
     }
 
+    // A second operation on the same file rather than one combined writer:
+    // the two options are independent, each writer resets only its own, and
+    // `make_group_transaction` lets a later operation see the earlier edits.
+    if secure_boot {
+        ops.push(TransactionOp::new(
+            "enable secure boot",
+            secure_boot::FILE_SECURE_BOOT_PATH,
+            |file| secure_boot::set_secure_boot_no_transaction(file, true),
+        ));
+    }
+
     make_group_transaction(&path_config, build_command, UpdateInput::UpdateAll, ops)?;
 
     seal_base_files(&path_config)?;
@@ -1035,7 +1071,10 @@ pub fn init(params: &InitParams) -> mx::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BASE_FILES, Desktop, InitParams, boot_config, configuration_nix, hardware_config};
+    use super::{
+        BASE_FILES, Desktop, InitParams, boot_config, configuration_nix, hardware_config,
+        secure_boot,
+    };
 
     /// `InitParams` with every optional list empty, as a starting point the
     /// tests below only change one field of.
@@ -1055,6 +1094,7 @@ mod tests {
             modules: Vec::new(),
             luks: Vec::new(),
             resume_device: None,
+            secure_boot: false,
             config_dir: None,
             debug: true,
         }
@@ -1087,8 +1127,9 @@ mod tests {
         assert!(BASE_FILES.contains(&hardware_config::HARDWARE_OPTION_PATH));
     }
 
-    /// `boot.nix` only exists when the scan found another system, so its
-    /// import must follow the detection and not the parameters.
+    /// `boot.nix` only exists when there is something to put in it, so its
+    /// import must follow the detection and the firmware state, not the
+    /// parameters.
     #[test]
     fn a_detected_system_adds_the_boot_import() {
         let import = format!("./{}", boot_config::FILE_BOOT_PATH);
@@ -1106,6 +1147,18 @@ mod tests {
     #[test]
     fn the_boot_entries_file_is_sealed() {
         assert!(BASE_FILES.contains(&boot_config::FILE_BOOT_PATH));
+    }
+
+    /// Secure Boot is the second reason `boot.nix` exists. It must write into
+    /// the same file the entries do, or the configuration would need a second
+    /// import, and that file must be sealed like every other imported one.
+    #[test]
+    fn the_secure_boot_option_shares_the_sealed_boot_file() {
+        assert_eq!(
+            secure_boot::FILE_SECURE_BOOT_PATH,
+            boot_config::FILE_BOOT_PATH
+        );
+        assert!(BASE_FILES.contains(&secure_boot::FILE_SECURE_BOOT_PATH));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "modulix-core-utils"
-version = "1.1.1"
+version = "1.1.2"
 edition = "2024"
 
 [features]
@@ -40,6 +40,7 @@ init = [
     "filesystem",
     "hardware-config",
     "locale",
+    "secure-boot",
     "user",
     "install-package-file",
     "install-module-file",
@@ -73,6 +74,7 @@ install-package = [
     "dep:tokio",
     "core-app-info-trait",
 ]
+secure-boot = ["core-nix-file"]
 user = ["core-nix-file"]
 system-update = [
     "core-nix-file",

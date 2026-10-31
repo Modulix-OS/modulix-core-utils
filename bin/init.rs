@@ -66,6 +66,9 @@
 //! - `--resume-device <PATH>`: absolute path of the swap device hibernation resumes from,
 //!   written as `boot.resumeDevice` (default: none, hibernation cannot find its image). Use
 //!   `/dev/mapper/<NAME>` when the swap lives in a LUKS container.
+//! - `--no-secure-boot`: never enable Secure Boot. Without it, `init` enables it whenever the
+//!   firmware is in Setup Mode, which is the only state in which keys can be enrolled; the
+//!   flag is the way to decline that on a machine that happens to be in it.
 //! - `--config-dir <PATH>`: writes the config repo here instead of the default location
 //!   (`<root>/etc/modulix-os/` in release builds); unlike every other flag, omitting its value
 //!   is a hard error (prints usage, exits with status `1`) rather than falling back to a
@@ -131,6 +134,7 @@ fn print_usage(program: &str) {
     --luks-swap-container <PATH>\tThat container's /dev/disk/by-uuid/<uuid> device
     --luks-swap-tpm2\tAs --luks-tpm2, for the swap container; requires --luks-swap-name
     --resume-device <PATH>\tSwap device to resume hibernation from (boot.resumeDevice)
+    --no-secure-boot\tNever enable Secure Boot, even if the firmware is in Setup Mode
     --config-dir <PATH>\tWrite the config repo here instead of the default location
     --debug\t\tSeed with `nixos-rebuild build-vm` instead of installing/switching"
     );
@@ -169,8 +173,9 @@ fn take_value(args: &[String], i: &mut usize, flag: &str) -> Result<String, Stri
 /// `--root`, `--hostname`, `--username`, `--fullname`, `--desktop`, `--locale`, `--timezone`,
 /// `--kb-layout`, `--kb-variant`, `--console-keymap`, `--package`, `--module`, `--luks-name`,
 /// `--luks-tpm2`, `--luks-swap-name`, `--luks-swap-container`, `--luks-swap-tpm2`,
-/// `--resume-device`, `--config-dir`, `--debug`, `--help`/`-h` (see the crate-level docs for each
-/// flag's effect and default). `--desktop` is additionally validated via `Desktop::parse`.
+/// `--resume-device`, `--no-secure-boot`, `--config-dir`, `--debug`, `--help`/`-h` (see the
+/// crate-level docs for each flag's effect and default). `--desktop` is additionally validated
+/// via `Desktop::parse`.
 /// `--package` and `--module` are repeatable and accumulate in argument order.
 ///
 /// # Returns
@@ -205,6 +210,7 @@ fn parse_args() -> InitParams {
     let mut luks_swap_tpm2 = false;
     let mut resume_device: Option<String> = None;
     let mut config_dir: Option<String> = None;
+    let mut secure_boot = true;
     let mut debug = false;
 
     let mut i = 1;
@@ -242,6 +248,9 @@ fn parse_args() -> InitParams {
                 luks_swap_tpm2 = true;
             }
             "--resume-device" => resume_device = Some(value!()),
+            "--no-secure-boot" => {
+                secure_boot = false;
+            }
             "--config-dir" => config_dir = Some(value!()),
             "--debug" => {
                 debug = true;
@@ -356,6 +365,7 @@ fn parse_args() -> InitParams {
         modules,
         luks,
         resume_device,
+        secure_boot,
         config_dir,
         debug,
     }
